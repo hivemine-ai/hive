@@ -1,11 +1,16 @@
 // Issuer — emits Ed25519-signed JWTs and persists their metadata.
 // Per the Auth + Identity tech spec:
-//   - Pre-conditions: participant exists (else PARTICIPANT_NOT_FOUND_FOR_ISSUE) and
-//     is active (else PARTICIPANT_NOT_ACTIVE).
+//   - Pre-conditions enforced before signing:
+//       1. participant exists in `hivekeepers` or `agents` (else
+//          PARTICIPANT_NOT_FOUND_FOR_ISSUE).
+//       2. participant.state === 'active' (else PARTICIPANT_NOT_ACTIVE{state}).
+//          'suspended' Agents are explicitly NOT issuable, mirroring the verifier's
+//          step 7 — issuing for a suspended participant would let them work around
+//          the suspension by rotating their token.
 //   - jti generated via uuid v7 (sortable, leak only the issuance ms — accepted in v0.1).
 //   - The compact JWT itself is NEVER persisted; only metadata + the payload snapshot are
 //     stored in `credentials.snapshot` (jsonb in PG, text in SQLite, validated <16 KB).
-//   - TTL default in seconds is provided by the caller; the Hive default
+//   - TTL default in milliseconds is provided by the caller; the Hive default
 //     (HIVE_AUTH_CREDENTIAL_DEFAULT_TTL_DAYS) is materialized at the composition root.
 
 import * as jose from 'jose';

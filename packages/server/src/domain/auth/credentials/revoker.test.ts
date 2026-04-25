@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { v7 as uuidv7 } from 'uuid';
 
 import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
 import type { AuthError } from '../errors.js';
@@ -49,6 +50,19 @@ describe('revoker', () => {
       expect.fail('expected throw');
     } catch (err) {
       expect((err as AuthError).code).toBe('CREDENTIAL_REVOKED');
+    }
+  });
+
+  it('throws INVALID_STATE_TRANSITION{credential_not_found} when the jti never existed', async () => {
+    const blocklist = await loadBlocklist(world.db);
+    const revoker = createRevoker({ blocklist, db: world.db });
+    try {
+      await revoker.revokeCredential({ jti: uuidv7() });
+      expect.fail('expected throw');
+    } catch (err) {
+      const e = err as AuthError;
+      expect(e.code).toBe('INVALID_STATE_TRANSITION');
+      expect(e.subCode).toBe('credential_not_found');
     }
   });
 

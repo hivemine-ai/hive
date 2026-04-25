@@ -36,7 +36,10 @@ export function createRevoker(deps: RevokerDeps): Revoker {
         .where('jti', '=', input.jti)
         .executeTakeFirst();
       if (!credRow) {
-        throw new AuthError('CREDENTIAL_INAUTHENTIC', {
+        // The operator asked to revoke a jti that never existed. Categorize as an
+        // invalid state transition (not as INAUTHENTIC, which is reserved for tokens
+        // that fail signature/iss/aud verification at the verifier).
+        throw new AuthError('INVALID_STATE_TRANSITION', {
           subCode: 'credential_not_found',
         });
       }

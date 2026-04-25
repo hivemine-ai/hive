@@ -125,8 +125,8 @@ describe('participants write repository', () => {
     it('rejects capabilities that exceed the cap (64 elements × 128 chars)', async () => {
       const repo = createParticipantsWriteRepo(world.db);
       const tooMany = Array.from({ length: 65 }, (_, i) => `cap-${i}`);
-      await expect(
-        repo.createAgent(
+      try {
+        await repo.createAgent(
           {
             hiveId: world.hiveId,
             colonyId: world.colonyId,
@@ -136,8 +136,34 @@ describe('participants write repository', () => {
             capabilities: tooMany,
           },
           SYSTEM_CALLER,
-        ),
-      ).rejects.toThrow();
+        );
+        expect.fail('expected throw');
+      } catch (err) {
+        expect((err as AuthError).code).toBe('INVALID_STATE_TRANSITION');
+        expect((err as AuthError).subCode).toBe('capabilities_too_many');
+      }
+    });
+
+    it('rejects a single capability longer than 128 characters', async () => {
+      const repo = createParticipantsWriteRepo(world.db);
+      const oversized = 'x'.repeat(129);
+      try {
+        await repo.createAgent(
+          {
+            hiveId: world.hiveId,
+            colonyId: world.colonyId,
+            ownerId: world.adminHivekeeperId,
+            name: 'long-cap',
+            type: 'worker',
+            capabilities: [oversized],
+          },
+          SYSTEM_CALLER,
+        );
+        expect.fail('expected throw');
+      } catch (err) {
+        expect((err as AuthError).code).toBe('INVALID_STATE_TRANSITION');
+        expect((err as AuthError).subCode).toBe('capability_too_long');
+      }
     });
   });
 
