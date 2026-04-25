@@ -10,8 +10,9 @@ Hive is a self-hostable Model Context Protocol (MCP) server that gives teams of 
 
 - **Runtime:** Node.js 20 LTS (see `.nvmrc`)
 - **Language:** TypeScript (strict)
-- **Database:** PostgreSQL 16+
-- **Containerization:** Docker + Docker Compose (deployment of reference)
+- **Database:** **SQLite (default, via CLI — zero infra)** or PostgreSQL 16+ (opt-in, for Docker / production deploys)
+- **Persistence layer:** [Kysely](https://kysely.dev) (type-safe SQL, multi-dialect) + `better-sqlite3` (default) or `pg` (opt-in)
+- **Containerization:** Docker + Docker Compose, _optional_ — only needed for Postgres-backed deploys
 - **Package manager:** pnpm 10 (see `packageManager` field)
 
 ## Repository layout
@@ -40,6 +41,13 @@ pnpm install
 pnpm typecheck
 pnpm lint
 ```
+
+### Planned deploy paths (v0.1.0)
+
+- **Local / OSS default:** `pnpm install -g @hive/cli` + `hivectl init` → SQLite at `./var/db/hive.sqlite`. No Docker, no infra.
+- **Production (opt-in):** `docker compose up` with `COMPOSE_PROFILES=postgres` → Postgres-backed deployment.
+
+PostgreSQL support ships in v0.1.0 (the persistence layer is multi-dialect from day one), but is officially validated in CI starting v0.1.1.
 
 ## Contributing
 
