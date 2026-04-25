@@ -1,3 +1,25 @@
-# Docs
+# Hive — Documentation
 
-Public documentation for Hive (extended README, install guides, operator handbook). Populated incrementally as features land.
+User-facing documentation for Hive operators and contributors. For project context, the tech stack, and contributing, see the [root README](../README.md).
+
+This directory grows incrementally as PRYs close. Each component gets one user-facing page that focuses on **how to use it from the CLI** (and, in the future, the web UI), not on internal architecture — internals live in the vault tech specs.
+
+## Components
+
+- **[Auth + Identity](auth.md)** — JWT-based authentication, Ed25519 signing keys, `hivectl init` bootstrap, credential lifecycle (issue / rotate / revoke), and the canonical error codes.
+
+## Operator guides
+
+(Coming in [PRY-008 — Deployment](https://github.com/hivemine-ai/hive-vault) — install paths, backups, monitoring, upgrades.)
+
+## API reference
+
+(Coming as the MCP tool surface lands in [PRY-006](https://github.com/hivemine-ai/hive-vault) — schemas for each `tools/call` operation.)
+
+## Architecture & decisions
+
+Architecture decisions live in the vault, not in this repo:
+
+- ADRs: <https://github.com/hivemine-ai/hive-vault> · `02 - Arquitectura/ADRs/`
+- Tech specs: same vault · `02 - Arquitectura/Specs Técnicas/`
+- Product specs: `03 - Productos/`
