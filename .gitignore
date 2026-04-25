@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Env / secrets — never commit
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+var/
+var/keys/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+
+# Cache
+.cache/
+.eslintcache
+.stylelintcache
+
+# Misc
+.husky/_/

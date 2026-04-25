@@ -1,0 +1,48 @@
+{
+  "name": "hive",
+  "version": "0.1.0-dev",
+  "private": true,
+  "type": "module",
+  "description": "Hive — open-source MCP server for collaborative AI agents.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/hivemine-ai/hive",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hivemine-ai/hive.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hivemine-ai/hive/issues"
+  },
+  "engines": {
+    "node": ">=20.18.0 <21 || >=22"
+  },
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm -r test",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/node": "^20.17.0",
+    "eslint": "^9.18.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.4.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.21.0"
+  },
+  "lint-staged": {
+    "packages/*/src/**/*.{ts,tsx}": [
+      "prettier --write",
+      "eslint --fix"
+    ],
+    "*.{json,md,yml,yaml,js,mjs,cjs}": [
+      "prettier --write"
+    ]
+  }
+}
