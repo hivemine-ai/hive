@@ -1,28 +1,22 @@
-import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import type { Kysely, Migration, MigrationProvider, MigrationResultSet } from 'kysely';
+import { Migrator } from 'kysely';
 
-import type { Kysely, MigrationProvider, MigrationResultSet } from 'kysely';
-import { FileMigrationProvider, Migrator } from 'kysely';
-import * as fs from 'node:fs/promises';
-
+import { ALL_MIGRATIONS } from './migrations/index.js';
 import type { Database } from './schema.js';
 
 export interface MigrateOptions {
-  // Override the migrations directory. Defaults to ./migrations relative to this file.
-  migrationsDir?: string;
-}
-
-function defaultMigrationsDir(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  return path.join(here, 'migrations');
+  // Override the migrations map. Defaults to the static catalog ALL_MIGRATIONS.
+  // Tests can supply a subset to validate ordering / partial migration scenarios.
+  migrations?: Record<string, Migration>;
 }
 
 function buildMigrator(db: Kysely<Database>, opts: MigrateOptions = {}): Migrator {
-  const provider: MigrationProvider = new FileMigrationProvider({
-    fs,
-    path,
-    migrationFolder: opts.migrationsDir ?? defaultMigrationsDir(),
-  });
+  const migrations = opts.migrations ?? ALL_MIGRATIONS;
+  const provider: MigrationProvider = {
+    getMigrations(): Promise<Record<string, Migration>> {
+      return Promise.resolve(migrations);
+    },
+  };
   return new Migrator({ db, provider });
 }
 
