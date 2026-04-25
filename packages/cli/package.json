@@ -7,10 +7,22 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "hivectl": "./dist/main.js"
+  },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@hive/server": "workspace:*",
+    "@hive/shared": "workspace:*",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
   }
 }

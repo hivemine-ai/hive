@@ -33,6 +33,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Build first so workspace consumers (e.g. `@hive/cli` importing `@hive/server`)
+      # find the published `dist/` types and runtime entry points. `tsc -b` walks project
+      # references in dependency order.
+      - name: Build
+        run: pnpm -r build
+
       - name: Typecheck
         run: pnpm -r typecheck
 
