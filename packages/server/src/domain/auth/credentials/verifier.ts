@@ -22,7 +22,7 @@
 
 import * as jose from 'jose';
 
-import type { Logger } from '../../../observability/logger.js';
+import type { Logger } from '#observability/logger.js';
 import { AuthError } from '../errors.js';
 import type { SigningKey } from '../keys/keypair-store.js';
 import type { Participant } from '../participants/entities.js';

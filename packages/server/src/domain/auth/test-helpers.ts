@@ -5,10 +5,10 @@
 import type { Kysely } from 'kysely';
 import { v7 as uuidv7 } from 'uuid';
 
-import { createDb } from '../../persistence/db.js';
-import { dateToIso, jsonStringify } from '../../persistence/type-mappers.js';
-import { migrateToLatest } from '../../persistence/migrate.js';
-import type { Database } from '../../persistence/schema.js';
+import { createDb } from '#persistence/db.js';
+import { dateToIso, jsonStringify } from '#persistence/type-mappers.js';
+import { migrateToLatest } from '#persistence/migrate.js';
+import type { Database } from '#persistence/schema.js';
 
 import { generateKeypair } from './keys/keypair-store.js';
 import type { SigningKey } from './keys/keypair-store.js';

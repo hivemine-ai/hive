@@ -4,14 +4,14 @@
 
 import { sql, type Kysely, type Selectable } from 'kysely';
 
-import { intToBool, isoToDate, jsonParse } from '../../../persistence/type-mappers.js';
+import { intToBool, isoToDate, jsonParse } from '#persistence/type-mappers.js';
 import type {
   AgentsTable,
   Database,
   HivekeepersTable,
   HivesTable,
   ColoniesTable,
-} from '../../../persistence/schema.js';
+} from '#persistence/schema.js';
 import type { UUIDv7 } from '../types.js';
 
 import type {

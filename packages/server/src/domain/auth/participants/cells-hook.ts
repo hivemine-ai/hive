@@ -7,7 +7,7 @@
 
 import type { Kysely, Transaction } from 'kysely';
 
-import type { Database, UUIDv7 } from '../../../persistence/schema.js';
+import type { Database, UUIDv7 } from '#persistence/schema.js';
 
 export type DbExecutor = Kysely<Database> | Transaction<Database>;
 
