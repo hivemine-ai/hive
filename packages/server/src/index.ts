@@ -39,3 +39,9 @@ export type { MigrateOptions } from './persistence/migrate.js';
 
 export { createLogger } from './observability/logger.js';
 export type { Logger, LoggerOptions } from './observability/logger.js';
+
+// Auth domain — entire public surface re-exported for downstream packages.
+export * from './domain/auth/index.js';
+
+// uuid v7 — re-exported so downstream packages don't need to add `uuid` as a direct dep.
+export { v7 as uuidv7 } from 'uuid';
