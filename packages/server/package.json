@@ -7,6 +7,11 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "imports": {
+    "#persistence/*": "./dist/persistence/*",
+    "#domain/*": "./dist/domain/*",
+    "#observability/*": "./dist/observability/*"
+  },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",

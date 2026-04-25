@@ -26,6 +26,16 @@ The package barrel (`./src/index.ts`) exports:
 
 See [`docs/auth.md`](../../docs/auth.md) for the auth subsystem from a user's point of view (what JWTs look like, error codes, env vars).
 
+## Internal layout
+
+Cross-module imports inside this package use the Node `imports` field aliases declared in [`package.json`](./package.json):
+
+- `#persistence/*` → `./dist/persistence/*`
+- `#domain/*` → `./dist/domain/*`
+- `#observability/*` → `./dist/observability/*`
+
+Relative cross-module specifiers (`../../foo`) are blocked by ESLint (`no-restricted-imports`); use the alias instead. See ADR-009 in the vault for rationale.
+
 ## License
 
 Apache-2.0. See [NOTICE](../../NOTICE).

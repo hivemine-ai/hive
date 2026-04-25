@@ -3,8 +3,8 @@
 
 import type { Kysely } from 'kysely';
 
-import type { Database } from '../../../persistence/schema.js';
-import { dateToIso } from '../../../persistence/type-mappers.js';
+import type { Database } from '#persistence/schema.js';
+import { dateToIso } from '#persistence/type-mappers.js';
 import { AuthError } from '../errors.js';
 import type { UUIDv7 } from '../types.js';
 

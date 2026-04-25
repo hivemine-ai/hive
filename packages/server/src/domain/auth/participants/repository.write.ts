@@ -13,8 +13,8 @@ import {
   intToBool,
   jsonParse,
   jsonStringify,
-} from '../../../persistence/type-mappers.js';
-import type { AgentsTable, Database, HivekeepersTable } from '../../../persistence/schema.js';
+} from '#persistence/type-mappers.js';
+import type { AgentsTable, Database, HivekeepersTable } from '#persistence/schema.js';
 import { requireAdminCaller, type CallerContext } from '../caller-context.js';
 import { AuthError } from '../errors.js';
 import type { ParticipantState, UUIDv7 } from '../types.js';

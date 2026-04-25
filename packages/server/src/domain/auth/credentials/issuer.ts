@@ -17,8 +17,8 @@ import * as jose from 'jose';
 import type { Kysely } from 'kysely';
 import { v7 as uuidv7 } from 'uuid';
 
-import type { Database, JsonText } from '../../../persistence/schema.js';
-import { dateToIso, jsonStringify, validateJsonText } from '../../../persistence/type-mappers.js';
+import type { Database, JsonText } from '#persistence/schema.js';
+import { dateToIso, jsonStringify, validateJsonText } from '#persistence/type-mappers.js';
 import { AuthError } from '../errors.js';
 import type { SigningKey } from '../keys/keypair-store.js';
 import type { ParticipantsReadRepo } from '../participants/repository.js';

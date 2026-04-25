@@ -9,8 +9,8 @@
 
 import type { Kysely } from 'kysely';
 
-import { dateToIso } from '../../../persistence/type-mappers.js';
-import type { Database } from '../../../persistence/schema.js';
+import { dateToIso } from '#persistence/type-mappers.js';
+import type { Database } from '#persistence/schema.js';
 import type { UUIDv7 } from '../types.js';
 
 export interface AddRevocationInput {

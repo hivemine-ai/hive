@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { v7 as uuidv7 } from 'uuid';
 
 import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
-import { dateToIso } from '../../../persistence/type-mappers.js';
+import { dateToIso } from '#persistence/type-mappers.js';
 import { loadBlocklist } from './blocklist.js';
 
 describe('blocklist', () => {

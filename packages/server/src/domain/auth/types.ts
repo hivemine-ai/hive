@@ -2,7 +2,7 @@
 // Per the tech spec: tech specs hermanas (Cell Store, Visibility, Waggle, MCP, hivectl)
 // import these from here — they do NOT redefine UUIDv7 or invent their own brandings.
 
-import type { UUIDv7 } from '../../persistence/schema.js';
+import type { UUIDv7 } from '#persistence/schema.js';
 
 export type { UUIDv7 };
 
