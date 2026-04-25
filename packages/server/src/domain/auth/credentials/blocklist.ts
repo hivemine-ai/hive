@@ -37,6 +37,13 @@ export interface Blocklist {
    */
   purgeExpired(now?: Date): Promise<number>;
 
+  /**
+   * Records a jti as revoked in the in-memory Set without writing to DB. Used by the rotator
+   * and revoker after they have already INSERTed the row inside their own transactions.
+   * Idempotent.
+   */
+  recordAdded(jti: UUIDv7): void;
+
   /** Test helper: returns the current in-memory Set size. */
   size(): number;
 }
@@ -80,6 +87,9 @@ export async function loadBlocklist(
         .where('credential_expires_at', '<=', dateToIso(at))
         .executeTakeFirst();
       return Number(result.numDeletedRows ?? 0n);
+    },
+    recordAdded(jti: UUIDv7): void {
+      set.add(jti);
     },
     size(): number {
       return set.size;

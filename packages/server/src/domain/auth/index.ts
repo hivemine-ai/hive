@@ -51,3 +51,30 @@ export type { Verifier, VerifierDeps } from './credentials/verifier.js';
 
 export { createIssuer } from './credentials/issuer.js';
 export type { Issuer, IssuerDeps, IssueCredentialInput } from './credentials/issuer.js';
+
+export { createRotator } from './credentials/rotator.js';
+export type { Rotator, RotatorDeps, RotateCredentialInput } from './credentials/rotator.js';
+
+export { createRevoker } from './credentials/revoker.js';
+export type { Revoker, RevokerDeps, RevokeCredentialInput } from './credentials/revoker.js';
+
+export { createParticipantsWriteRepo } from './participants/repository.write.js';
+export type {
+  AuditCursor,
+  CreateAgentInput,
+  CreateHivekeeperInput,
+  ListAgentsFilter,
+  ListAgentsResult,
+  ListHivekeepersFilter,
+  ListHivekeepersResult,
+  ParticipantsWriteRepo,
+  ParticipantsWriteRepoOptions,
+} from './participants/repository.write.js';
+
+export { noopCellsHook } from './participants/cells-hook.js';
+export type {
+  CellsRepoHook,
+  CloseCellHookInput,
+  CreateCellHookInput,
+  DbExecutor,
+} from './participants/cells-hook.js';
