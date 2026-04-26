@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { seedWorld, destroyWorld, type SeedWorld } from '#domain/auth/test-helpers.js';
 import { createLogger } from '#observability/logger.js';
@@ -97,16 +97,14 @@ describe('createVisibilityEngineForProduction', () => {
     expect(denial?.reason_code).toBe('cansee_denied');
   });
 
-  it('Cell Store sendMessage exercising the real engine: spy on findById confirms wiring', async () => {
-    // This is the AC-6 wiring test: build the engine, observe that calling
-    // canSend internally goes through participantsRepo.findById.
+  it('production engine resolves the recipient via the real repo (deny path proves DB read)', async () => {
+    // The production factory wires `participantsRepo.findById` internally; this
+    // test exercises a deny path against an existent recipient and asserts the
+    // resulting audit row carries the right `reason_code`. Only a real DB read
+    // (i.e. NOT the always-allow stub) can resolve `worker_to_other_owner_worker`.
+    // The richer spy version (vi.spyOn the repo directly) lives in
+    // `domain/visibility/smoke.test.ts` AC-6.
     const logger = createLogger({ level: 'silent' });
-    const findByIdSpy = vi.fn();
-
-    // We can't easily spy on the production engine's internal repo — but we
-    // can read the audit log row written when canSend succeeds against an
-    // existent recipient and a deny path. The presence of the row (vs. the
-    // stub which writes nothing) is the wiring proof.
     const engine = createVisibilityEngineForProduction({ db: world.db, logger });
 
     const callerCtx = ctxFor(
@@ -137,7 +135,6 @@ describe('createVisibilityEngineForProduction', () => {
     const allowed = await engine.canSend({ callerContext: callerCtx, recipientId: otherWorker });
     expect(allowed).toBe(false);
 
-    // Audit row exists → canSend resolved a real recipient via findById.
     const row = await world.db
       .selectFrom('audit_log')
       .select(['reason_code', 'actor_id'])
@@ -145,9 +142,5 @@ describe('createVisibilityEngineForProduction', () => {
       .executeTakeFirst();
     expect(row?.reason_code).toBe('worker_to_other_owner_worker');
     expect(row?.actor_id).toBe(world.workerAgentId);
-
-    // The spy isn't actually wired, but we asserted the engine took the deny
-    // path with the correct reason — only a real DB read could resolve that.
-    expect(findByIdSpy).not.toHaveBeenCalled();
   });
 });

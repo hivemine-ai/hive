@@ -134,6 +134,26 @@ describe('createAuditRepo', () => {
     }
   });
 
+  it('findRecentDenialsBySubject is hive-scoped (does not leak cross-hive rows)', async () => {
+    const repo = createAuditRepo(world.db);
+    const subject = uuidv7();
+    const otherHive = uuidv7();
+    await world.db.insertInto('hives').values({ id: otherHive, name: 'other' }).execute();
+
+    // Same subject id, different hive — must not be returned by a query scoped to world.hiveId.
+    await repo.insertAuditEvent(newDenialEvent(world, { subjectId: subject }));
+    await repo.insertAuditEvent(newDenialEvent(world, { hiveId: otherHive, subjectId: subject }));
+
+    const ours = await repo.findRecentDenialsBySubject({
+      hiveId: world.hiveId,
+      subjectId: subject,
+    });
+    expect(ours).toHaveLength(1);
+    for (const d of ours) {
+      expect(d.hiveId).toBe(world.hiveId);
+    }
+  });
+
   it('findAuditEventsByFilter narrows by category + actorId', async () => {
     const repo = createAuditRepo(world.db);
     const actor = uuidv7();
@@ -160,6 +180,23 @@ describe('createAuditRepo', () => {
     }
     const events = await repo.findAuditEventsByFilter({ hiveId: world.hiveId, limit: 3 });
     expect(events).toHaveLength(3);
+  });
+
+  it('findAuditEventsByFilter is hive-scoped (does not leak cross-hive rows)', async () => {
+    const repo = createAuditRepo(world.db);
+    const actor = uuidv7();
+    const otherHive = uuidv7();
+    await world.db.insertInto('hives').values({ id: otherHive, name: 'other' }).execute();
+
+    // Same actor id, different hive — must not be returned by a query scoped to world.hiveId.
+    await repo.insertAuditEvent(newDenialEvent(world, { actorId: actor }));
+    await repo.insertAuditEvent(newDenialEvent(world, { hiveId: otherHive, actorId: actor }));
+
+    const ours = await repo.findAuditEventsByFilter({ hiveId: world.hiveId, actorId: actor });
+    expect(ours).toHaveLength(1);
+    for (const e of ours) {
+      expect(e.hiveId).toBe(world.hiveId);
+    }
   });
 
   it('persists null detail and null requestId without serialization noise', async () => {
