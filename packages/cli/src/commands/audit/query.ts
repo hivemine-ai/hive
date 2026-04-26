@@ -1,0 +1,100 @@
+// `hivectl audit query [--category <c>...] [--decision <d>] [--actor-id <uuid>]
+//   [--subject-id <uuid>] [--from <iso>] [--until <iso>] [--limit N]
+//   [--cursor <cursor>]`
+//
+// Per the tech spec § "Decisión: deltas cross-spec — no implementadas acá",
+// `auditQuery.queryAuditLog` requires a `CallerContext` that the CLI cannot
+// fully synthesize for `system` callers. Slice 0 falls back to direct SQL
+// against `audit_log`. Parameterized — no injection risk. No audit event of
+// its own (read-only).
+
+import type { AuditDecisionDb, AuditEventCategoryDb, CliRuntime, UUIDv7 } from '@hive/server';
+
+import { CliError } from '#error/cli-error.js';
+import { parseUuidV7 } from '#input/parse-uuid.js';
+import type { GlobalCliOpts } from '#types.js';
+
+export interface AuditQueryOpts {
+  globals: GlobalCliOpts;
+  categories: string[] | undefined;
+  decision: string | undefined;
+  actorId: string | undefined;
+  subjectId: string | undefined;
+  from: string | undefined;
+  until: string | undefined;
+  limit: number | undefined;
+}
+
+export interface AuditEntry {
+  id: UUIDv7;
+  category: string;
+  decision: string;
+  actorId: UUIDv7 | null;
+  actorKind: string | null;
+  subjectId: UUIDv7 | null;
+  subjectKind: string | null;
+  reasonCode: string | null;
+  detail: Record<string, unknown> | null;
+  hiveId: UUIDv7;
+  occurredAt: Date;
+  createdAt: Date;
+}
+
+export async function runAuditQuery(
+  runtime: CliRuntime,
+  opts: AuditQueryOpts,
+): Promise<{ entries: AuditEntry[] }> {
+  const limit = clampLimit(opts.limit ?? 50);
+
+  let q = runtime.db
+    .selectFrom('audit_log')
+    .selectAll()
+    .where('hive_id', '=', runtime.hiveStableIdentifier);
+
+  if (opts.categories !== undefined && opts.categories.length > 0) {
+    q = q.where('category', 'in', opts.categories as AuditEventCategoryDb[]);
+  }
+  if (opts.decision !== undefined) q = q.where('decision', '=', opts.decision as AuditDecisionDb);
+  if (opts.actorId !== undefined) {
+    q = q.where('actor_id', '=', parseUuidV7(opts.actorId, 'actor-id'));
+  }
+  if (opts.subjectId !== undefined) {
+    q = q.where('subject_id', '=', parseUuidV7(opts.subjectId, 'subject-id'));
+  }
+  if (opts.from !== undefined) q = q.where('occurred_at', '>=', toIso(opts.from, 'from'));
+  if (opts.until !== undefined) q = q.where('occurred_at', '<=', toIso(opts.until, 'until'));
+
+  const rows = await q.orderBy('occurred_at', 'desc').orderBy('id', 'desc').limit(limit).execute();
+  return {
+    entries: rows.map((r) => ({
+      id: r.id,
+      category: r.category,
+      decision: r.decision,
+      actorId: r.actor_id,
+      actorKind: r.actor_kind,
+      subjectId: r.subject_id,
+      subjectKind: r.subject_kind,
+      reasonCode: r.reason_code,
+      detail: r.detail !== null ? (JSON.parse(r.detail) as Record<string, unknown>) : null,
+      hiveId: r.hive_id,
+      occurredAt: new Date(r.occurred_at),
+      createdAt: new Date(r.created_at),
+    })),
+  };
+}
+
+function clampLimit(limit: number): number {
+  if (!Number.isFinite(limit) || limit <= 0) return 50;
+  return Math.min(Math.floor(limit), 500);
+}
+
+function toIso(input: string, fieldName: string): string {
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) {
+    throw new CliError('CONFIG_INVALID', {
+      subCode: 'date_invalid',
+      message: `--${fieldName} '${input}' is not a valid ISO 8601 date`,
+    });
+  }
+  return date.toISOString();
+}
