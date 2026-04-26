@@ -10,6 +10,16 @@
   "bin": {
     "hivectl": "./dist/main.js"
   },
+  "imports": {
+    "#audit/*": "./dist/audit/*",
+    "#commands/*": "./dist/commands/*",
+    "#error/*": "./dist/error/*",
+    "#input/*": "./dist/input/*",
+    "#output/*": "./dist/output/*",
+    "#runtime/*": "./dist/runtime/*",
+    "#signals/*": "./dist/signals/*",
+    "#types.js": "./dist/types.js"
+  },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
@@ -20,7 +30,9 @@
   "dependencies": {
     "@hive/server": "workspace:*",
     "@hive/shared": "workspace:*",
-    "commander": "^12.1.0"
+    "commander": "^12.1.0",
+    "pino": "^9.5.0",
+    "yaml": "^2.6.0"
   },
   "devDependencies": {
     "vitest": "^2.1.8"

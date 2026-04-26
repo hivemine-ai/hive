@@ -8,6 +8,7 @@ This directory grows incrementally as PRYs close. Each component gets one user-f
 
 - **[Auth + Identity](auth.md)** — JWT-based authentication, Ed25519 signing keys, `hivectl init` bootstrap, credential lifecycle (issue / rotate / revoke), and the canonical error codes.
 - **[MCP Server](mcp-server.md)** — Running the Hive MCP server, environment variables, HTTP endpoints, the 5 Slice 0 tools, and how to talk to it as an MCP client.
+- **[hivectl](hivectl.md)** — Operator CLI: bootstrap a Hive, manage Hivekeepers / Agents / credentials, query the audit log. 12 subcommands across `init` / `migrate` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`.
 
 ## Operator guides
 

@@ -13,6 +13,7 @@ Hive is a self-hostable Model Context Protocol (MCP) server that gives teams of 
 - **Database:** **SQLite (default, via CLI — zero infra)** or PostgreSQL 16+ (opt-in, for Docker / production deploys)
 - **Persistence layer:** [Kysely](https://kysely.dev) (type-safe SQL, multi-dialect) + `better-sqlite3` (default) or `pg` (opt-in)
 - **MCP transport:** [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) over Streamable HTTP, hosted by [`fastify`](https://fastify.dev). 5 tools shipped in v0.1 Slice 0 (`get_agent_config`, `send_message`, `read_mailbox`, `mark_read`, `check_unread_messages`); the remaining 3 (`reply_to`, `list_agents`, `get_agent_status`) land in Slice 1+.
+- **CLI framework:** [`commander`](https://github.com/tj/commander.js) (subcommand tree) + [`yaml`](https://eemeli.org/yaml/) (output) for `hivectl`. Migrations via `Kysely.Migrator` (portable SQLite/PG).
 - **Containerization:** Docker + Docker Compose, _optional_ — only needed for Postgres-backed deploys
 - **Package manager:** pnpm 10 (see `packageManager` field)
 
@@ -44,12 +45,23 @@ pnpm test          # runs the suite (vitest)
 ### Run the MCP server
 
 ```bash
-hivectl init                    # bootstrap a fresh Hive (one-time)
+hivectl init --admin-email you@example.com   # bootstrap a fresh Hive (one-time)
 node packages/server/dist/main.js
 # → Listening on http://0.0.0.0:8443/mcp
 ```
 
 Endpoints exposed: `POST /mcp` (JSON-RPC + SSE), `GET /mcp` (server-initiated SSE), `DELETE /mcp` (session terminate), `GET /healthz`, `GET /readyz`, `GET /.well-known/jwks.json`. See [`docs/mcp-server.md`](./docs/mcp-server.md) for the full operator guide.
+
+### Administer the Hive
+
+```bash
+hivectl hivekeeper create --email teammate@example.com --emit-credential
+hivectl agent create --owner you@example.com --name worker-a --type worker --emit-credential
+hivectl credential rotate <jti> --yes
+hivectl audit query --limit 20
+```
+
+Full operator surface (12 subcommands across `init` / `migrate` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`) documented in [`docs/hivectl.md`](./docs/hivectl.md).
 
 ### Planned deploy paths (v0.1.0)
 
