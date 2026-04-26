@@ -32,7 +32,7 @@ import type {
   SendMessageInput,
   SendResult,
 } from './types.js';
-import type { VisibilityEngine } from './visibility-engine.js';
+import type { VisibilityEngine } from '#domain/visibility/index.js';
 
 // ---------- Public surface ----------
 

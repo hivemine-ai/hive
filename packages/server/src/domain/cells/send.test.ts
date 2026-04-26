@@ -15,7 +15,7 @@ import { createCellsRepo } from './repository.js';
 import type { CellsRepo } from './repository.js';
 import { createSender } from './send.js';
 import type { Sender, SenderConfig } from './send.js';
-import type { VisibilityEngine } from './visibility-engine.js';
+import type { VisibilityEngine } from '#domain/visibility/index.js';
 
 interface SendWorld {
   db: Kysely<Database>;
