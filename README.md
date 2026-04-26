@@ -12,6 +12,7 @@ Hive is a self-hostable Model Context Protocol (MCP) server that gives teams of 
 - **Language:** TypeScript (strict)
 - **Database:** **SQLite (default, via CLI — zero infra)** or PostgreSQL 16+ (opt-in, for Docker / production deploys)
 - **Persistence layer:** [Kysely](https://kysely.dev) (type-safe SQL, multi-dialect) + `better-sqlite3` (default) or `pg` (opt-in)
+- **MCP transport:** [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) over Streamable HTTP, hosted by [`fastify`](https://fastify.dev). 5 tools shipped in v0.1 Slice 0 (`get_agent_config`, `send_message`, `read_mailbox`, `mark_read`, `check_unread_messages`); the remaining 3 (`reply_to`, `list_agents`, `get_agent_status`) land in Slice 1+.
 - **Containerization:** Docker + Docker Compose, _optional_ — only needed for Postgres-backed deploys
 - **Package manager:** pnpm 10 (see `packageManager` field)
 
@@ -38,7 +39,17 @@ pnpm build         # compiles all packages (project references)
 pnpm test          # runs the suite (vitest)
 ```
 
-> v0.1 is under active development. The auth subsystem and CLI bootstrap (`hivectl init`) are functional; Cell Store, Visibility, Waggle, MCP transport, and full `hivectl` surface land in PRYs 003–007.
+> v0.1 is under active development. The auth subsystem, Cell Store, Visibility / Audit, Waggle pipeline, and MCP transport are functional (Slice 0). The full `hivectl` admin surface and Docker-based deployment land in PRYs 007–008.
+
+### Run the MCP server
+
+```bash
+hivectl init                    # bootstrap a fresh Hive (one-time)
+node packages/server/dist/main.js
+# → Listening on http://0.0.0.0:8443/mcp
+```
+
+Endpoints exposed: `POST /mcp` (JSON-RPC + SSE), `GET /mcp` (server-initiated SSE), `DELETE /mcp` (session terminate), `GET /healthz`, `GET /readyz`, `GET /.well-known/jwks.json`. See [`docs/mcp-server.md`](./docs/mcp-server.md) for the full operator guide.
 
 ### Planned deploy paths (v0.1.0)
 

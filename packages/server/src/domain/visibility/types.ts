@@ -11,6 +11,16 @@ export interface CanSendInput {
   recipientId: UUIDv7;
   /** Optional correlation id propagated to the audit log when the engine logs. */
   requestId?: string;
+  /**
+   * Optional Kysely executor (`Kysely<Database>` or `Transaction<Database>`).
+   * Forwarded to the participants repo lookup so callers inside an open TX
+   * can reuse the same connection (required for SQLite single-connection
+   * determinism — PRY-006 discovery: cellStore.sendMessage's mid-TX call to
+   * canSend deadlocked when the inner findById went through the outer DB
+   * handle). Typed as `unknown` here to avoid a circular import; the engine
+   * narrows internally.
+   */
+  executor?: unknown;
 }
 
 export interface CanSeeInput {

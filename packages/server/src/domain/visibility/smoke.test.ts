@@ -389,6 +389,10 @@ describe('PRY-004 smoke E2E — Visibility Engine + Audit Log Slice 0 acceptance
     );
     await engine.canSend({ callerContext: callerCtx, recipientId: world.scoutOfBId });
 
-    expect(findByIdSpy).toHaveBeenCalledWith(world.scoutOfBId);
+    // PRY-006: `findById` gained an optional `executor` argument so callers
+    // inside an open Kysely TX (e.g. cellStore.sendMessage) can reuse the TX
+    // connection — required for SQLite single-connection determinism. Direct
+    // invocation from canSend WITHOUT a TX context passes `undefined`.
+    expect(findByIdSpy).toHaveBeenCalledWith(world.scoutOfBId, undefined);
   });
 });
