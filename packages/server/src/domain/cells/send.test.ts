@@ -648,4 +648,106 @@ describe('createSender / sendMessage', () => {
       ).rejects.toBeInstanceOf(CellError);
     });
   });
+
+  // PRY-010 hardening — concurrent send/cascade and concurrent same-key sends.
+  describe('concurrency (PRY-010)', () => {
+    it('TOCTOU send vs closeCellsByOwner: deterministic winner, no orphan messages', async () => {
+      // SQLite serializes writes (single-writer); the test still validates the
+      // post-conditions of the contract — never observes a message in a closed cell.
+      // Postgres validation deferred (PRY risk #3).
+      const { sender } = buildSender(world);
+
+      const sendOp = sender
+        .sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'request',
+          body: 'racing',
+        })
+        .then(
+          (r) => ({ kind: 'sent' as const, messageId: r.messageId }),
+          (e: unknown) => ({ kind: 'failed' as const, error: e }),
+        );
+
+      const closeOp = world.cellsRepo
+        .closeCellsByOwner([world.workerB])
+        .then((r) => ({ kind: 'closed' as const, ids: r.closedCellIds }));
+
+      const [sendOutcome, closeOutcome] = await Promise.all([sendOp, closeOp]);
+
+      // Close always succeeds (idempotent atomic UPDATE).
+      expect(closeOutcome.kind).toBe('closed');
+
+      // The cell must be closed afterwards.
+      const cellAfter = await world.cellsRepo.findCellByOwner(world.workerB);
+      expect(cellAfter?.state).toBe('closed');
+
+      // The send either won (message exists) or lost (RECIPIENT_UNREACHABLE).
+      // It MUST NOT result in an orphan message addressed to the (now) closed cell
+      // beyond a single legitimate row from a winning send.
+      const messages = await world.db
+        .selectFrom('messages')
+        .selectAll()
+        .where('cell_id', '=', world.cellB)
+        .execute();
+
+      if (sendOutcome.kind === 'sent') {
+        // Send won the race → exactly one message; the cascade ran after the send committed.
+        expect(messages.length).toBe(1);
+        expect(messages[0]?.id).toBe(sendOutcome.messageId);
+      } else {
+        // Send lost the race → cell already closed when the in-TX guard ran.
+        expect(messages.length).toBe(0);
+        expect(sendOutcome.error).toBeInstanceOf(CellError);
+        expect((sendOutcome.error as CellError).code).toBe('RECIPIENT_UNREACHABLE');
+      }
+    });
+
+    it('two concurrent sendMessage with the same idempotencyKey: 1 row, exactly one replayed', async () => {
+      const { sender } = buildSender(world);
+      const ctx = buildContext(world, world.workerA);
+      const idempotencyKey = `racer-${uuidv7()}`;
+
+      const [first, second] = await Promise.all([
+        sender.sendMessage({
+          callerContext: ctx,
+          recipientId: world.workerB,
+          type: 'request',
+          body: 'idempotent racer',
+          idempotencyKey,
+        }),
+        sender.sendMessage({
+          callerContext: ctx,
+          recipientId: world.workerB,
+          type: 'request',
+          body: 'idempotent racer',
+          idempotencyKey,
+        }),
+      ]);
+
+      // Same canonical messageId returned to both callers.
+      expect(first.messageId).toBe(second.messageId);
+
+      // Exactly one is the original send, the other is the replay.
+      const replayedFlags = [first.replayed, second.replayed].sort();
+      expect(replayedFlags).toEqual([false, true]);
+
+      // DB has exactly 1 message row + 1 idempotency row (sentinel rollback worked).
+      const messageRows = await world.db
+        .selectFrom('messages')
+        .selectAll()
+        .where('id', '=', first.messageId)
+        .execute();
+      expect(messageRows.length).toBe(1);
+
+      const idempRows = await world.db
+        .selectFrom('idempotency_keys')
+        .selectAll()
+        .where('sender_id', '=', world.workerA)
+        .where('key', '=', idempotencyKey)
+        .execute();
+      expect(idempRows.length).toBe(1);
+      expect(idempRows[0]?.message_id).toBe(first.messageId);
+    });
+  });
 });

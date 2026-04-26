@@ -118,4 +118,71 @@ describe('createCellEvents', () => {
       ).not.toThrow();
     });
   });
+
+  // PRY-010 hardening — per-listener exception handling for both sync throws
+  // and async (Promise) rejections, funneled to the per-emit onError sink.
+  describe('per-listener exception handling (PRY-010)', () => {
+    it('catches sync throw + async reject independently and forwards both to onError', async () => {
+      const events = createCellEvents();
+      const onError = vi.fn();
+      const survivor = vi.fn();
+
+      events.on('messageDelivered', () => {
+        throw new Error('sync boom');
+      });
+      events.on('messageDelivered', () =>
+        // returning a rejecting Promise must reach onError, not unhandledRejection.
+        Promise.reject(new Error('async boom')),
+      );
+      events.on('messageDelivered', survivor);
+
+      const payload: MessageDeliveredEvent = {
+        messageId: '019dffff-0000-0000-0000-00000000aaaa',
+        cellId: '019dffff-0000-0000-0000-00000000bbbb',
+        recipientId: '019dffff-0000-0000-0000-00000000cccc',
+        fromParticipantId: '019dffff-0000-0000-0000-00000000dddd',
+        type: 'request',
+        deliveredAt: new Date(),
+      };
+      events.emit('messageDelivered', payload, onError);
+
+      // Survivor still ran (a failing listener does NOT short-circuit fan-out).
+      expect(survivor).toHaveBeenCalledTimes(1);
+      expect(survivor).toHaveBeenCalledWith(payload);
+
+      // Sync throw arrives synchronously.
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+      expect((onError.mock.calls[0]?.[0] as Error).message).toBe('sync boom');
+
+      // Async reject lands after the microtask queue drains.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(onError).toHaveBeenCalledTimes(2);
+      const messages = onError.mock.calls.map((c) => (c[0] as Error).message).sort();
+      expect(messages).toEqual(['async boom', 'sync boom']);
+    });
+
+    it('does not throw to the caller when a listener fails and no onError is provided', async () => {
+      const events = createCellEvents();
+      events.on('messageDelivered', () => {
+        throw new Error('silently swallowed');
+      });
+      events.on('messageDelivered', () => Promise.reject(new Error('also swallowed')));
+
+      expect(() =>
+        events.emit('messageDelivered', {
+          messageId: '019dffff-0000-0000-0000-00000000aaaa',
+          cellId: '019dffff-0000-0000-0000-00000000bbbb',
+          recipientId: '019dffff-0000-0000-0000-00000000cccc',
+          fromParticipantId: '019dffff-0000-0000-0000-00000000dddd',
+          type: 'notification',
+          deliveredAt: new Date(),
+        }),
+      ).not.toThrow();
+      // Drain microtasks so the async reject has a chance to surface (it shouldn't).
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  });
 });

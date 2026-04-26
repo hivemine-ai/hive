@@ -75,6 +75,7 @@ export { noopCellsHook } from './participants/cells-hook.js';
 export type {
   CellsRepoHook,
   CloseCellHookInput,
+  CloseCellsByOwnerHookInput,
   CreateCellHookInput,
   DbExecutor,
 } from './participants/cells-hook.js';

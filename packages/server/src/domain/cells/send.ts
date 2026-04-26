@@ -1,22 +1,25 @@
-// `sendMessage` orchestrator for the Cell Store domain (PRY-003).
+// `sendMessage` orchestrator for the Cell Store domain (PRY-003 + PRY-010 hardening).
 //
 // Responsibilities:
 //   1. Validate input shape (body size, ttl, replyTo, idempotencyKey, action).
 //   2. Idempotency lookup — replay-safe within the configured TTL.
-//   3. Recipient cell guard (active Cell required).
-//   4. Visibility check (`visibilityEngine.canSend`).
-//   5. Build the Message + atomic INSERT (messages + idempotency_keys ON CONFLICT).
-//   6. Post-commit emit `messageDelivered` (best-effort — emit failure does NOT
-//      rollback per tech spec line 408-409).
+//   3. Atomic TX: recipient cell guard (with FOR SHARE on PG) + visibility check
+//      + INSERT messages + ON CONFLICT-protected idempotency_keys insert. The
+//      cell guard runs INSIDE the TX (PRY-010 fix for the TOCTOU window between
+//      the previous out-of-TX guard and the cascade closeCellsByOwner UPDATE).
+//   4. Post-commit emit `messageDelivered` (best-effort — emit failure does NOT
+//      rollback per tech spec line 408-409; per-listener errors funnel to
+//      onEmitError, including async rejections from PRY-010 events refactor).
 //
-// Privacidad uniforme: steps 3 and 4 collapse to the same wire error
-// `RECIPIENT_UNREACHABLE`. The `subCode` is informative only (logged) and never
-// reaches the wire — that's the responsibility of the API layer.
+// Uniform privacy: the cell guard and the visibility check both collapse to the
+// same wire error `RECIPIENT_UNREACHABLE`. The `subCode` is informative only
+// (logged) and never reaches the wire — that's the API layer's responsibility.
 
 import type { Kysely, Transaction } from 'kysely';
 import { v7 as uuidv7, validate as uuidValidate, version as uuidVersion } from 'uuid';
 
 import type { UUIDv7 } from '#domain/auth/types.js';
+import type { DbDialect } from '#persistence/db.js';
 import type { Database } from '#persistence/schema.js';
 
 import { CellError } from './errors.js';
@@ -40,12 +43,25 @@ export interface SenderConfig {
   maxActionBytes: number;
   /** Default 256 chars. */
   idempotencyKeyMaxLength: number;
+  /**
+   * DB dialect — controls whether the in-TX cell-guard SELECT emits `FOR SHARE`.
+   *   - 'postgres': emits FOR SHARE so a concurrent `closeCellsByOwner` (which
+   *     takes the implicit row exclusive lock on UPDATE) blocks the send until
+   *     it commits, then the send observes `state='closed'` and aborts with
+   *     RECIPIENT_UNREACHABLE.
+   *   - 'sqlite': SQLite does not support FOR SHARE syntax. better-sqlite3
+   *     serializes writes implicitly (single-writer), so the lock is unnecessary
+   *     for correctness in OSS deployments.
+   * Default: 'sqlite'.
+   */
+  dialect: DbDialect;
 }
 
 export const DEFAULT_SENDER_CONFIG: SenderConfig = {
   maxBodyBytes: 65536,
   maxActionBytes: 16384,
   idempotencyKeyMaxLength: 256,
+  dialect: 'sqlite',
 };
 
 export interface SenderDeps {
@@ -154,44 +170,51 @@ export function createSender(deps: SenderDeps): Sender {
       }
     }
 
-    // ── 3. recipient cell guard ──
-    const recipientCell = await deps.cellsRepo.findCellByOwner(input.recipientId);
-    if (!recipientCell || recipientCell.state === 'closed') {
-      throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'cell_closed_or_missing' });
-    }
-
-    // ── 4. visibility check (uniform privacy with step 3) ──
-    const allowed = await deps.visibilityEngine.canSend({
-      callerContext: input.callerContext,
-      recipientId: input.recipientId,
-    });
-    if (!allowed) {
-      throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'visibility_denied' });
-    }
-
-    // ── 5. build message ──
     const messageId = uuidv7();
-    const message: Message = {
-      id: messageId,
-      cellId: recipientCell.id,
-      fromParticipantId: senderId,
-      toParticipantId: input.recipientId,
-      type: input.type,
-      body: input.body,
-      action: input.action ?? null,
-      replyTo: input.replyTo ?? null,
-      ttl: input.ttl ?? null,
-      sentAt,
-      deliveredAt: sentAt,
-      readAt: null,
-      state: 'delivered',
-      expiredAt: null,
-    };
 
-    // ── 6. atomic TX: insert message + idempotency key ──
+    // ── 3. atomic TX: cell guard (FOR SHARE on PG) + visibility + insert + idempotency ──
+    // The cell guard MUST run inside the TX so the SHARE lock blocks the send
+    // until any in-flight cascade closeCellsByOwner UPDATE commits. After the
+    // lock the SELECT either sees state='active' (proceed) or state='closed'
+    // (abort). This closes the TOCTOU window flagged by PRY-003 /security-review.
+    let resolvedCellId: UUIDv7 | null = null;
     let result: SendResult;
     try {
       result = await deps.db.transaction().execute(async (tx) => {
+        const recipientCellRow = await selectRecipientCellLocked(
+          tx,
+          input.recipientId,
+          config.dialect,
+        );
+        if (!recipientCellRow || recipientCellRow.state === 'closed') {
+          throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'cell_closed_or_missing' });
+        }
+
+        const allowed = await deps.visibilityEngine.canSend({
+          callerContext: input.callerContext,
+          recipientId: input.recipientId,
+        });
+        if (!allowed) {
+          throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'visibility_denied' });
+        }
+
+        const message: Message = {
+          id: messageId,
+          cellId: recipientCellRow.id,
+          fromParticipantId: senderId,
+          toParticipantId: input.recipientId,
+          type: input.type,
+          body: input.body,
+          action: input.action ?? null,
+          replyTo: input.replyTo ?? null,
+          ttl: input.ttl ?? null,
+          sentAt,
+          deliveredAt: sentAt,
+          readAt: null,
+          state: 'delivered',
+          expiredAt: null,
+        };
+
         await deps.cellsRepo.insertMessage(message, tx);
         if (input.idempotencyKey !== undefined) {
           const inserted = await insertIdempotencyKeyOrConflict(
@@ -207,6 +230,8 @@ export function createSender(deps: SenderDeps): Sender {
             throw new IdempotencyConflictSentinel();
           }
         }
+
+        resolvedCellId = recipientCellRow.id;
         return {
           messageId,
           sentAt,
@@ -233,25 +258,47 @@ export function createSender(deps: SenderDeps): Sender {
       throw err;
     }
 
-    // ── 7. post-commit emit (best-effort) ──
-    try {
-      deps.events.emit('messageDelivered', {
+    // ── 4. post-commit emit (best-effort) ──
+    // resolvedCellId is non-null when the TX commits without throwing.
+    /* c8 ignore next 4 — defensive; only reachable on a TX success without cellId, which the type system rules out. */
+    if (resolvedCellId === null) {
+      throw new CellError('INTERNAL_INCONSISTENCY', { subCode: 'cell_id_unresolved' });
+    }
+    deps.events.emit(
+      'messageDelivered',
+      {
         messageId: result.messageId,
-        cellId: recipientCell.id,
+        cellId: resolvedCellId,
         recipientId: input.recipientId,
         fromParticipantId: senderId,
         type: input.type,
         deliveredAt: result.deliveredAt,
-      });
-    } catch (err) {
-      // Per tech spec: emit is best-effort. We do NOT rollback the INSERT.
-      deps.onEmitError?.(err);
-    }
+      },
+      deps.onEmitError,
+    );
 
     return result;
   }
 
   return { sendMessage };
+}
+
+/**
+ * SELECT id, state FROM cells WHERE owner_id = ? — locked variant.
+ * On Postgres, takes a SHARE row lock so a concurrent UPDATE (closeCellsByOwner)
+ * blocks until the send TX commits. On SQLite, the bare SELECT is sufficient
+ * because better-sqlite3 serializes writes (single-writer model).
+ */
+async function selectRecipientCellLocked(
+  tx: Transaction<Database>,
+  recipientOwnerId: UUIDv7,
+  dialect: DbDialect,
+): Promise<{ id: UUIDv7; state: 'active' | 'closed' } | undefined> {
+  let q = tx.selectFrom('cells').select(['id', 'state']).where('owner_id', '=', recipientOwnerId);
+  if (dialect === 'postgres') {
+    q = q.forShare();
+  }
+  return q.executeTakeFirst();
 }
 
 // ---------- Validators ----------

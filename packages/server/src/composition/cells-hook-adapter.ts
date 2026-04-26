@@ -12,6 +12,7 @@ import type { CellsRepo } from '#domain/cells/index.js';
 import type {
   CellsRepoHook,
   CloseCellHookInput,
+  CloseCellsByOwnerHookInput,
   CreateCellHookInput,
   DbExecutor,
 } from '#domain/auth/index.js';
@@ -37,6 +38,16 @@ export function createCellsHookAdapter(cellsRepo: CellsRepo): CellsRepoHook {
       // cells repo is idempotent on already-closed cells and on unknown owners
       // (no rows match → no-op), so re-calling is safe.
       await cellsRepo.closeCell({ ownerId: input.ownerId }, executor);
+    },
+
+    async closeCellsByOwner(
+      executor: DbExecutor,
+      input: CloseCellsByOwnerHookInput,
+    ): Promise<void> {
+      // Batch close for the Hivekeeper → owned Agents cascade. Empty list is a
+      // no-op via the underlying repo. Same atomic UPDATE … WHERE state='active'
+      // RETURNING id semantics, idempotent on already-closed cells.
+      await cellsRepo.closeCellsByOwner(input.ownerIds, executor);
     },
   };
 }
