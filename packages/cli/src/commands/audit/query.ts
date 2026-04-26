@@ -8,11 +8,39 @@
 // against `audit_log`. Parameterized — no injection risk. No audit event of
 // its own (read-only).
 
+import { ALL_AUDIT_EVENT_CATEGORIES } from '@hive/server';
 import type { AuditDecisionDb, AuditEventCategoryDb, CliRuntime, UUIDv7 } from '@hive/server';
 
 import { CliError } from '#error/cli-error.js';
 import { parseUuidV7 } from '#input/parse-uuid.js';
 import type { GlobalCliOpts } from '#types.js';
+
+const ALLOWED_DECISIONS: readonly AuditDecisionDb[] = ['allow', 'deny', 'success', 'failure'];
+
+function validateDecision(input: string): AuditDecisionDb {
+  if ((ALLOWED_DECISIONS as readonly string[]).includes(input)) {
+    return input as AuditDecisionDb;
+  }
+  throw new CliError('CONFIG_INVALID', {
+    subCode: 'decision_invalid',
+    message: `--decision '${input}' is not one of: ${ALLOWED_DECISIONS.join(', ')}`,
+  });
+}
+
+function validateCategories(input: readonly string[]): AuditEventCategoryDb[] {
+  const allowed = new Set<string>(ALL_AUDIT_EVENT_CATEGORIES);
+  const out: AuditEventCategoryDb[] = [];
+  for (const c of input) {
+    if (!allowed.has(c)) {
+      throw new CliError('CONFIG_INVALID', {
+        subCode: 'category_invalid',
+        message: `--category '${c}' is not a known audit event category`,
+      });
+    }
+    out.push(c as AuditEventCategoryDb);
+  }
+  return out;
+}
 
 export interface AuditQueryOpts {
   globals: GlobalCliOpts;
@@ -52,9 +80,9 @@ export async function runAuditQuery(
     .where('hive_id', '=', runtime.hiveStableIdentifier);
 
   if (opts.categories !== undefined && opts.categories.length > 0) {
-    q = q.where('category', 'in', opts.categories as AuditEventCategoryDb[]);
+    q = q.where('category', 'in', validateCategories(opts.categories));
   }
-  if (opts.decision !== undefined) q = q.where('decision', '=', opts.decision as AuditDecisionDb);
+  if (opts.decision !== undefined) q = q.where('decision', '=', validateDecision(opts.decision));
   if (opts.actorId !== undefined) {
     q = q.where('actor_id', '=', parseUuidV7(opts.actorId, 'actor-id'));
   }

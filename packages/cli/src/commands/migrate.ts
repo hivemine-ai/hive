@@ -75,14 +75,31 @@ async function tryListMigrations(
   try {
     const rows = await db
       // The migration table name is owned by Kysely.Migrator; default name is
-      // `kysely_migration`. If the table does not exist, the query throws and
-      // we return an empty array.
+      // `kysely_migration`. If the table does not exist, the query throws.
       .selectFrom('kysely_migration' as never)
       .select(['name'] as never)
       .orderBy('name' as never, 'asc')
       .execute();
     return (rows as { name: string }[]).map((r) => ({ name: r.name, status: 'success' as const }));
-  } catch {
-    return [];
+  } catch (err) {
+    // Distinguish "table does not exist" (expected before first migration) from
+    // other failures (perms, schema mismatch, network) — the latter must surface
+    // so the operator does not see a misleading "0 migrations" output.
+    if (isTableMissingError(err)) {
+      return [];
+    }
+    throw err;
   }
+}
+
+function isTableMissingError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  // SQLite: "no such table: kysely_migration"
+  // Postgres: "relation \"kysely_migration\" does not exist"
+  return (
+    msg.includes('no such table') ||
+    msg.includes('does not exist') ||
+    msg.includes('undefined table')
+  );
 }

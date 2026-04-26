@@ -3,6 +3,7 @@
 
 import type { CliRuntime, UUIDv7 } from '@hive/server';
 
+import { CliError } from '#error/cli-error.js';
 import { resolveParticipantReference } from '#input/parse-reference.js';
 import type { GlobalCliOpts } from '#types.js';
 
@@ -59,14 +60,26 @@ export async function runListAgents(
 
 function parseCursor(input: string | undefined): { createdAt: Date; id: UUIDv7 } | null {
   if (input === undefined || input === '') return null;
-  // Cursor is opaque base64 of `<isoCreatedAt>|<id>`.
+  // Cursor is opaque base64 of `<isoCreatedAt>|<id>`. A malformed cursor MUST
+  // throw — silently returning the first page would mislead an operator who
+  // typo'd a character into thinking they were on page N.
   const decoded = Buffer.from(input, 'base64url').toString('utf8');
   const sep = decoded.lastIndexOf('|');
-  if (sep <= 0) return null;
+  if (sep <= 0) {
+    throw new CliError('CONFIG_INVALID', {
+      subCode: 'cursor_malformed',
+      message: `--cursor '${input}' is not a valid pagination cursor`,
+    });
+  }
   const isoPart = decoded.slice(0, sep);
   const idPart = decoded.slice(sep + 1);
   const date = new Date(isoPart);
-  if (Number.isNaN(date.getTime())) return null;
+  if (Number.isNaN(date.getTime())) {
+    throw new CliError('CONFIG_INVALID', {
+      subCode: 'cursor_malformed',
+      message: `--cursor '${input}' has an invalid timestamp component`,
+    });
+  }
   return { createdAt: date, id: idPart };
 }
 

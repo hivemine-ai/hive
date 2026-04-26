@@ -116,19 +116,17 @@ export async function runCreateHivekeeper(
   return out;
 }
 
+/**
+ * Map the CLI's `OperatorActor` to a domain `CallerContext`. Always returns
+ * a `system` caller in Slice 0: the CLI cannot synthesize a full
+ * `IdentityContext` (capabilities, currentState, snapshot) from `--operator-id`
+ * alone — only the verifier can. The audit log records the operator
+ * authoritatively via `actorId` + `actorKind` ('hivekeeper' when the flag
+ * resolves; 'system' otherwise) — see `audit/operator-actor.ts`. The Slice 1+
+ * authenticated path will branch here once the verifier surface accepts a
+ * synthesized identity.
+ */
 export function toCallerContext(actor: OperatorActor): CallerContext {
-  if (actor.actorKind === 'system') {
-    const caller: CallerContext = { kind: 'system' };
-    const osUser = actor.detail['osUser'];
-    const operatorNote = actor.detail['operatorNote'];
-    if (typeof osUser === 'string') caller.osUser = osUser;
-    if (typeof operatorNote === 'string') caller.operatorNote = operatorNote;
-    return caller;
-  }
-  // The 'authenticated' caller carries the IdentityContext. The CLI does not
-  // synthesize one from `--operator-id` alone — Slice 0 maps that to a system
-  // caller with the operatorId in `detail` for traceability. (The audit
-  // entry's actorId/actorKind already reflect the operator authoritatively.)
   const caller: CallerContext = { kind: 'system' };
   const osUser = actor.detail['osUser'];
   const operatorNote = actor.detail['operatorNote'];
