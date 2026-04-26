@@ -1,4 +1,4 @@
-// `sendMessage` orchestrator for the Cell Store domain (PRY-003 Hito 9).
+// `sendMessage` orchestrator for the Cell Store domain (PRY-003).
 //
 // Responsibilities:
 //   1. Validate input shape (body size, ttl, replyTo, idempotencyKey, action).
@@ -160,7 +160,7 @@ export function createSender(deps: SenderDeps): Sender {
       throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'cell_closed_or_missing' });
     }
 
-    // ── 4. visibility check (privacidad uniforme con paso 3) ──
+    // ── 4. visibility check (uniform privacy with step 3) ──
     const allowed = await deps.visibilityEngine.canSend({
       callerContext: input.callerContext,
       recipientId: input.recipientId,
@@ -291,6 +291,9 @@ function validateReplyTo(replyTo: UUIDv7 | undefined): void {
 
 function validateIdempotencyKey(key: string | undefined, maxLength: number): void {
   if (key === undefined) return;
+  if (key.length === 0) {
+    throw new CellError('INVALID_INPUT', { subCode: 'idempotency_key_empty' });
+  }
   if (key.length > maxLength) {
     throw new CellError('INVALID_INPUT', {
       subCode: 'idempotency_key_too_long',

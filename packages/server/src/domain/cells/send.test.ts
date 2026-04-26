@@ -280,7 +280,7 @@ describe('createSender / sendMessage', () => {
     });
 
     it('body_too_large: counts UTF-8 bytes, not JS string length', async () => {
-      // 'é' is 2 bytes in UTF-8. Two é × 3 = 6 bytes, fits within maxBodyBytes=5? No, fail.
+      // 'é' is 2 bytes in UTF-8 — 'éé' = 4 bytes, exceeds maxBodyBytes=3 → fail.
       const { sender } = buildSender(world, { config: { maxBodyBytes: 3 } });
       await expect(
         sender.sendMessage({
@@ -344,6 +344,19 @@ describe('createSender / sendMessage', () => {
       ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'idempotency_key_too_long' });
     });
 
+    it('idempotency_key_empty: empty string throws', async () => {
+      const { sender } = buildSender(world);
+      await expect(
+        sender.sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'request',
+          body: 'x',
+          idempotencyKey: '',
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'idempotency_key_empty' });
+    });
+
     it('action_too_large: serialized action above maxActionBytes throws', async () => {
       const { sender } = buildSender(world, { config: { maxActionBytes: 16384 } });
       // ASCII payload — 1 byte per char inside the JSON string + overhead.
@@ -373,7 +386,7 @@ describe('createSender / sendMessage', () => {
     });
   });
 
-  describe('RECIPIENT_UNREACHABLE (privacidad uniforme)', () => {
+  describe('RECIPIENT_UNREACHABLE (uniform privacy)', () => {
     it('cell_closed_or_missing: recipient has no Cell', async () => {
       const { sender } = buildSender(world);
       await expect(

@@ -38,7 +38,7 @@ export type {
 // Internal callers that need the type can import it directly from
 // `#domain/cells/repository.js` or `#domain/auth/index.js`.
 
-// Bloque 2 — Send/Read pipeline.
+// Send/Read pipeline.
 export { createCellEvents } from './events.js';
 export type {
   CellClosedEvent,

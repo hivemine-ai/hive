@@ -7,7 +7,7 @@
 
 import type { VisibilityEngine } from '#domain/cells/index.js';
 
-// Stub for B0; replaced in PRY-008 (Visibility Engine).
+// Stub for Slice 0; replaced in PRY-008 (Visibility Engine).
 export const stubVisibilityEngine: VisibilityEngine = {
   canSend(): Promise<boolean> {
     return Promise.resolve(true);
@@ -16,7 +16,3 @@ export const stubVisibilityEngine: VisibilityEngine = {
     return Promise.resolve(true);
   },
 };
-
-// Re-export so existing callers that import from `#composition/stubs.js`
-// continue to compile without changes.
-export type { VisibilityEngine } from '#domain/cells/index.js';

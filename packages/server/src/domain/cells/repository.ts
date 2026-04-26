@@ -1,7 +1,7 @@
-// Cell Store repository — read/write functions for Bloque 0 (PRY-003).
-// The send/read/policy/idempotency/expiration modules consume this layer in later bloques.
+// Cell Store repository — read/write functions (PRY-003).
+// The send/read/policy/idempotency/expiration modules consume this layer.
 //
-// Per the tech spec ("tx opcional" pattern): every method accepts an optional `executor`
+// Per the tech spec (optional-tx pattern): every method accepts an optional `executor`
 // (Kysely<Database> | Transaction<Database>) so callers can participate in an outer
 // transaction (e.g. createAgent + createCell). When omitted, the bound `db` is used.
 
@@ -11,11 +11,13 @@ import { v7 as uuidv7 } from 'uuid';
 import { dateToIso, isoToDate, jsonParse } from '#persistence/type-mappers.js';
 import type { CellsTable, Database, MessagesTable } from '#persistence/schema.js';
 
+import { CellError } from './errors.js';
 import type {
   ActionDescriptor,
   Cell,
   CellState,
   Message,
+  MessageState,
   MessageType,
   MessageView,
 } from './types.js';
@@ -84,7 +86,17 @@ function rowToMessageView(row: Selectable<MessagesTable>): MessageView {
 export function mapKindToOwnerKind(
   kind: 'hivekeeper' | 'worker' | 'scout',
 ): 'hivekeeper' | 'agent' {
-  return kind === 'hivekeeper' ? 'hivekeeper' : 'agent';
+  switch (kind) {
+    case 'hivekeeper':
+      return 'hivekeeper';
+    case 'worker':
+    case 'scout':
+      return 'agent';
+    default: {
+      const exhaustive: never = kind;
+      throw new Error(`mapKindToOwnerKind: unhandled kind ${String(exhaustive)}`);
+    }
+  }
 }
 
 // ---------- Public surface ----------
@@ -112,7 +124,9 @@ export interface GetCellStateResult {
 
 export interface ListMessagesFilter {
   unreadOnly?: boolean;
+  state?: MessageState;
   types?: MessageType[];
+  inReplyTo?: UUIDv7;
 }
 
 export interface ListMessagesPagination {
@@ -282,27 +296,21 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
       }
       const exec = executor ?? db;
 
-      // Identify candidates that are still active so we know exactly which transitioned.
-      let selectQuery = exec.selectFrom('cells').select('id').where('state', '=', 'active');
-      if (input.cellId !== undefined) {
-        selectQuery = selectQuery.where('id', '=', input.cellId);
-      }
-      if (input.ownerId !== undefined) {
-        selectQuery = selectQuery.where('owner_id', '=', input.ownerId);
-      }
-      const candidates = await selectQuery.execute();
-      if (candidates.length === 0) {
-        return { closedCellIds: [] };
-      }
-
-      const ids = candidates.map((c) => c.id);
-      await exec
+      // Atomic UPDATE ... WHERE state='active' RETURNING id eliminates the TOCTOU
+      // window between SELECT-candidates and UPDATE. Both SQLite 3.35+ and Postgres
+      // support RETURNING; Kysely surfaces the rows uniformly.
+      let updateQuery = exec
         .updateTable('cells')
         .set({ state: 'closed', closed_at: dateToIso(new Date()) })
-        .where('id', 'in', ids)
-        .execute();
-
-      return { closedCellIds: ids };
+        .where('state', '=', 'active');
+      if (input.cellId !== undefined) {
+        updateQuery = updateQuery.where('id', '=', input.cellId);
+      }
+      if (input.ownerId !== undefined) {
+        updateQuery = updateQuery.where('owner_id', '=', input.ownerId);
+      }
+      const rows = await updateQuery.returning('id').execute();
+      return { closedCellIds: rows.map((r) => r.id) };
     },
 
     async closeCellsByOwner(ownerIds, executor) {
@@ -311,47 +319,41 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
       }
       const exec = executor ?? db;
 
-      const candidates = await exec
-        .selectFrom('cells')
-        .select('id')
-        .where('owner_id', 'in', ownerIds)
-        .where('state', '=', 'active')
-        .execute();
-      if (candidates.length === 0) {
-        return { closedCellIds: [] };
-      }
-
-      const ids = candidates.map((c) => c.id);
-      await exec
+      const rows = await exec
         .updateTable('cells')
         .set({ state: 'closed', closed_at: dateToIso(new Date()) })
-        .where('id', 'in', ids)
+        .where('owner_id', 'in', ownerIds)
+        .where('state', '=', 'active')
+        .returning('id')
         .execute();
-
-      return { closedCellIds: ids };
+      return { closedCellIds: rows.map((r) => r.id) };
     },
 
     async insertMessage(message, executor) {
       const exec = executor ?? db;
-      await exec
-        .insertInto('messages')
-        .values({
-          id: message.id,
-          cell_id: message.cellId,
-          from_participant_id: message.fromParticipantId,
-          to_participant_id: message.toParticipantId,
-          type: message.type,
-          body: message.body,
-          action: message.action ? JSON.stringify(message.action) : null,
-          reply_to: message.replyTo,
-          ttl_ms: message.ttl,
-          sent_at: dateToIso(message.sentAt),
-          delivered_at: dateToIso(message.deliveredAt),
-          read_at: message.readAt ? dateToIso(message.readAt) : null,
-          state: message.state,
-          expired_at: message.expiredAt ? dateToIso(message.expiredAt) : null,
-        })
-        .execute();
+      try {
+        await exec
+          .insertInto('messages')
+          .values({
+            id: message.id,
+            cell_id: message.cellId,
+            from_participant_id: message.fromParticipantId,
+            to_participant_id: message.toParticipantId,
+            type: message.type,
+            body: message.body,
+            action: message.action ? JSON.stringify(message.action) : null,
+            reply_to: message.replyTo,
+            ttl_ms: message.ttl,
+            sent_at: dateToIso(message.sentAt),
+            delivered_at: dateToIso(message.deliveredAt),
+            read_at: message.readAt ? dateToIso(message.readAt) : null,
+            state: message.state,
+            expired_at: message.expiredAt ? dateToIso(message.expiredAt) : null,
+          })
+          .execute();
+      } catch (err) {
+        throw mapMessageInsertError(err);
+      }
     },
 
     async markMessageRead(messageId, cellId, readAt, executor) {
@@ -376,11 +378,18 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
         // Defense in depth: never expose expired messages even if a caller forgot to filter.
         .where('state', '!=', 'expired');
 
-      if (filter.unreadOnly === true) {
+      // Per the public type contract, when both `state` and `unreadOnly` are set
+      // `state` wins. Otherwise `unreadOnly === true` collapses to `state='delivered'`.
+      if (filter.state !== undefined) {
+        query = query.where('state', '=', filter.state);
+      } else if (filter.unreadOnly === true) {
         query = query.where('state', '=', 'delivered');
       }
       if (filter.types && filter.types.length > 0) {
         query = query.where('type', 'in', filter.types);
+      }
+      if (filter.inReplyTo !== undefined) {
+        query = query.where('reply_to', '=', filter.inReplyTo);
       }
       if (pagination.cursor) {
         const cursorIso = dateToIso(pagination.cursor.deliveredAt);
@@ -408,7 +417,10 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
         .selectFrom('messages')
         .select((eb) => [
           'from_participant_id',
-          eb.fn.countAll<number>().as('cnt'),
+          // COUNT(*) shape varies by driver: better-sqlite3 returns `number`,
+          // node-postgres returns `string` (sometimes `bigint`). The runtime
+          // coercion below handles all three; the generic stays honest.
+          eb.fn.countAll<string | number | bigint>().as('cnt'),
           eb.fn.max('delivered_at').as('max_delivered'),
         ])
         .where('cell_id', '=', cellId)
@@ -418,7 +430,6 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
         .orderBy('from_participant_id', 'asc')
         .execute();
 
-      // SQLite COUNT(*) may return number or string depending on driver — coerce.
       const unreadCount = rows.reduce((acc, r) => acc + Number(r.cnt), 0);
       const distinctSenderIds = rows.map((r) => r.from_participant_id);
       return { unreadCount, distinctSenderIds };
@@ -437,4 +448,39 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
       return row ? rowToMessage(row) : null;
     },
   };
+}
+
+// SQL-error → CellError shim, mirroring the auth domain's `mapInsertError`.
+// Without it, raw `SqliteError`/`pg` errors leak past the domain boundary and
+// API consumers don't get the typed `CellError` promised by the tech spec.
+function mapMessageInsertError(err: unknown): CellError {
+  if (err instanceof Error && /UNIQUE/i.test(err.message)) {
+    return new CellError('INTERNAL_INCONSISTENCY', {
+      subCode: 'message_id_collision',
+      message: err.message,
+      cause: err,
+    });
+  }
+  if (err instanceof Error && /FOREIGN KEY|violates foreign key/i.test(err.message)) {
+    return new CellError('INTERNAL_INCONSISTENCY', {
+      subCode: 'message_fk_violation',
+      message: err.message,
+      cause: err,
+    });
+  }
+  if (err instanceof Error && /CHECK/i.test(err.message)) {
+    return new CellError('INVALID_INPUT', {
+      subCode: 'check_constraint_violation',
+      message: err.message,
+      cause: err,
+    });
+  }
+  if (err instanceof Error) {
+    return new CellError('INTERNAL_INCONSISTENCY', {
+      subCode: 'message_insert_failed',
+      message: err.message,
+      cause: err,
+    });
+  }
+  return new CellError('INTERNAL_INCONSISTENCY', { subCode: 'message_insert_failed' });
 }

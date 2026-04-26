@@ -147,4 +147,25 @@ describe('createCellsHookAdapter', () => {
       expect(cell).toBeNull();
     });
   });
+
+  describe('CreateCellHookInput.colonyId is intentionally dropped', () => {
+    it('accepts colonyId in the hook input without persisting or erroring', async () => {
+      const adapter = createCellsHookAdapter(world.cellsRepo);
+      const ownerId = uuidv7();
+      const colonyId = uuidv7(); // arbitrary — cells table has no colony_id column.
+
+      await adapter.createCell(world.db, {
+        ownerId,
+        ownerKind: 'agent',
+        hiveId: world.hiveId,
+        colonyId,
+      });
+
+      // Cell created successfully; the schema-side absence of colony_id is the
+      // contract — adapter must not blow up nor try to persist the field.
+      const cell = await world.cellsRepo.findCellByOwner(ownerId);
+      expect(cell).not.toBeNull();
+      expect(cell?.ownerKind).toBe('agent');
+    });
+  });
 });

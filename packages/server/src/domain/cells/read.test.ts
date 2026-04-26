@@ -329,7 +329,7 @@ describe('createReader / markRead', () => {
     expect(second.ignored).toEqual([m!.id]);
   });
 
-  it('privacidad uniforme: messages from another Cell collapse to ignored (no error)', async () => {
+  it('uniform privacy: messages from another Cell collapse to ignored (no error)', async () => {
     const reader = buildReader(world);
     // Deliver a message into workerA's cell, then have workerB try to mark it.
     const [foreign] = await insertDeliveredMessages(world, world.cellA, 1);
@@ -379,5 +379,100 @@ describe('createReader / markRead', () => {
     });
     expect(result.marked).toEqual([]);
     expect(result.ignored).toEqual([]);
+  });
+
+  it('throws INVALID_INPUT when messageIds.length exceeds markReadMaxIds', async () => {
+    const reader = buildReader(world, { config: { markReadMaxIds: 2 } });
+    await expect(
+      reader.markRead({
+        callerContext: buildContext(world, world.workerB),
+        messageIds: [uuidv7(), uuidv7(), uuidv7()],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'message_ids_too_many' });
+  });
+});
+
+describe('readMailbox — additional filter and pagination contracts', () => {
+  let world: ReadWorld;
+
+  beforeEach(async () => {
+    world = await seedReadWorld();
+  });
+
+  afterEach(async () => {
+    await world.db.destroy();
+  });
+
+  it('throws INVALID_INPUT when pagination.limit <= 0', async () => {
+    const reader = buildReader(world);
+    await expect(
+      reader.readMailbox({
+        callerContext: buildContext(world, world.workerB),
+        pagination: { cursor: null, limit: 0 },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'limit_not_positive' });
+  });
+
+  it('filter.state pins messages to a specific state', async () => {
+    const reader = buildReader(world);
+    const [m1, m2] = await insertDeliveredMessages(world, world.cellB, 2);
+    // Mark one as read directly via the repo.
+    await world.cellsRepo.markMessageRead(m1!.id, world.cellB, new Date());
+
+    const onlyRead = await reader.readMailbox({
+      callerContext: buildContext(world, world.workerB),
+      filter: { state: 'read' },
+    });
+    expect(onlyRead.map((mv) => mv.id)).toEqual([m1!.id]);
+
+    const onlyDelivered = await reader.readMailbox({
+      callerContext: buildContext(world, world.workerB),
+      filter: { state: 'delivered' },
+    });
+    expect(onlyDelivered.map((mv) => mv.id)).toEqual([m2!.id]);
+  });
+
+  it('filter.inReplyTo restricts results to replies of a specific message', async () => {
+    const reader = buildReader(world);
+    const originalId = uuidv7();
+    await world.cellsRepo.insertMessage({
+      id: originalId,
+      cellId: world.cellB,
+      fromParticipantId: world.workerA,
+      toParticipantId: world.workerB,
+      type: 'request',
+      body: 'q?',
+      action: null,
+      replyTo: null,
+      ttl: null,
+      sentAt: new Date('2026-04-26T11:00:00.000Z'),
+      deliveredAt: new Date('2026-04-26T11:00:00.000Z'),
+      readAt: null,
+      state: 'delivered',
+      expiredAt: null,
+    });
+    const replyId = uuidv7();
+    await world.cellsRepo.insertMessage({
+      id: replyId,
+      cellId: world.cellB,
+      fromParticipantId: world.workerA,
+      toParticipantId: world.workerB,
+      type: 'response',
+      body: 'a!',
+      action: null,
+      replyTo: originalId,
+      ttl: null,
+      sentAt: new Date('2026-04-26T11:00:01.000Z'),
+      deliveredAt: new Date('2026-04-26T11:00:01.000Z'),
+      readAt: null,
+      state: 'delivered',
+      expiredAt: null,
+    });
+
+    const replies = await reader.readMailbox({
+      callerContext: buildContext(world, world.workerB),
+      filter: { inReplyTo: originalId },
+    });
+    expect(replies.map((mv) => mv.id)).toEqual([replyId]);
   });
 });

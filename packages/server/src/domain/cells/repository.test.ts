@@ -751,7 +751,7 @@ describe('cells repository', () => {
     });
   });
 
-  describe('tx opcional pattern', () => {
+  describe('optional-tx pattern', () => {
     it('participates in an outer transaction (rollback)', async () => {
       const repo = createCellsRepo(world.db);
       try {

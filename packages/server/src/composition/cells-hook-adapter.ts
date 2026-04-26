@@ -1,6 +1,6 @@
 // Real implementation of `CellsRepoHook` for the auth → cells cross-domain seam.
 //
-// This is the composition-root wiring of PRY-003 Hito 8: replaces `noopCellsHook`
+// This is the composition-root wiring (PRY-003): replaces `noopCellsHook`
 // (the PRY-002 stub) so that createHivekeeper / createAgent / revokeAgent actually
 // create / close Cells in the same transaction as the participant write.
 //

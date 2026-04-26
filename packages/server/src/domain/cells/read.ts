@@ -1,14 +1,13 @@
-// Read-side operations for the Cell Store domain (PRY-003 Hito 10).
+// Read-side operations for the Cell Store domain (PRY-003).
 //
 // `readMailbox` is purely declarative — no mutations. It resolves the caller's
 // Cell, applies filters/pagination via the repository (which already filters
-// out `state='expired'` per B0 invariant), and returns the consumer-facing
-// MessageView projection.
+// out `state='expired'`), and returns the consumer-facing MessageView projection.
 //
 // `markRead` performs N independent UPDATEs (one per messageId). Per tech spec
 // it is NOT a transaction — each ack is independent. The result captures
 // per-id success/skip uniformly: messages from another Cell, already-read,
-// expired, or unknown all collapse to "ignored" (privacidad uniforme).
+// expired, or unknown all collapse to "ignored" (uniform privacy).
 
 import type { Kysely } from 'kysely';
 
@@ -26,11 +25,17 @@ export interface ReaderConfig {
   readMaxPageSize: number;
   /** Used when the caller does not provide a limit. Default 50. */
   readDefaultPageSize: number;
+  /**
+   * Hard cap on `markRead({ messageIds }).length`. Defensive against unbounded
+   * client input — each id triggers an independent UPDATE round-trip. Default 200.
+   */
+  markReadMaxIds: number;
 }
 
 export const DEFAULT_READER_CONFIG: ReaderConfig = {
   readMaxPageSize: 100,
   readDefaultPageSize: 50,
+  markReadMaxIds: 200,
 };
 
 export interface ReaderDeps {
@@ -69,6 +74,9 @@ export function createReader(deps: ReaderDeps): Reader {
     }
 
     const requestedLimit = input.pagination?.limit ?? config.readDefaultPageSize;
+    if (requestedLimit <= 0) {
+      throw new CellError('INVALID_INPUT', { subCode: 'limit_not_positive' });
+    }
     const effectiveLimit = Math.min(requestedLimit, config.readMaxPageSize);
 
     // exactOptionalPropertyTypes: build the filter object without ever
@@ -77,8 +85,14 @@ export function createReader(deps: ReaderDeps): Reader {
     if (input.filter?.unreadOnly !== undefined) {
       filter.unreadOnly = input.filter.unreadOnly;
     }
+    if (input.filter?.state !== undefined) {
+      filter.state = input.filter.state;
+    }
     if (input.filter?.types !== undefined) {
       filter.types = input.filter.types;
+    }
+    if (input.filter?.inReplyTo !== undefined) {
+      filter.inReplyTo = input.filter.inReplyTo;
     }
 
     return deps.cellsRepo.listMessages(cell.id, filter, {
@@ -88,6 +102,10 @@ export function createReader(deps: ReaderDeps): Reader {
   }
 
   async function markRead(input: MarkReadInput): Promise<MarkReadResult> {
+    if (input.messageIds.length > config.markReadMaxIds) {
+      throw new CellError('INVALID_INPUT', { subCode: 'message_ids_too_many' });
+    }
+
     const callerId = input.callerContext.participantId;
     const cell = await deps.cellsRepo.findCellByOwner(callerId);
     if (!cell) {

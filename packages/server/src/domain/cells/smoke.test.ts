@@ -1,4 +1,4 @@
-// End-to-end smoke test for PRY-003 Hito 14 (Bloque 4).
+// End-to-end smoke test for PRY-003 (Cell Store + Message Persistence Slice 0).
 //
 // Exercises the full demoable Slice 0 path with REAL components:
 //   - Real SQLite on disk (matches production deploy mode; per PRY-002 lessons
