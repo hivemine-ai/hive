@@ -1,0 +1,127 @@
+# Hive v0.1 OSS — Docker Compose reference (Topology 2 per ADR-008).
+#
+#   docker compose -f deployment/docker-compose.yml up -d
+#       Starts only `hive-server`. The server runs against a SQLite file
+#       in the named volume `hive-db` — zero external infra required.
+#
+#   docker compose -f deployment/docker-compose.yml --profile postgres up -d
+#       Adds `hive-postgres` (postgres:16-bookworm) and the server connects
+#       to it via the `hive-net` bridge. Operator MUST set POSTGRES_PASSWORD
+#       in `.env` (compose fails fast otherwise).
+#
+# Topology 1 (CLI + SQLite, no Docker) lives in packages/cli/README.md and
+# docs/hivectl.md — that path bypasses this file entirely.
+
+services:
+  hive-server:
+    # Image is built locally from the repo root per ADR-010 (no GHCR pull
+    # during Fase 1). When public distribution opens (PRY-009 follow-up),
+    # this becomes optional `image: ghcr.io/hivemine-ai/hive:${HIVE_IMAGE_TAG}`.
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    container_name: hive-server
+    restart: unless-stopped
+    init: true
+    # `depends_on` only enforces an order when the dependency is actually
+    # part of the active profile. `docker compose up` (no profile) ignores
+    # this; `docker compose --profile postgres up` waits for hive-postgres
+    # healthcheck to pass.
+    depends_on:
+      hive-postgres:
+        condition: service_healthy
+        required: false
+    environment:
+      # Persistence — defaults match Topology 2 with SQLite-in-container.
+      # Override via `.env` to point at a Postgres URL when --profile postgres
+      # is active (DATABASE_URL takes precedence; or build it from POSTGRES_*).
+      HIVE_DB_DIALECT: ${HIVE_DB_DIALECT:-sqlite}
+      HIVE_DB_URL: ${HIVE_DB_URL:-sqlite:/var/lib/hive/db/hive.sqlite}
+      # Auth + transport bind — the server listens inside the container on
+      # 0.0.0.0:8443; compose maps to host via HIVE_BIND_HOST/HIVE_PUBLIC_PORT.
+      HIVE_AUTH_KEYS_DIR: /var/lib/hive/keys
+      HIVE_MCP_HTTP_HOST: 0.0.0.0
+      HIVE_MCP_HTTP_PORT: 8443
+      TZ: UTC
+    env_file:
+      # `.env` is the operator's override file (copied from .env.example).
+      # `required: false` lets `docker compose config` succeed in fresh
+      # checkouts (CI) and during initial bootstrap before the operator
+      # creates `.env`. Defaults from `${VAR:-...}` interpolations apply.
+      - path: .env
+        required: false
+    volumes:
+      - hive-keys:/var/lib/hive/keys
+      - hive-db:/var/lib/hive/db
+    networks:
+      - hive-net
+    ports:
+      # Default bind is loopback only — secure-by-default. To expose on the
+      # public interface the operator must explicitly set HIVE_BIND_HOST=0.0.0.0
+      # in .env (only safe behind a reverse proxy that terminates TLS).
+      - '${HIVE_BIND_HOST:-127.0.0.1}:${HIVE_PUBLIC_PORT:-8443}:8443'
+    healthcheck:
+      # `node -e` (vs wget) — node is guaranteed in the base image; wget is
+      # not, and could be removed in a future bookworm-slim bump per the
+      # Deployment tech spec § "Decisión: healthcheck probe".
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "require('http').get('http://localhost:8443/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Slightly above HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS (default 30s).
+    # Lets the composition root drain in-flight HTTP requests before SIGKILL.
+    stop_grace_period: 35s
+
+  # Postgres is opt-in. `docker compose up` (no profile) does NOT start it.
+  # `docker compose --profile postgres up` brings it online and the server
+  # blocks on its healthcheck before starting.
+  hive-postgres:
+    profiles: ['postgres']
+    image: postgres:16-bookworm
+    container_name: hive-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hive}
+      # POSTGRES_PASSWORD has NO compose-time default. When `--profile postgres`
+      # is active and the variable is unset, the postgres:16 image fails fast
+      # at startup with `Database is uninitialized and superuser password is
+      # not specified` (exit code 1, visible via `docker compose logs hive-postgres`).
+      # We avoid `${...:?msg}` here because compose evaluates that even when
+      # the profile is NOT active — which would break `docker compose config`
+      # for the SQLite-default Topology 2.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-hive}
+      TZ: UTC
+    volumes:
+      - hive-postgres-data:/var/lib/postgresql/data
+    networks:
+      - hive-net
+    # No `ports:` exposure — Postgres is reachable only on the internal
+    # `hive-net` bridge. Operators who need direct access (debugging) can
+    # uncomment with a loopback bind: `ports: ['127.0.0.1:5432:5432']`.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-hive} -d ${POSTGRES_DB:-hive}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  hive-keys:
+    name: hive-keys
+  hive-db:
+    name: hive-db
+  hive-postgres-data:
+    name: hive-postgres-data
+
+networks:
+  hive-net:
+    name: hive-net
+    driver: bridge

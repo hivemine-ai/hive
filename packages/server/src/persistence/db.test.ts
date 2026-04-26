@@ -48,14 +48,34 @@ describe('resolveDbConfigFromEnv', () => {
     expect(cfg.postgresPoolSize).toBe(25);
   });
 
-  it('rejects non-positive HIVE_DB_POOL_SIZE', () => {
+  it('rejects non-numeric HIVE_DB_POOL_SIZE', () => {
     expect(() =>
       resolveDbConfigFromEnv({
         HIVE_DB_DIALECT: 'postgres',
         HIVE_DB_URL: 'postgres://h/d',
         HIVE_DB_POOL_SIZE: 'abc',
       }),
-    ).toThrow(/positive integer/);
+    ).toThrow(/HIVE_DB_POOL_SIZE must be an integer/);
+  });
+
+  it('rejects zero or negative HIVE_DB_POOL_SIZE', () => {
+    expect(() =>
+      resolveDbConfigFromEnv({
+        HIVE_DB_DIALECT: 'postgres',
+        HIVE_DB_URL: 'postgres://h/d',
+        HIVE_DB_POOL_SIZE: '0',
+      }),
+    ).toThrow(/HIVE_DB_POOL_SIZE must be >= 1/);
+  });
+
+  it('rejects fractional HIVE_DB_POOL_SIZE (carry-over PRY-005 N5)', () => {
+    expect(() =>
+      resolveDbConfigFromEnv({
+        HIVE_DB_DIALECT: 'postgres',
+        HIVE_DB_URL: 'postgres://h/d',
+        HIVE_DB_POOL_SIZE: '1.5',
+      }),
+    ).toThrow(/HIVE_DB_POOL_SIZE must be an integer/);
   });
 
   it('disables sqliteWal when HIVE_DB_SQLITE_WAL=false', () => {

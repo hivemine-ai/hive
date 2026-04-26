@@ -4,6 +4,8 @@ import BetterSqlite3 from 'better-sqlite3';
 import { Kysely, PostgresDialect, SqliteDialect } from 'kysely';
 import type * as Pg from 'pg';
 
+import { parseBoolEnv, parseIntEnv } from '#observability/env.js';
+
 import type { Database } from './schema.js';
 
 export type DbDialect = 'sqlite' | 'postgres';
@@ -38,16 +40,15 @@ export function resolveDbConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Db
   const cfg: DbConfig = {
     dialect,
     url,
-    sqliteWal: env['HIVE_DB_SQLITE_WAL'] !== 'false',
+    sqliteWal: parseBoolEnv(env['HIVE_DB_SQLITE_WAL'], true, { name: 'HIVE_DB_SQLITE_WAL' }),
   };
 
   const poolSize = env['HIVE_DB_POOL_SIZE'];
-  if (poolSize !== undefined) {
-    const parsed = Number.parseInt(poolSize, 10);
-    if (Number.isNaN(parsed) || parsed <= 0) {
-      throw new Error(`HIVE_DB_POOL_SIZE must be a positive integer, got: '${poolSize}'`);
-    }
-    cfg.postgresPoolSize = parsed;
+  if (poolSize !== undefined && poolSize !== '') {
+    cfg.postgresPoolSize = parseIntEnv(poolSize, 0, {
+      name: 'HIVE_DB_POOL_SIZE',
+      min: 1,
+    });
   }
 
   return cfg;

@@ -1,0 +1,161 @@
+name: Smoke
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cli-sqlite-e2e:
+    name: cli + sqlite e2e (Topology 1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Bootstrap a Hive (hivectl init → SQLite + first credential)
+        id: init
+        env:
+          # `hive list-keepers` (used after init) consumes these via wire.startCli().
+          # `init` itself takes the same paths as CLI flags below.
+          HIVE_DB_URL: sqlite:${{ runner.temp }}/hive.sqlite
+          HIVE_AUTH_KEYS_DIR: ${{ runner.temp }}/keys
+        run: |
+          mkdir -p "${{ runner.temp }}/keys"
+          # `init` reads --db and --keys-dir as flags (NOT env). Pass them
+          # explicitly so the server (which DOES read env) finds the same
+          # state in subsequent steps.
+          node packages/cli/dist/main.js init \
+            --admin-email ci@hive.test \
+            --admin-display-name 'CI Smoke Admin' \
+            --db "sqlite:${{ runner.temp }}/hive.sqlite" \
+            --keys-dir "${{ runner.temp }}/keys" \
+            --output-credential "${{ runner.temp }}/admin.jwt"
+          # Look up the admin's participantId via hivectl. `list-keepers --output json`
+          # emits the keeper array directly (no `items` wrapper).
+          ADMIN_PARTICIPANT_ID=$(node packages/cli/dist/main.js hive list-keepers --output json \
+            | node -e 'const a=JSON.parse(require("fs").readFileSync(0,"utf8")); const k=Array.isArray(a)?a.find(k=>k.email==="ci@hive.test"):null; if(!k){console.error("ci@hive.test keeper not found",JSON.stringify(a)); process.exit(1)} console.log(k.id)')
+          echo "admin_participant_id=$ADMIN_PARTICIPANT_ID" >> "$GITHUB_OUTPUT"
+          echo "Bootstrapped Hive — admin participantId=$ADMIN_PARTICIPANT_ID"
+
+      - name: Start hive-server in the background
+        env:
+          HIVE_DB_URL: sqlite:${{ runner.temp }}/hive.sqlite
+          HIVE_AUTH_KEYS_DIR: ${{ runner.temp }}/keys
+          HIVE_MCP_HTTP_HOST: 127.0.0.1
+          HIVE_MCP_HTTP_PORT: '8443'
+          HIVE_MCP_LOG_LEVEL: info
+        run: |
+          # nohup + disown keeps the process alive after this step ends. PID
+          # is written to a file so the cleanup step can SIGTERM it.
+          nohup node packages/server/dist/main.js > "${{ runner.temp }}/server.log" 2>&1 &
+          echo $! > "${{ runner.temp }}/server.pid"
+          echo "Server started — pid=$(cat "${{ runner.temp }}/server.pid")"
+
+      - name: Wait for /readyz to return 200
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8443/readyz > /dev/null; then
+              echo "/readyz is 200 (after ${i}s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::server did not become ready within 30s"
+          echo '--- server.log ---'
+          cat "${{ runner.temp }}/server.log" || true
+          exit 1
+
+      - name: Verify /healthz, /readyz, /.well-known/jwks.json
+        run: |
+          set -e
+          curl -fsS http://127.0.0.1:8443/healthz > /dev/null
+          curl -fsS http://127.0.0.1:8443/readyz > /dev/null
+          KEYS=$(curl -fsS http://127.0.0.1:8443/.well-known/jwks.json | node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log((j.keys||[]).length)')
+          if [ "$KEYS" -lt 1 ]; then echo "::error::JWKS has 0 keys"; exit 1; fi
+          echo "Endpoints ok (jwks has $KEYS key(s))"
+
+      - name: MCP roundtrip — initialize + tools/call get_agent_config
+        run: |
+          JWT=$(cat "${{ runner.temp }}/admin.jwt")
+          node deployment/smoke-mcp-client.mjs \
+            http://127.0.0.1:8443 \
+            "$JWT" \
+            "${{ steps.init.outputs.admin_participant_id }}"
+
+      - name: Cleanup — stop server
+        if: always()
+        run: |
+          if [ -f "${{ runner.temp }}/server.pid" ]; then
+            PID=$(cat "${{ runner.temp }}/server.pid")
+            kill -TERM "$PID" 2>/dev/null || true
+            # Give the drain a moment, then SIGKILL if still alive.
+            for i in 1 2 3 4 5; do
+              if ! kill -0 "$PID" 2>/dev/null; then break; fi
+              sleep 1
+            done
+            kill -KILL "$PID" 2>/dev/null || true
+          fi
+          echo '--- server.log tail ---'
+          tail -100 "${{ runner.temp }}/server.log" 2>/dev/null || true
+
+  docker-build:
+    name: docker image build (Topology 2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate compose syntax (default — no profile)
+        run: docker compose -f deployment/docker-compose.yml config > /dev/null
+
+      - name: Validate compose syntax (--profile postgres)
+        env:
+          POSTGRES_PASSWORD: smoke-only-not-a-real-password
+        run: docker compose -f deployment/docker-compose.yml --profile postgres config > /dev/null
+
+      - name: Build image (direct docker build for deterministic tagging)
+        run: docker build -f deployment/Dockerfile -t hive:smoke .
+
+      - name: Verify image size < 300 MB compressed
+        run: |
+          # `docker image inspect` returns the uncompressed virtual size; the
+          # compressed size (registry pull size) is best estimated by saving
+          # the image to a tar and gzipping it.
+          docker image inspect hive:smoke --format '{{.Size}} bytes uncompressed'
+          docker image save hive:smoke | gzip --best > /tmp/hive-image.tgz
+          SIZE=$(stat -c '%s' /tmp/hive-image.tgz)
+          MAX=$((300 * 1024 * 1024))
+          echo "Compressed image size: $SIZE bytes (limit $MAX)"
+          if [ "$SIZE" -gt "$MAX" ]; then
+            echo "::error::image exceeds 300 MB compressed limit"
+            exit 1
+          fi

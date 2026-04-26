@@ -51,6 +51,7 @@ import {
   createReader,
 } from '#domain/cells/index.js';
 import type { CellsRepo } from '#domain/cells/index.js';
+import { parseIntEnv } from '#observability/env.js';
 import type { Logger } from '#observability/logger.js';
 import { createDb } from '#persistence/db.js';
 import type { Database } from '#persistence/schema.js';
@@ -98,13 +99,26 @@ export function resolveWireConfigFromEnv(
 ): Required<WireConfig> {
   return {
     httpHost: overrides.httpHost ?? env['HIVE_MCP_HTTP_HOST'] ?? '0.0.0.0',
-    httpPort: overrides.httpPort ?? parseInt(env['HIVE_MCP_HTTP_PORT'] ?? '8443', 10),
+    httpPort:
+      overrides.httpPort ??
+      parseIntEnv(env['HIVE_MCP_HTTP_PORT'], 8443, {
+        name: 'HIVE_MCP_HTTP_PORT',
+        min: 1,
+        max: 65535,
+      }),
     mcpPath: overrides.mcpPath ?? env['HIVE_MCP_HTTP_PATH'] ?? '/mcp',
     readyzDbTimeoutMs:
-      overrides.readyzDbTimeoutMs ?? parseInt(env['HIVE_MCP_READYZ_DB_TIMEOUT_MS'] ?? '500', 10),
+      overrides.readyzDbTimeoutMs ??
+      parseIntEnv(env['HIVE_MCP_READYZ_DB_TIMEOUT_MS'], 500, {
+        name: 'HIVE_MCP_READYZ_DB_TIMEOUT_MS',
+        min: 1,
+      }),
     shutdownDrainTimeoutSeconds:
       overrides.shutdownDrainTimeoutSeconds ??
-      parseInt(env['HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS'] ?? '30', 10),
+      parseIntEnv(env['HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS'], 30, {
+        name: 'HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS',
+        min: 1,
+      }),
     keysDir: overrides.keysDir ?? env['HIVE_AUTH_KEYS_DIR'] ?? './keys',
   };
 }
@@ -216,18 +230,12 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     async stop() {
       logger.info({ event: 'wire_stopping' }, 'hive server shutting down');
       const drainMs = Math.max(1, cfg.shutdownDrainTimeoutSeconds) * 1000;
-      const stopWithTimeout = Promise.race([
-        httpHost.stop(),
-        new Promise<void>((resolve) => setTimeout(() => resolve(), drainMs)),
-      ]);
-      try {
-        await stopWithTimeout;
-      } catch (err) {
+      await stopWithDrainTimeout(httpHost.stop(), drainMs, (err) => {
         logger.error(
           { event: 'wire_stop_failed', err: err instanceof Error ? err.message : String(err) },
           'http host stop failed',
         );
-      }
+      });
       try {
         await closeKyselyDb(db);
       } catch (err) {
@@ -255,6 +263,37 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
 async function closeKyselyDb(db: Kysely<Database>): Promise<void> {
   await db.destroy();
+}
+
+/**
+ * Drain `innerStop` with a timeout race. In-race rejects are forwarded to
+ * `onError`; post-race rejects are absorbed silently (carry-over PRY-006 F7
+ * — without the silent guard, a slow `httpHost.stop()` that rejects after
+ * `Promise.race` already returned by timeout escapes as `unhandledRejection`,
+ * whose default policy crashes the process in prod).
+ *
+ * Exported for unit-test access — production callers MUST wrap their own
+ * `innerStop` and pass it in.
+ */
+export async function stopWithDrainTimeout(
+  innerStop: Promise<void>,
+  drainMs: number,
+  onError: (err: unknown) => void,
+): Promise<void> {
+  // Attach a silent catch synchronously, BEFORE the race awaits, so any
+  // rejection (during or after the race) is "handled" from Node's POV. The
+  // race below still propagates in-race rejections to `onError`.
+  innerStop.catch(() => undefined);
+
+  const race = Promise.race([
+    innerStop,
+    new Promise<void>((resolve) => setTimeout(() => resolve(), drainMs)),
+  ]);
+  try {
+    await race;
+  } catch (err) {
+    onError(err);
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -287,11 +326,18 @@ export function resolveCliConfigFromEnv(
   env: NodeJS.ProcessEnv,
   overrides: CliWireConfig = {},
 ): CliResolvedConfig {
-  const days = parseInt(env['HIVE_AUTH_CREDENTIAL_DEFAULT_TTL_DAYS'] ?? '365', 10);
+  const days = parseIntEnv(env['HIVE_AUTH_CREDENTIAL_DEFAULT_TTL_DAYS'], 365, {
+    name: 'HIVE_AUTH_CREDENTIAL_DEFAULT_TTL_DAYS',
+    min: 1,
+  });
   return {
     keysDir: overrides.keysDir ?? env['HIVE_AUTH_KEYS_DIR'] ?? './var/keys',
     snapshotMaxBytes:
-      overrides.snapshotMaxBytes ?? parseInt(env['HIVE_AUTH_SNAPSHOT_MAX_BYTES'] ?? '16384', 10),
+      overrides.snapshotMaxBytes ??
+      parseIntEnv(env['HIVE_AUTH_SNAPSHOT_MAX_BYTES'], 16384, {
+        name: 'HIVE_AUTH_SNAPSHOT_MAX_BYTES',
+        min: 1,
+      }),
     defaultCredentialTtlMs: overrides.defaultCredentialTtlMs ?? days * 24 * 60 * 60 * 1000,
   };
 }
