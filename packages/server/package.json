@@ -10,7 +10,8 @@
   "imports": {
     "#persistence/*": "./dist/persistence/*",
     "#domain/*": "./dist/domain/*",
-    "#observability/*": "./dist/observability/*"
+    "#observability/*": "./dist/observability/*",
+    "#composition/*": "./dist/composition/*"
   },
   "scripts": {
     "build": "tsc -b",

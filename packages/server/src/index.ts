@@ -14,6 +14,10 @@ export type {
   CredentialRevocationsTable,
   SigningKeysTable,
   DistributedLocksTable,
+  CellsTable,
+  MessagesTable,
+  RetentionPoliciesTable,
+  IdempotencyKeysTable,
   IsoTimestamp,
   JsonText,
   UUIDv7,
@@ -45,3 +49,6 @@ export * from './domain/auth/index.js';
 
 // uuid v7 — re-exported so downstream packages don't need to add `uuid` as a direct dep.
 export { v7 as uuidv7 } from 'uuid';
+
+// Cells (Cell Store + Message Persistence) — public surface re-exported for downstream packages.
+export * from './domain/cells/index.js';

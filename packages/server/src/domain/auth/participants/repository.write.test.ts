@@ -79,6 +79,53 @@ describe('participants write repository', () => {
         expect(e.subCode).toBe('email_already_used');
       }
     });
+
+    it("calls cellsHook.createCell with ownerKind 'hivekeeper'", async () => {
+      const hook = makeSpyHook();
+      const repo = createParticipantsWriteRepo(world.db, { cellsHook: hook });
+      const hk = await repo.createHivekeeper(
+        {
+          hiveId: world.hiveId,
+          colonyId: world.colonyId,
+          email: 'hookspy@example.com',
+        },
+        SYSTEM_CALLER,
+      );
+      expect(hook.createCalls).toEqual([{ ownerId: hk.id, ownerKind: 'hivekeeper' }]);
+      expect(hook.closeCalls).toEqual([]);
+    });
+
+    it('rolls back keeper INSERT if cellsHook.createCell throws', async () => {
+      const hookError = new Error('cell-store down');
+      const failingHook: CellsRepoHook = {
+        createCell(): Promise<void> {
+          return Promise.reject(hookError);
+        },
+        closeCell(): Promise<void> {
+          return Promise.resolve();
+        },
+      };
+      const repo = createParticipantsWriteRepo(world.db, { cellsHook: failingHook });
+
+      await expect(
+        repo.createHivekeeper(
+          {
+            hiveId: world.hiveId,
+            colonyId: world.colonyId,
+            email: 'rollback@example.com',
+          },
+          SYSTEM_CALLER,
+        ),
+      ).rejects.toBe(hookError);
+
+      // Atomicity: the hivekeeper INSERT must have been rolled back with the TX.
+      const stillThere = await world.db
+        .selectFrom('hivekeepers')
+        .select('id')
+        .where('email', '=', 'rollback@example.com')
+        .executeTakeFirst();
+      expect(stillThere).toBeUndefined();
+    });
   });
 
   describe('createAgent', () => {

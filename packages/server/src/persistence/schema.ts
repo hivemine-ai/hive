@@ -92,6 +92,55 @@ export interface DistributedLocksTable {
   expires_at: IsoTimestamp;
 }
 
+// ---------- Cell Store (PRY-003) ----------
+
+export interface CellsTable {
+  id: UUIDv7;
+  hive_id: UUIDv7;
+  owner_id: UUIDv7;
+  owner_kind: 'hivekeeper' | 'agent';
+  state: Generated<'active' | 'closed'>;
+  created_at: Generated<IsoTimestamp>;
+  closed_at: IsoTimestamp | null;
+}
+
+export interface MessagesTable {
+  id: UUIDv7;
+  cell_id: UUIDv7;
+  from_participant_id: UUIDv7;
+  to_participant_id: UUIDv7;
+  type: 'request' | 'response' | 'notification';
+  body: string;
+  action: JsonText | null;
+  reply_to: UUIDv7 | null;
+  ttl_ms: number | null;
+  sent_at: Generated<IsoTimestamp>;
+  delivered_at: Generated<IsoTimestamp>;
+  read_at: IsoTimestamp | null;
+  state: Generated<'sent' | 'delivered' | 'read' | 'expired'>;
+  expired_at: IsoTimestamp | null;
+}
+
+export interface RetentionPoliciesTable {
+  id: UUIDv7;
+  hive_id: UUIDv7;
+  scope: 'hive' | 'hivekeeper';
+  scope_id: UUIDv7 | null;
+  unread_retention_ms: number | null;
+  read_retention_ms: number | null;
+  created_at: Generated<IsoTimestamp>;
+  updated_at: Generated<IsoTimestamp>;
+  frozen_at: IsoTimestamp | null;
+  set_by: UUIDv7 | null;
+}
+
+export interface IdempotencyKeysTable {
+  sender_id: UUIDv7;
+  key: string;
+  message_id: UUIDv7;
+  created_at: Generated<IsoTimestamp>;
+}
+
 export interface Database {
   hives: HivesTable;
   colonies: ColoniesTable;
@@ -101,4 +150,8 @@ export interface Database {
   credential_revocations: CredentialRevocationsTable;
   signing_keys: SigningKeysTable;
   distributed_locks: DistributedLocksTable;
+  cells: CellsTable;
+  messages: MessagesTable;
+  retention_policies: RetentionPoliciesTable;
+  idempotency_keys: IdempotencyKeysTable;
 }

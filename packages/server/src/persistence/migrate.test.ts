@@ -6,7 +6,7 @@ import { migrateDown, migrateToLatest } from './migrate.js';
 import type { Database } from './schema.js';
 import type { Kysely } from 'kysely';
 
-const EXPECTED_TABLES = [
+const EXPECTED_AUTH_TABLES = [
   'agents',
   'colonies',
   'credential_revocations',
@@ -16,6 +16,10 @@ const EXPECTED_TABLES = [
   'hives',
   'signing_keys',
 ];
+
+const EXPECTED_CELL_TABLES = ['cells', 'idempotency_keys', 'messages', 'retention_policies'];
+
+const EXPECTED_TABLES = [...EXPECTED_AUTH_TABLES, ...EXPECTED_CELL_TABLES].sort();
 
 describe('migrateToLatest', () => {
   let db: Kysely<Database>;
@@ -28,7 +32,7 @@ describe('migrateToLatest', () => {
     await db.destroy();
   });
 
-  it('creates all 8 tables (7 auth + distributed_locks)', async () => {
+  it('creates the full set of tables (auth + cell store)', async () => {
     const result = await migrateToLatest(db);
     expect(result.results?.every((r) => r.status === 'Success')).toBe(true);
 
@@ -50,10 +54,17 @@ describe('migrateToLatest', () => {
     const downResult = await migrateDown(db);
     expect(downResult.results?.[0]?.status).toBe('Success');
 
+    // `migrateDown` only rolls back the most recent migration (cell store tables);
+    // the auth tables should still be present. Cell-store tables must be gone.
     const tables = await sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'kysely_%'
+      ORDER BY name
     `.execute(db);
-    expect(tables.rows.length).toBe(0);
+    const remaining = tables.rows.map((r) => r.name).sort();
+    expect(remaining).toEqual(EXPECTED_AUTH_TABLES);
+    for (const cellTable of EXPECTED_CELL_TABLES) {
+      expect(remaining).not.toContain(cellTable);
+    }
   });
 
   it('inserts a default state row with CURRENT_TIMESTAMP working in SQLite', async () => {
