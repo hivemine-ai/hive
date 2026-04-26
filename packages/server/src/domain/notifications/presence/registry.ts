@@ -69,8 +69,7 @@ const DEFAULT_MAX_SESSIONS = 16;
 export function createPresenceRegistry(config: PresenceRegistryConfig = {}): PresenceRegistry {
   const presenceMap = new Map<UUIDv7, ParticipantPresence>();
   const maxSessions = config.maxSessionsPerParticipant ?? DEFAULT_MAX_SESSIONS;
-  const heartbeatEnabled =
-    (config.heartbeatTimeoutMs ?? null) !== null && config.heartbeatTimeoutMs! > 0;
+  const heartbeatEnabled = config.heartbeatTimeoutMs != null && config.heartbeatTimeoutMs > 0;
 
   function getOrCreate(participantId: UUIDv7): ParticipantPresence {
     let entry = presenceMap.get(participantId);
@@ -79,6 +78,27 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
       presenceMap.set(participantId, entry);
     }
     return entry;
+  }
+
+  // Module-private closure form so the returned object's methods don't depend
+  // on `this` binding. Callers that destructure (`const { subscribe } = reg;`)
+  // would otherwise hit `Cannot read properties of undefined`.
+  function unsubscribeImpl(subscriptionId: UUIDv7, participantId: UUIDv7): void {
+    const presence = presenceMap.get(participantId);
+    if (!presence) return;
+    // Lookup by subscriptionId — O(n) where n ≤ cap (default 16).
+    let matchedConnectionId: UUIDv7 | undefined;
+    for (const [connectionId, sub] of presence.subscriberByConnection) {
+      if (sub.subscriptionId === subscriptionId) {
+        matchedConnectionId = connectionId;
+        break;
+      }
+    }
+    if (matchedConnectionId === undefined) return;
+    presence.subscriberByConnection.delete(matchedConnectionId);
+    if (presence.subscriberByConnection.size === 0) {
+      presenceMap.delete(participantId);
+    }
   }
 
   return {
@@ -118,7 +138,7 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
       presence.subscriberByConnection.set(input.handle.connectionId, entry);
 
       const close = (): void => {
-        this.unsubscribe(subscriptionId, participantId);
+        unsubscribeImpl(subscriptionId, participantId);
       };
       // The handle wires its own close detection (socket dead → invoke this).
       input.handle.onClose(close);
@@ -143,23 +163,7 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
       return Promise.resolve(subscription);
     },
 
-    unsubscribe(subscriptionId, participantId) {
-      const presence = presenceMap.get(participantId);
-      if (!presence) return;
-      // Lookup by subscriptionId — O(n) where n ≤ cap (default 16).
-      let matchedConnectionId: UUIDv7 | undefined;
-      for (const [connectionId, sub] of presence.subscriberByConnection) {
-        if (sub.subscriptionId === subscriptionId) {
-          matchedConnectionId = connectionId;
-          break;
-        }
-      }
-      if (matchedConnectionId === undefined) return;
-      presence.subscriberByConnection.delete(matchedConnectionId);
-      if (presence.subscriberByConnection.size === 0) {
-        presenceMap.delete(participantId);
-      }
-    },
+    unsubscribe: unsubscribeImpl,
 
     getPresence(participantId) {
       const presence = presenceMap.get(participantId);

@@ -231,16 +231,47 @@ describe('createPipeline.handleMessageDelivered', () => {
     expect(rig.absorbedEvents).toHaveLength(0);
   });
 
-  it('handler is sync (does not throw) — async failure logged', async () => {
-    const { rig, pipeline } = buildPipelineRig({ presenceOnline: true });
-    // Force the async branch to throw by overriding the ParticipantsReadRepo mock.
-    // We do that by re-building the rig with a thrower.
+  it('async branch throws → sync entrypoint stays silent and emits waggle_handle_message_delivered_failed log', async () => {
+    // Build a rig whose participantsRepo throws — the inner try/catch must
+    // funnel the error into the structured log without re-raising.
+    const log = silentLogger();
+    const presenceRegistry = {
+      getPresence: () => ({ online: true, sessionCount: 1, sessionsSubscribedAt: [new Date()] }),
+      forEachSubscriber: () => Promise.resolve(),
+    } as unknown as PresenceRegistry;
+    const participantsRepo = {
+      getParticipantState: () => Promise.reject(new Error('db boom')),
+    } as unknown as ParticipantsReadRepo;
+    const cellsRepo = { findCellById: () => Promise.resolve(null) } as unknown as CellsRepo;
+    const builder: Builder = {
+      buildOnlineWaggle: () => Promise.resolve(null),
+      buildReplayWaggle: () => Promise.resolve(null),
+    };
+    const absorbedEvents: MessageDeliveredEvent[] = [];
+    const consolidator = {
+      absorb: (event: MessageDeliveredEvent) => absorbedEvents.push(event),
+      cancelWindow: () => {},
+      __activeWindowCount: () => 0,
+    } as unknown as Consolidator;
+    const pipeline = createPipeline({
+      presenceRegistry,
+      participantsRepo,
+      cellsRepo,
+      builder,
+      consolidator,
+      logger: log.logger,
+    });
     const event = makeEvent(uuidv7(), uuidv7());
+
     expect(() => pipeline.handleMessageDelivered(event)).not.toThrow();
     await flushMicrotasks();
-    // Sanity: no absorb due to thrower not in this rig — just verifies the
-    // sync entrypoint never escalates.
-    expect(rig.absorbedEvents).toHaveLength(1);
+
+    expect(absorbedEvents).toHaveLength(0);
+    const failureLog = log.entries.find(
+      (e) => (e.payload as { event?: string }).event === 'waggle_handle_message_delivered_failed',
+    );
+    expect(failureLog).toBeDefined();
+    expect((failureLog?.payload as { errorMessage?: string }).errorMessage).toBe('db boom');
   });
 });
 
@@ -330,11 +361,31 @@ describe('createPipeline.handleCellClosed', () => {
     expect(rig.cancelled).toContain(cellId);
   });
 
-  it('does not throw on consolidator failure', () => {
-    const { rig, pipeline } = buildPipelineRig();
-    // Replace cancelWindow with a thrower via direct call — cleanest with the
-    // existing rig shape is to verify the wrap by injecting through cancelled
-    // override. Easier: trust the try/catch + ensure it didn't crash the test.
+  it('cancelWindow throws → sync entrypoint stays silent and emits waggle_handle_cell_closed_failed log', () => {
+    const log = silentLogger();
+    const presenceRegistry = {} as unknown as PresenceRegistry;
+    const participantsRepo = {} as unknown as ParticipantsReadRepo;
+    const cellsRepo = {} as unknown as CellsRepo;
+    const builder: Builder = {
+      buildOnlineWaggle: () => Promise.resolve(null),
+      buildReplayWaggle: () => Promise.resolve(null),
+    };
+    const consolidator = {
+      absorb: () => {},
+      cancelWindow: () => {
+        throw new Error('cancel boom');
+      },
+      __activeWindowCount: () => 0,
+    } as unknown as Consolidator;
+    const pipeline = createPipeline({
+      presenceRegistry,
+      participantsRepo,
+      cellsRepo,
+      builder,
+      consolidator,
+      logger: log.logger,
+    });
+
     expect(() =>
       pipeline.handleCellClosed({
         cellId: uuidv7(),
@@ -343,7 +394,12 @@ describe('createPipeline.handleCellClosed', () => {
         reason: 'hivekeeper_cascade',
       }),
     ).not.toThrow();
-    expect(rig.cancelled.length).toBeGreaterThanOrEqual(1);
+
+    const failureLog = log.entries.find(
+      (e) => (e.payload as { event?: string }).event === 'waggle_handle_cell_closed_failed',
+    );
+    expect(failureLog).toBeDefined();
+    expect((failureLog?.payload as { errorMessage?: string }).errorMessage).toBe('cancel boom');
   });
 });
 
