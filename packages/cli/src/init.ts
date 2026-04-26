@@ -15,6 +15,7 @@ import {
   acquireLock,
   AuthError,
   boolToInt,
+  createCellsRepo,
   createDb,
   createIssuer,
   createParticipantsReadRepo,
@@ -111,6 +112,11 @@ export async function performInit(opts: InitOptions): Promise<InitResult> {
       const colonyId = uuidv7();
       const adminHivekeeperId = uuidv7();
 
+      // cellsRepo is bound to the outer `db` but every method we call inside
+      // the bootstrap TX below MUST forward the `tx` executor explicitly.
+      // Calling cellsRepo.<method>(...) without `tx` would silently bypass the
+      // bootstrap transaction and break atomicity of the hive+admin+cell write.
+      const cellsRepo = createCellsRepo(db);
       await db.transaction().execute(async (tx) => {
         await tx
           .insertInto('hives')
@@ -143,6 +149,10 @@ export async function performInit(opts: InitOptions): Promise<InitResult> {
             revoked_at: null,
           })
           .execute();
+        await cellsRepo.createCell(
+          { ownerId: adminHivekeeperId, ownerKind: 'hivekeeper', hiveId },
+          tx,
+        );
       });
 
       // Step 7: initial credential for the admin Hivekeeper.

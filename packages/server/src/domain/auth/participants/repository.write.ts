@@ -142,31 +142,44 @@ export function createParticipantsWriteRepo(
 
       const id = uuidv7();
       const now = clock();
-      try {
-        await db
-          .insertInto('hivekeepers')
-          .values({
-            id,
-            hive_id: input.hiveId,
-            colony_id: input.colonyId,
-            email: input.email,
-            display_name: input.displayName ?? null,
-            is_admin: boolToInt(input.isAdmin ?? false),
-            state: 'active',
-            created_at: dateToIso(now),
-            revoked_at: null,
-          })
-          .execute();
-      } catch (err) {
-        throw mapInsertError(err, 'hivekeeper');
-      }
 
-      const row = await db
-        .selectFrom('hivekeepers')
-        .selectAll()
-        .where('id', '=', id)
-        .executeTakeFirstOrThrow();
-      return rowToHivekeeper(row);
+      return await db.transaction().execute<Hivekeeper>(async (tx) => {
+        try {
+          await tx
+            .insertInto('hivekeepers')
+            .values({
+              id,
+              hive_id: input.hiveId,
+              colony_id: input.colonyId,
+              email: input.email,
+              display_name: input.displayName ?? null,
+              is_admin: boolToInt(input.isAdmin ?? false),
+              state: 'active',
+              created_at: dateToIso(now),
+              revoked_at: null,
+            })
+            .execute();
+        } catch (err) {
+          throw mapInsertError(err, 'hivekeeper');
+        }
+
+        // Cross-domain hook (no-op stub in PRY-002; real adapter wired in PRY-003).
+        // The cell write participates in this TX → atomicity invariant: if the cell
+        // insert fails the hivekeeper INSERT is rolled back.
+        await cellsHook.createCell(tx, {
+          ownerId: id,
+          ownerKind: 'hivekeeper',
+          hiveId: input.hiveId,
+          colonyId: input.colonyId,
+        });
+
+        const row = await tx
+          .selectFrom('hivekeepers')
+          .selectAll()
+          .where('id', '=', id)
+          .executeTakeFirstOrThrow();
+        return rowToHivekeeper(row);
+      });
     },
 
     async createAgent(input, caller): Promise<Agent> {
@@ -218,6 +231,7 @@ export function createParticipantsWriteRepo(
       return result;
     },
 
+    // TODO(PRY-NEXT): revokeHivekeeperWithCascade — invokes cellsHook.closeCell for the keeper Cell + closeCellsByOwner for all owned agents' Cells. Deferred per PRY-003 scope decision.
     async revokeAgent(id, caller): Promise<void> {
       requireAdminCaller(caller);
 

@@ -12,16 +12,26 @@ import type { CellsRepoHook, DbExecutor } from './cells-hook.js';
 const SYSTEM_CALLER: CallerContext = { kind: 'system', osUser: 'tests' };
 
 function makeSpyHook(): CellsRepoHook & {
-  createCalls: { ownerId: string; ownerKind: string }[];
+  createCalls: { ownerId: string; ownerKind: string; hiveId: string; colonyId: string }[];
   closeCalls: { ownerId: string }[];
 } {
-  const createCalls: { ownerId: string; ownerKind: string }[] = [];
+  const createCalls: {
+    ownerId: string;
+    ownerKind: string;
+    hiveId: string;
+    colonyId: string;
+  }[] = [];
   const closeCalls: { ownerId: string }[] = [];
   return {
     createCalls,
     closeCalls,
     createCell(_executor: DbExecutor, input): Promise<void> {
-      createCalls.push({ ownerId: input.ownerId, ownerKind: input.ownerKind });
+      createCalls.push({
+        ownerId: input.ownerId,
+        ownerKind: input.ownerKind,
+        hiveId: input.hiveId,
+        colonyId: input.colonyId,
+      });
       return Promise.resolve();
     },
     closeCell(_executor: DbExecutor, input): Promise<void> {
@@ -79,6 +89,60 @@ describe('participants write repository', () => {
         expect(e.subCode).toBe('email_already_used');
       }
     });
+
+    it("calls cellsHook.createCell with ownerKind 'hivekeeper'", async () => {
+      const hook = makeSpyHook();
+      const repo = createParticipantsWriteRepo(world.db, { cellsHook: hook });
+      const hk = await repo.createHivekeeper(
+        {
+          hiveId: world.hiveId,
+          colonyId: world.colonyId,
+          email: 'hookspy@example.com',
+        },
+        SYSTEM_CALLER,
+      );
+      expect(hook.createCalls).toEqual([
+        {
+          ownerId: hk.id,
+          ownerKind: 'hivekeeper',
+          hiveId: world.hiveId,
+          colonyId: world.colonyId,
+        },
+      ]);
+      expect(hook.closeCalls).toEqual([]);
+    });
+
+    it('rolls back keeper INSERT if cellsHook.createCell throws', async () => {
+      const hookError = new Error('cell-store down');
+      const failingHook: CellsRepoHook = {
+        createCell(): Promise<void> {
+          return Promise.reject(hookError);
+        },
+        closeCell(): Promise<void> {
+          return Promise.resolve();
+        },
+      };
+      const repo = createParticipantsWriteRepo(world.db, { cellsHook: failingHook });
+
+      await expect(
+        repo.createHivekeeper(
+          {
+            hiveId: world.hiveId,
+            colonyId: world.colonyId,
+            email: 'rollback@example.com',
+          },
+          SYSTEM_CALLER,
+        ),
+      ).rejects.toBe(hookError);
+
+      // Atomicity: the hivekeeper INSERT must have been rolled back with the TX.
+      const stillThere = await world.db
+        .selectFrom('hivekeepers')
+        .select('id')
+        .where('email', '=', 'rollback@example.com')
+        .executeTakeFirst();
+      expect(stillThere).toBeUndefined();
+    });
   });
 
   describe('createAgent', () => {
@@ -99,7 +163,14 @@ describe('participants write repository', () => {
       expect(agent.name).toBe('spy-worker');
       expect(agent.type).toBe('worker');
       expect(agent.capabilities).toEqual(['cell.send']);
-      expect(hook.createCalls).toEqual([{ ownerId: agent.id, ownerKind: 'agent' }]);
+      expect(hook.createCalls).toEqual([
+        {
+          ownerId: agent.id,
+          ownerKind: 'agent',
+          hiveId: world.hiveId,
+          colonyId: world.colonyId,
+        },
+      ]);
     });
 
     it('rejects duplicate (owner_id, name) for non-revoked agents', async () => {

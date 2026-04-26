@@ -7,7 +7,9 @@
 import type { Migration } from 'kysely';
 
 import * as initialAuthTables from './20260425120000_initial-auth-tables.js';
+import * as initialCellStoreTables from './20260426120000_initial-cell-store-tables.js';
 
 export const ALL_MIGRATIONS: Record<string, Migration> = {
   '20260425120000_initial-auth-tables': initialAuthTables,
+  '20260426120000_initial-cell-store-tables': initialCellStoreTables,
 };
