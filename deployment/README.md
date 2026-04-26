@@ -131,9 +131,11 @@ docker compose -f deployment/docker-compose.yml run --rm \
 docker compose -f deployment/docker-compose.yml up -d hive-server
 ```
 
-When public distribution opens (PRY-009 follow-up per ADR-010), this becomes
-`docker compose pull` instead of `pnpm build && docker compose build` — see
-the [Public release path](#public-release-path) note below.
+When public distribution opens (a follow-up PRY per ADR-010 — to be
+numbered when planned, the IDs PRY-009/010 are already used by unrelated
+prior work), this becomes `docker compose pull` instead of
+`pnpm build && docker compose build` — see the
+[Public release path](#public-release-path) note below.
 
 ## Backup / restore
 
@@ -149,9 +151,11 @@ the [Public release path](#public-release-path) note below.
 > with `kid_unknown`. Backups MUST emit DB and keys as an atomic pair (same
 > timestamp suffix). Restores MUST validate the pair before applying.
 
-### Backup (online, no downtime)
+### Backup (Postgres truly online; SQLite needs a brief stop)
 
-For SQLite-in-container:
+For SQLite-in-container the snippet below stops the server for a few seconds
+to take a consistent volume snapshot — the WAL would otherwise be in flight.
+For Postgres `pg_dump` is fully online (no service interruption).
 
 ```bash
 # DB snapshot via volume tar (with the server briefly stopped for consistency)
@@ -291,7 +295,8 @@ Hive v0.1 stays internal during Fase 1 per
 no GHCR pushes, no `npm publish` for `@hive/cli`. Operators build from
 source as documented above.
 
-When v0.1 is battle-tested internally, a follow-up PRY (PRY-009) will add:
+When v0.1 is battle-tested internally, a follow-up PRY (to be numbered when
+planned — the IDs PRY-009/010 are already used by unrelated prior work) will add:
 
 - `release.yml` workflow to push tagged images to `ghcr.io/hivemine-ai/hive`.
 - `npm publish` for `@hive/cli`.

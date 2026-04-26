@@ -50,6 +50,16 @@ RUN pnpm prune --prod
 # ───────────────────────────────────────────────────────────────────────────
 FROM node:20-bookworm-slim AS runtime
 
+# OCI image metadata. Useful even pre-publication: `docker inspect` surfaces
+# this for any operator who pulls the image, and internal scanners pick it up.
+# When public distribution opens (follow-up PRY), these labels are already in
+# place — no extra work needed at release time.
+LABEL org.opencontainers.image.title="Hive" \
+      org.opencontainers.image.description="Open-source MCP server for collaborative AI agents" \
+      org.opencontainers.image.source="https://github.com/hivemine-ai/hive" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.authors="Hivemine <hivemine-ai@users.noreply.github.com>"
+
 # `node` user (UID/GID 1000) is created by the official base image. We just
 # pre-create the directories the server writes to so the volumes mount with
 # correct ownership.

@@ -45,6 +45,7 @@ jobs:
           HIVE_DB_URL: sqlite:${{ runner.temp }}/hive.sqlite
           HIVE_AUTH_KEYS_DIR: ${{ runner.temp }}/keys
         run: |
+          set -euo pipefail
           mkdir -p "${{ runner.temp }}/keys"
           # `init` reads --db and --keys-dir as flags (NOT env). Pass them
           # explicitly so the server (which DOES read env) finds the same
@@ -70,6 +71,7 @@ jobs:
           HIVE_MCP_HTTP_PORT: '8443'
           HIVE_MCP_LOG_LEVEL: info
         run: |
+          set -euo pipefail
           # nohup + disown keeps the process alive after this step ends. PID
           # is written to a file so the cleanup step can SIGTERM it.
           nohup node packages/server/dist/main.js > "${{ runner.temp }}/server.log" 2>&1 &
@@ -78,6 +80,10 @@ jobs:
 
       - name: Wait for /readyz to return 200
         run: |
+          set -uo pipefail
+          # NOTE: -e omitted intentionally — the polling loop relies on `curl`
+          # failing while the server starts. Each curl is checked via `if`,
+          # so an early failure is not an error condition.
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8443/readyz > /dev/null; then
               echo "/readyz is 200 (after ${i}s)"
@@ -92,7 +98,7 @@ jobs:
 
       - name: Verify /healthz, /readyz, /.well-known/jwks.json
         run: |
-          set -e
+          set -euo pipefail
           curl -fsS http://127.0.0.1:8443/healthz > /dev/null
           curl -fsS http://127.0.0.1:8443/readyz > /dev/null
           KEYS=$(curl -fsS http://127.0.0.1:8443/.well-known/jwks.json | node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log((j.keys||[]).length)')
@@ -101,6 +107,7 @@ jobs:
 
       - name: MCP roundtrip — initialize + tools/call get_agent_config
         run: |
+          set -euo pipefail
           JWT=$(cat "${{ runner.temp }}/admin.jwt")
           node deployment/smoke-mcp-client.mjs \
             http://127.0.0.1:8443 \
@@ -110,6 +117,10 @@ jobs:
       - name: Cleanup — stop server
         if: always()
         run: |
+          set -uo pipefail
+          # NOTE: -e omitted intentionally — `kill -TERM/KILL` against a
+          # dead PID returns non-zero and we use `|| true` to mask that.
+          # `set -e` would exit before reaching `tail` of server.log.
           if [ -f "${{ runner.temp }}/server.pid" ]; then
             PID=$(cat "${{ runner.temp }}/server.pid")
             kill -TERM "$PID" 2>/dev/null || true
@@ -147,6 +158,7 @@ jobs:
 
       - name: Verify image size < 300 MB compressed
         run: |
+          set -euo pipefail
           # `docker image inspect` returns the uncompressed virtual size; the
           # compressed size (registry pull size) is best estimated by saving
           # the image to a tar and gzipping it.
