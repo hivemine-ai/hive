@@ -64,10 +64,22 @@ export * from './domain/visibility/index.js';
 // Audit Log — public types + error class + repository + recorder factories.
 export * from './domain/audit/index.js';
 
+// Notifications domain (Waggle Pipeline + Presence Registry) — public surface.
+export * from './domain/notifications/index.js';
+
 // Composition root — production wiring helpers.
 export { createVisibilityEngineForProduction } from './composition/visibility-engine-factory.js';
 export type {
   VisibilityEngineFactoryDeps,
   VisibilityEngineFactoryOptions,
 } from './composition/visibility-engine-factory.js';
+export {
+  createNotificationsForProduction,
+  resolveNotificationsConfig,
+} from './composition/notifications-factory.js';
+export type {
+  Notifications,
+  NotificationsFactoryDeps,
+  NotificationsFactoryOptions,
+} from './composition/notifications-factory.js';
 export { stubVisibilityEngine } from './composition/stubs.js';
