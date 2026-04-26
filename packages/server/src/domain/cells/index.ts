@@ -55,6 +55,7 @@ export type { Sender, SenderConfig, SenderDeps } from './send.js';
 export { createReader, DEFAULT_READER_CONFIG } from './read.js';
 export type { Reader, ReaderConfig, ReaderDeps } from './read.js';
 
-// Visibility Engine contract — implemented elsewhere (PRY-008). Exposed here
-// so consumers depend on the cells domain rather than the composition root.
-export type { CanSeeInput, CanSendInput, VisibilityEngine } from './visibility-engine.js';
+// The Visibility Engine contract used by `send.ts` lives in `domain/visibility/`
+// (PRY-004). It is consumed by Cell Store but owned by Visibility — downstream
+// callers import it from `@hive/server` (re-exported by the package barrel) or
+// `#domain/visibility/index.js` (intra-server).

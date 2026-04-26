@@ -141,6 +141,54 @@ export interface IdempotencyKeysTable {
   created_at: Generated<IsoTimestamp>;
 }
 
+// ---------- Audit Log (PRY-004) ----------
+
+export type AuditEventCategoryDb =
+  | 'visibility_denial'
+  | 'admin_credential_issue'
+  | 'admin_credential_rotate'
+  | 'admin_credential_revoke'
+  | 'admin_signing_key_rotate'
+  | 'admin_hivekeeper_create'
+  | 'admin_hivekeeper_revoke'
+  | 'admin_hivekeeper_admin_grant'
+  | 'admin_hivekeeper_admin_revoke'
+  | 'admin_agent_create'
+  | 'admin_agent_revoke'
+  | 'admin_agent_type_change'
+  | 'admin_agent_suspend'
+  | 'admin_agent_resume'
+  | 'admin_retention_policy_set'
+  | 'admin_retention_policy_clear'
+  | 'admin_purge_run'
+  | 'waggle_push_suppressed';
+
+export type AuditDecisionDb = 'allow' | 'deny' | 'success' | 'failure';
+export type AuditActorKindDb = 'hivekeeper' | 'worker' | 'scout' | 'system';
+export type AuditSubjectKindDb =
+  | 'participant'
+  | 'credential'
+  | 'policy'
+  | 'cell'
+  | 'signing_key'
+  | 'audit_log_range';
+
+export interface AuditLogTable {
+  id: UUIDv7;
+  hive_id: UUIDv7;
+  occurred_at: IsoTimestamp;
+  created_at: Generated<IsoTimestamp>;
+  category: AuditEventCategoryDb;
+  decision: AuditDecisionDb;
+  actor_id: UUIDv7 | null;
+  actor_kind: AuditActorKindDb | null;
+  subject_id: UUIDv7 | null;
+  subject_kind: AuditSubjectKindDb | null;
+  reason_code: string | null;
+  detail: JsonText | null;
+  request_id: string | null;
+}
+
 export interface Database {
   hives: HivesTable;
   colonies: ColoniesTable;
@@ -154,4 +202,5 @@ export interface Database {
   messages: MessagesTable;
   retention_policies: RetentionPoliciesTable;
   idempotency_keys: IdempotencyKeysTable;
+  audit_log: AuditLogTable;
 }

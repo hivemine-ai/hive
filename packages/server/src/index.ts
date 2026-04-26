@@ -18,6 +18,11 @@ export type {
   MessagesTable,
   RetentionPoliciesTable,
   IdempotencyKeysTable,
+  AuditLogTable,
+  AuditEventCategoryDb,
+  AuditDecisionDb,
+  AuditActorKindDb,
+  AuditSubjectKindDb,
   IsoTimestamp,
   JsonText,
   UUIDv7,
@@ -52,3 +57,17 @@ export { v7 as uuidv7 } from 'uuid';
 
 // Cells (Cell Store + Message Persistence) — public surface re-exported for downstream packages.
 export * from './domain/cells/index.js';
+
+// Visibility Engine — public contract + types + matrix + engine factory.
+export * from './domain/visibility/index.js';
+
+// Audit Log — public types + error class + repository + recorder factories.
+export * from './domain/audit/index.js';
+
+// Composition root — production wiring helpers.
+export { createVisibilityEngineForProduction } from './composition/visibility-engine-factory.js';
+export type {
+  VisibilityEngineFactoryDeps,
+  VisibilityEngineFactoryOptions,
+} from './composition/visibility-engine-factory.js';
+export { stubVisibilityEngine } from './composition/stubs.js';

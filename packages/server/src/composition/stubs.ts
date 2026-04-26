@@ -1,13 +1,17 @@
-// Composition-root stubs for collaborators that are not yet implemented.
+// Composition-root stubs for collaborators that are not yet wired by default.
 //
-// The `VisibilityEngine` interface itself lives in `domain/cells/visibility-engine.ts`
-// so that `cells/send.ts` and downstream consumers depend on a neutral, intra-domain
-// contract instead of reaching into the composition root. PRY-008 (Visibility Engine)
-// will swap `stubVisibilityEngine` for the real implementation here.
+// The `VisibilityEngine` interface itself lives in `domain/visibility/types.ts`
+// (PRY-004). The stub below is preserved because PRY-003's domain unit tests
+// inject it to bypass the real engine; the composition root of the server uses
+// the real engine constructed by the visibility factory (PRY-004 Hito 8).
 
-import type { VisibilityEngine } from '#domain/cells/index.js';
+import type { VisibilityEngine } from '#domain/visibility/index.js';
 
-// Stub for Slice 0; replaced in PRY-008 (Visibility Engine).
+/**
+ * Always-allow stub. Use ONLY in domain unit tests of Cell Store that need a
+ * trivial engine. Production code paths must use the real engine wired by
+ * `composition/visibility-engine-factory.ts`.
+ */
 export const stubVisibilityEngine: VisibilityEngine = {
   canSend(): Promise<boolean> {
     return Promise.resolve(true);
