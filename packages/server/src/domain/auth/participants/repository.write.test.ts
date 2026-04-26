@@ -534,14 +534,23 @@ describe('participants write repository', () => {
     });
 
     it('rolls back the cascade if cellsHook throws mid-flight (atomicity)', async () => {
+      // Re-parent the seeded agents to the non-admin keeper so the cascade
+      // actually has agents to revoke; otherwise the agent rollback assertion
+      // below is vacuously true.
+      await world.db
+        .updateTable('agents')
+        .set({ owner_id: world.nonAdminHivekeeperId })
+        .where('id', 'in', [world.workerAgentId, world.scoutAgentId])
+        .execute();
+
       const hookError = new Error('cell-store mid-cascade failure');
       const failingHook: CellsRepoHook = {
         createCell(): Promise<void> {
           return Promise.resolve();
         },
         closeCell(): Promise<void> {
-          // Throws on the keeper close — after the keeper UPDATE but before the
-          // closeCellsByOwner step. The TX must roll back the keeper + agent UPDATEs.
+          // Throws on the keeper close — after the keeper + agent UPDATEs ran but
+          // before closeCellsByOwner. The TX must roll back the keeper + agent UPDATEs.
           return Promise.reject(hookError);
         },
         closeCellsByOwner(): Promise<void> {
@@ -554,20 +563,22 @@ describe('participants write repository', () => {
         repo.revokeHivekeeperWithCascade(world.nonAdminHivekeeperId, SYSTEM_CALLER),
       ).rejects.toBe(hookError);
 
-      // Atomicity: keeper must still be active, agents must still be active.
+      // Atomicity: keeper must still be active.
       const keeperRow = await world.db
         .selectFrom('hivekeepers')
         .select('state')
         .where('id', '=', world.nonAdminHivekeeperId)
         .executeTakeFirst();
       expect(keeperRow?.state).toBe('active');
+
+      // Atomicity: ALL re-parented agents (workerAgentId + scoutAgentId) must
+      // still be active. This is the assertion that previously was vacuous.
       const ownedAgents = await world.db
         .selectFrom('agents')
-        .select('state')
+        .select(['id', 'state'])
         .where('owner_id', '=', world.nonAdminHivekeeperId)
         .execute();
-      // The seeded non-admin keeper has no agents; assert none flipped to revoked
-      // (would also be true if there were any).
+      expect(ownedAgents.length).toBe(2);
       expect(ownedAgents.every((a) => a.state === 'active')).toBe(true);
     });
 

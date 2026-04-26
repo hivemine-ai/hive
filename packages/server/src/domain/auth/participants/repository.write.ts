@@ -393,13 +393,17 @@ export function createParticipantsWriteRepo(
           }
         }
 
-        // Collect the resulting closed cells for telemetry / smoke verification.
-        // The hook methods don't return ids; we re-query the cells closed in this TX.
+        // Collect the cells closed by THIS cascade (not pre-existing closed cells).
+        // The hook methods are void-returning, so we re-query — but filter by
+        // `closed_at >= snapshotIso` so an Agent that was previously revoked
+        // individually (and whose Cell was already 'closed' before this call) does
+        // NOT inflate the count. Contract: closedCellIds == cells this call closed.
         const closedRows = await tx
           .selectFrom('cells')
           .select('id')
           .where('owner_id', 'in', [id, ...revokedAgentIds])
           .where('state', '=', 'closed')
+          .where('closed_at', '>=', snapshotIso)
           .execute();
 
         return {
