@@ -15,6 +15,7 @@ import type { IdentityContext } from '#domain/auth/types.js';
 import type { Participant, ParticipantsReadRepo } from '#domain/auth/index.js';
 import type { AuditRecorder } from '#domain/audit/recorder.js';
 import type { NewAuditEvent } from '#domain/audit/types.js';
+import { parseBoolEnv } from '#observability/env.js';
 
 import { classifyRecipient, lookup, senderClass } from './matrix.js';
 import type {
@@ -49,16 +50,13 @@ type Decision =
       recipientClass: RecipientClass | null;
     };
 
-function readBoolEnv(name: string): boolean {
-  const raw = process.env[name];
-  if (raw === undefined) return false;
-  return raw === '1' || raw.toLowerCase() === 'true';
-}
-
 export function resolveEngineConfig(config: EngineConfig = {}): Required<EngineConfig> {
   return {
     auditCanSeeDenials:
-      config.auditCanSeeDenials ?? readBoolEnv('HIVE_VISIBILITY_AUDIT_CANSEE_DENIALS'),
+      config.auditCanSeeDenials ??
+      parseBoolEnv(process.env['HIVE_VISIBILITY_AUDIT_CANSEE_DENIALS'], false, {
+        name: 'HIVE_VISIBILITY_AUDIT_CANSEE_DENIALS',
+      }),
   };
 }
 

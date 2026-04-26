@@ -28,6 +28,7 @@ import type {
   PresenceRegistry,
   Replay,
 } from '#domain/notifications/index.js';
+import { parseIntEnv, parseNullableIntEnv } from '#observability/env.js';
 import type { Logger } from '#observability/logger.js';
 
 export interface NotificationsFactoryDeps {
@@ -162,26 +163,4 @@ export function createNotificationsForProduction(
   deps.cellEvents.on('cellClosed', (event) => pipeline.handleCellClosed(event));
 
   return { presenceRegistry, pipeline, builder, consolidator, replay };
-}
-
-interface ParseIntOptions {
-  name: string;
-  min: number;
-}
-
-function parseIntEnv(value: string | undefined, fallback: number, opts: ParseIntOptions): number {
-  if (value === undefined || value === '') return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || Number.isNaN(parsed)) {
-    throw new Error(`${opts.name} must be an integer (got ${JSON.stringify(value)})`);
-  }
-  if (parsed < opts.min) {
-    throw new Error(`${opts.name} must be >= ${String(opts.min)} (got ${String(parsed)})`);
-  }
-  return parsed;
-}
-
-function parseNullableIntEnv(value: string | undefined, opts: ParseIntOptions): number | null {
-  if (value === undefined || value === '' || value === 'null') return null;
-  return parseIntEnv(value, 0, opts);
 }

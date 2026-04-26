@@ -71,10 +71,12 @@ Hive is **OSS by design** (Apache 2.0). During Fase 1 v0.1 development the proje
 
 ### Deploy paths (v0.1, build-from-source)
 
-- **Local (CLI + SQLite, default):** `pnpm install && pnpm build` + `node packages/cli/dist/main.js init` → SQLite at `./var/db/hive.sqlite`. Zero infra. Process supervised by systemd / launchd / pm2.
-- **Production (Docker + Postgres, opt-in):** `git clone` + `docker compose -f deployment/docker-compose.yml --profile postgres build && up`. Image built locally on the deploy host (no `docker pull` from a registry during Fase 1).
+Per [ADR-008](https://github.com/hivemine-ai/hive-vault) the deploy story bifurcates into two topologies:
 
-PostgreSQL support ships in v0.1.0 (the persistence layer is multi-dialect from day one), but is officially validated in CI starting v0.1.1.
+- **Topology 1 — CLI + SQLite (default OSS adoption path).** `pnpm install && pnpm build` + `node packages/cli/dist/main.js init` → SQLite at `./var/db/hive.sqlite`. Zero infra. Process supervised by systemd / launchd / pm2. Documented in [`packages/cli/README.md`](./packages/cli/README.md) and [`docs/hivectl.md`](./docs/hivectl.md).
+- **Topology 2 — Docker Compose (production opt-in).** `pnpm install && pnpm build && docker compose -f deployment/docker-compose.yml build && docker compose -f deployment/docker-compose.yml up -d`. Server runs containerized against SQLite-in-volume by default; activate `--profile postgres` to add the bundled Postgres service. Image built locally on the deploy host (no `docker pull` from a registry during Fase 1). Full operator guide in [`deployment/README.md`](./deployment/README.md).
+
+PostgreSQL support ships in v0.1.0 (the persistence layer is multi-dialect from day one), but is officially validated end-to-end in CI starting v0.1.1.
 
 ## Documentation
 

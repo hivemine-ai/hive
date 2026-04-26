@@ -1,0 +1,43 @@
+# Build context filter for `docker compose -f deployment/docker-compose.yml build`.
+# Resolved relative to the repo root (the build `context: ../`).
+
+# Dependency installs (re-installed inside the builder stage)
+**/node_modules
+
+# Build outputs (regenerated inside the builder stage)
+**/dist
+**/.tsbuildinfo
+
+# Source control + dev tooling
+.git
+.gitignore
+.github
+.husky
+.vscode
+.idea
+
+# Out-of-repo work directories — the Hive vault checks these in but they
+# are NOT part of the runtime image
+raw
+repositories
+_templates
+_meta
+_bases
+
+# Local secrets and runtime state
+**/.env
+**/.env.*
+!**/.env.example
+**/var
+**/coverage
+
+# Editor / OS noise
+.DS_Store
+*.log
+npm-debug.log*
+pnpm-debug.log*
+*.swp
+
+# Docs that don't ship in the image — README is fine, but exclude vault docs
+# subfolders that don't apply
+**/*.md.bak
