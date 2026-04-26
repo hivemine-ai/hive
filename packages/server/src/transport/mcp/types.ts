@@ -16,6 +16,14 @@ export interface SessionState {
   connectionId: UUIDv7;
   /** Presence Registry handle; null between initialize and subscribe wiring. */
   subscription: Subscription | null;
+  /**
+   * Optional strong reference to the notifier used by the SubscriberHandle's
+   * `WeakRef`. Without this anchor the notifier object literal escapes scope
+   * and is eligible for GC, which would make `serverRef.deref()` return
+   * undefined and silently drop Waggle notifications under memory pressure.
+   * Held here for as long as the session lives.
+   */
+  notifierRef: unknown;
   establishedAt: Date;
   /** Bumped on every tool call. */
   lastSeenAt: Date;

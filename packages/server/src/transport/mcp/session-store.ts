@@ -52,6 +52,7 @@ export function createSessionStore(opts?: { now?: () => Date }): SessionStore {
         identity,
         connectionId,
         subscription: null,
+        notifierRef: null,
         establishedAt: now,
         lastSeenAt: now,
         invalidated: false,

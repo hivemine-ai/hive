@@ -69,6 +69,7 @@ describe('SessionStore — create', () => {
 
     expect(state.sessionId).toBe('sid-1');
     expect(state.subscription).toBeNull();
+    expect(state.notifierRef).toBeNull();
     expect(state.invalidated).toBe(false);
     expect(state.establishedAt).toEqual(T0);
     expect(state.lastSeenAt).toEqual(T0);

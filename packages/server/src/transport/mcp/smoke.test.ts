@@ -427,6 +427,47 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     expect(body.keys[0]?.kty).toBe('OKP');
   });
 
+  it('rejects cross-session identity hijack (Bob reusing Alice session id → 403)', async () => {
+    // 1. Alice initialises a session.
+    const initA = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'hijack-victim', version: '0' },
+      },
+    });
+    expect(initA.status).toBe(200);
+    const sessionA = initA.sessionId as string;
+    expect(sessionA).toBeTruthy();
+    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
+
+    // 2. Bob (different valid identity) sends a request reusing Alice's session id.
+    //    Defense MUST reject with 403 forbidden BEFORE the request reaches the
+    //    SDK transport — otherwise Bob would act as Alice on subsequent tool calls.
+    const res = await fetch(`${world.baseUrl}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${world.jwtB}`,
+        'mcp-session-id': sessionA,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'tools/call',
+        params: { name: 'get_agent_config', arguments: {} },
+      }),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as JsonRpcResponse;
+    expect(body.error?.code).toBe(-32002);
+    expect(body.error?.message).toBe('forbidden');
+  });
+
   it('rejects initialize without Bearer token (401)', async () => {
     const res = await fetch(`${world.baseUrl}/mcp`, {
       method: 'POST',

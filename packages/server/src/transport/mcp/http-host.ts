@@ -152,6 +152,35 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
       });
     }
 
+    // Defense against cross-session identity hijack: a Bearer that proves
+    // identity X cannot reuse a session id originally bound to identity Y.
+    // Without this check, a low-privileged participant could acquire (via
+    // log leak / network sniff if TLS is misconfigured / client mishandling)
+    // a higher-privileged session id and act as that identity by sending
+    // their own valid Bearer plus the captured `Mcp-Session-Id` header —
+    // the SDK transport routes by session id alone and our tool dispatch
+    // reads the original identity from the session store. Reject 403 here.
+    if (sessionIdHeader !== undefined) {
+      const existingState = deps.mcpTransport.sessionStore.peek(sessionIdHeader);
+      if (existingState && existingState.identity.participantId !== auth.identity.participantId) {
+        deps.logger.warn(
+          {
+            event: 'mcp_session_identity_mismatch',
+            sessionId: sessionIdHeader,
+          },
+          'session id reused by a different identity',
+        );
+        return reply
+          .code(403)
+          .type('application/json')
+          .send({
+            jsonrpc: '2.0',
+            error: { code: -32002, message: 'forbidden' },
+            id: null,
+          });
+      }
+    }
+
     // The SDK's StreamableHTTPServerTransport writes directly to res.raw
     // (status, headers, body). fastify must not interfere with the response —
     // hijack tells fastify the handler owns the raw response from here on.

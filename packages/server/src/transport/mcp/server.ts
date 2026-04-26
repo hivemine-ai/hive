@@ -215,6 +215,12 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
       const notifier: McpServerNotifier = {
         sendResourceUpdated: (params) => mcpServer.server.sendResourceUpdated(params),
       };
+      // Pin the notifier in the SessionState so it stays GC-anchored for the
+      // lifetime of the session — the SubscriberHandle holds it via WeakRef.
+      // Without this anchor the notifier literal is eligible for collection
+      // and `serverRef.deref()` would return undefined under memory pressure,
+      // silently dropping Waggle notifications.
+      state.notifierRef = notifier;
 
       const handle = createMcpSubscriberHandle({
         callerContext: identity,
