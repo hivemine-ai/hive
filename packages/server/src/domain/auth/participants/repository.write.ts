@@ -110,10 +110,23 @@ export interface ListHivekeepersResult {
 
 // ---------- Repository factory ----------
 
+export interface RevokeHivekeeperResult {
+  revokedAgentIds: UUIDv7[];
+  closedCellIds: UUIDv7[];
+}
+
 export interface ParticipantsWriteRepo {
   createHivekeeper(input: CreateHivekeeperInput, caller: CallerContext): Promise<Hivekeeper>;
   createAgent(input: CreateAgentInput, caller: CallerContext): Promise<Agent>;
   revokeAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
+  /**
+   * Revoke a Hivekeeper and cascade-revoke all owned Agents + close their Cells in
+   * the same transaction. Snapshots the effective retention policy on the keeper's
+   * row so post-revocation reads see frozen retention semantics. Idempotent: a
+   * second invocation on an already-revoked keeper returns empty counts without
+   * error.
+   */
+  revokeHivekeeperWithCascade(id: UUIDv7, caller: CallerContext): Promise<RevokeHivekeeperResult>;
   listAgents(filter: ListAgentsFilter): Promise<ListAgentsResult>;
   listHivekeepers(filter: ListHivekeepersFilter): Promise<ListHivekeepersResult>;
 }
@@ -231,7 +244,6 @@ export function createParticipantsWriteRepo(
       return result;
     },
 
-    // TODO(PRY-NEXT): revokeHivekeeperWithCascade — invokes cellsHook.closeCell for the keeper Cell + closeCellsByOwner for all owned agents' Cells. Deferred per PRY-003 scope decision.
     async revokeAgent(id, caller): Promise<void> {
       requireAdminCaller(caller);
 
@@ -271,6 +283,133 @@ export function createParticipantsWriteRepo(
           .execute();
 
         await cellsHook.closeCell(tx, { ownerId: id });
+      });
+    },
+
+    async revokeHivekeeperWithCascade(id, caller): Promise<RevokeHivekeeperResult> {
+      const adminIdentity = requireAdminCaller(caller);
+      const setBy = adminIdentity?.participantId ?? null;
+
+      return await db.transaction().execute<RevokeHivekeeperResult>(async (tx) => {
+        // Defense in depth: ensure target is a Hivekeeper, not an Agent.
+        // Mirrors the symmetric guard in revokeAgent.
+        const ag = await tx
+          .selectFrom('agents')
+          .select('id')
+          .where('id', '=', id)
+          .executeTakeFirst();
+        if (ag) {
+          throw new AuthError('INVALID_STATE_TRANSITION', {
+            subCode: 'target_is_agent',
+            message: 'revokeHivekeeperWithCascade cannot target an Agent',
+          });
+        }
+
+        const now = clock();
+
+        // Atomic UPDATE … WHERE state='active' RETURNING — eliminates the SELECT-then-UPDATE
+        // race and gives us idempotency for free (already-revoked or unknown id → empty result).
+        const keeperRow = await tx
+          .updateTable('hivekeepers')
+          .set({ state: 'revoked', revoked_at: dateToIso(now) })
+          .where('id', '=', id)
+          .where('state', '=', 'active')
+          .returning(['id', 'hive_id'])
+          .executeTakeFirst();
+        if (!keeperRow) {
+          // Either the keeper doesn't exist OR is already revoked. Idempotent return.
+          return { revokedAgentIds: [], closedCellIds: [] };
+        }
+        const hiveId = keeperRow.hive_id;
+
+        // Cascade-revoke owned agents that are still active.
+        const revokedAgents = await tx
+          .updateTable('agents')
+          .set({ state: 'revoked', revoked_at: dateToIso(now) })
+          .where('owner_id', '=', id)
+          .where('state', '=', 'active')
+          .returning('id')
+          .execute();
+        const revokedAgentIds = revokedAgents.map((r) => r.id);
+
+        // Cross-domain cascade: close the keeper's Cell + all owned agents' Cells.
+        // The cellsHook participates in this same TX → atomicity invariant: if the
+        // hook throws, the keeper + agent UPDATEs are rolled back.
+        await cellsHook.closeCell(tx, { ownerId: id });
+        await cellsHook.closeCellsByOwner(tx, { ownerIds: revokedAgentIds });
+
+        // Snapshot the effective retention policy at revocation time per Cell Store
+        // tech spec line 481. Two cases:
+        //   (a) The keeper has an explicit override — UPDATE its frozen_at.
+        //   (b) The keeper has no override — INSERT a snapshot of the hive default.
+        // If the hive itself has no default policy yet (Slice 1+ admin op), the
+        // INSERT inserts zero rows (SELECT returns empty); we accept this silently
+        // because cascade correctness does not depend on the snapshot. The next
+        // boot reconciliation sweep (deferred to Slice 1+) will catch up.
+        const snapshotIso = dateToIso(now);
+        const updatedPolicy = await tx
+          .updateTable('retention_policies')
+          .set({ frozen_at: snapshotIso })
+          .where('scope', '=', 'hivekeeper')
+          .where('scope_id', '=', id)
+          .where('frozen_at', 'is', null)
+          .returning('id')
+          .execute();
+
+        if (updatedPolicy.length === 0) {
+          const defaults = await tx
+            .selectFrom('retention_policies')
+            .select(['unread_retention_ms', 'read_retention_ms'])
+            .where('scope', '=', 'hive')
+            .where('hive_id', '=', hiveId)
+            .executeTakeFirst();
+          if (defaults) {
+            // The retention_policies UNIQUE constraint on (hive_id, scope_id) is a
+            // partial index (WHERE scope='hivekeeper'). Kysely's `onConflict()`
+            // inference doesn't match partial indexes uniformly across SQLite and
+            // Postgres, so we use try/catch on UNIQUE instead — portable and
+            // explicit. v0.1 admin ops are single-writer (PRY-010 risk #5), so the
+            // race is bounded; if it loses we accept silently — the concurrent
+            // override row exists and a subsequent revoke can update its frozen_at.
+            try {
+              await tx
+                .insertInto('retention_policies')
+                .values({
+                  id: uuidv7(),
+                  hive_id: hiveId,
+                  scope: 'hivekeeper',
+                  scope_id: id,
+                  unread_retention_ms: defaults.unread_retention_ms,
+                  read_retention_ms: defaults.read_retention_ms,
+                  frozen_at: snapshotIso,
+                  set_by: setBy,
+                })
+                .execute();
+            } catch (err) {
+              if (!(err instanceof Error && /UNIQUE/i.test(err.message))) {
+                throw err;
+              }
+            }
+          }
+        }
+
+        // Collect the cells closed by THIS cascade (not pre-existing closed cells).
+        // The hook methods are void-returning, so we re-query — but filter by
+        // `closed_at >= snapshotIso` so an Agent that was previously revoked
+        // individually (and whose Cell was already 'closed' before this call) does
+        // NOT inflate the count. Contract: closedCellIds == cells this call closed.
+        const closedRows = await tx
+          .selectFrom('cells')
+          .select('id')
+          .where('owner_id', 'in', [id, ...revokedAgentIds])
+          .where('state', '=', 'closed')
+          .where('closed_at', '>=', snapshotIso)
+          .execute();
+
+        return {
+          revokedAgentIds,
+          closedCellIds: closedRows.map((r) => r.id),
+        };
       });
     },
 

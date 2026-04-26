@@ -65,6 +65,7 @@ interface SmokeWorld {
   cellsRepo: CellsRepo;
   sender: Sender;
   reader: Reader;
+  writeRepo: ParticipantsWriteRepo;
   hiveId: UUIDv7;
   adminId: UUIDv7;
   workerA: AgentRecord;
@@ -216,6 +217,7 @@ async function seedSmokeWorld(): Promise<SmokeWorld> {
     cellsRepo,
     sender,
     reader,
+    writeRepo,
     hiveId,
     adminId: admin.id,
     workerA: { id: workerA.id },
@@ -352,6 +354,62 @@ describe('PRY-003 Cell Store Slice 0 — smoke E2E', () => {
     const summaryAfterTwo = await world.cellsRepo.summarizeUnreadForCell(cellB!.id);
     expect(summaryAfterTwo.unreadCount).toBe(2);
     expect(summaryAfterTwo.distinctSenderIds).toEqual([world.workerC.id]);
+  });
+
+  // ── PRY-010: revokeHivekeeperWithCascade end-to-end ──
+  it('14h. revokeHivekeeperWithCascade closes admin + workers cells; subsequent send fails', async () => {
+    // Pre-condition: workerA → workerB delivers fine (sanity).
+    const sentBefore = await world.sender.sendMessage({
+      callerContext: world.ctxA,
+      recipientId: world.workerB.id,
+      type: 'notification',
+      body: 'before-revoke',
+    });
+    expect(sentBefore.replayed).toBe(false);
+
+    const result = await world.writeRepo.revokeHivekeeperWithCascade(world.adminId, SYSTEM_CALLER);
+    expect(result.revokedAgentIds.sort()).toEqual(
+      [world.workerA.id, world.workerB.id, world.workerC.id].sort(),
+    );
+    // 4 cells closed: admin keeper + 3 workers.
+    expect(result.closedCellIds.length).toBe(4);
+
+    // Cells: all 4 are state='closed' afterwards.
+    const adminCell = await world.cellsRepo.findCellByOwner(world.adminId);
+    const cellA = await world.cellsRepo.findCellByOwner(world.workerA.id);
+    const cellB = await world.cellsRepo.findCellByOwner(world.workerB.id);
+    const cellC = await world.cellsRepo.findCellByOwner(world.workerC.id);
+    expect(adminCell?.state).toBe('closed');
+    expect(cellA?.state).toBe('closed');
+    expect(cellB?.state).toBe('closed');
+    expect(cellC?.state).toBe('closed');
+
+    // Sending to a revoked agent now fails with RECIPIENT_UNREACHABLE (uniform privacy).
+    // The sender uses ctxA (cached IdentityContext from before revocation) — this exercises
+    // the in-TX cell guard, NOT a fresh credential verification.
+    await expect(
+      world.sender.sendMessage({
+        callerContext: world.ctxA,
+        recipientId: world.workerB.id,
+        type: 'notification',
+        body: 'after-revoke',
+      }),
+    ).rejects.toMatchObject({ code: 'RECIPIENT_UNREACHABLE' });
+
+    // Sending to the revoked admin keeper also fails with the same wire error.
+    await expect(
+      world.sender.sendMessage({
+        callerContext: world.ctxA,
+        recipientId: world.adminId,
+        type: 'notification',
+        body: 'to-keeper',
+      }),
+    ).rejects.toMatchObject({ code: 'RECIPIENT_UNREACHABLE' });
+
+    // Re-call cascade is idempotent — empty counts, no error.
+    const second = await world.writeRepo.revokeHivekeeperWithCascade(world.adminId, SYSTEM_CALLER);
+    expect(second.revokedAgentIds).toEqual([]);
+    expect(second.closedCellIds).toEqual([]);
   });
 
   // ── AC-5: findMessageById — own cell returns Message; foreign cell returns null ──

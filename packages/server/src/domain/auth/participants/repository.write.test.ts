@@ -14,6 +14,7 @@ const SYSTEM_CALLER: CallerContext = { kind: 'system', osUser: 'tests' };
 function makeSpyHook(): CellsRepoHook & {
   createCalls: { ownerId: string; ownerKind: string; hiveId: string; colonyId: string }[];
   closeCalls: { ownerId: string }[];
+  closeByOwnerCalls: { ownerIds: string[] }[];
 } {
   const createCalls: {
     ownerId: string;
@@ -22,9 +23,11 @@ function makeSpyHook(): CellsRepoHook & {
     colonyId: string;
   }[] = [];
   const closeCalls: { ownerId: string }[] = [];
+  const closeByOwnerCalls: { ownerIds: string[] }[] = [];
   return {
     createCalls,
     closeCalls,
+    closeByOwnerCalls,
     createCell(_executor: DbExecutor, input): Promise<void> {
       createCalls.push({
         ownerId: input.ownerId,
@@ -36,6 +39,10 @@ function makeSpyHook(): CellsRepoHook & {
     },
     closeCell(_executor: DbExecutor, input): Promise<void> {
       closeCalls.push({ ownerId: input.ownerId });
+      return Promise.resolve();
+    },
+    closeCellsByOwner(_executor: DbExecutor, input): Promise<void> {
+      closeByOwnerCalls.push({ ownerIds: [...input.ownerIds] });
       return Promise.resolve();
     },
   };
@@ -119,6 +126,9 @@ describe('participants write repository', () => {
           return Promise.reject(hookError);
         },
         closeCell(): Promise<void> {
+          return Promise.resolve();
+        },
+        closeCellsByOwner(): Promise<void> {
           return Promise.resolve();
         },
       };
@@ -368,6 +378,227 @@ describe('participants write repository', () => {
       });
       expect(onlyNonAdmins.hivekeepers.length).toBe(1);
       expect(onlyNonAdmins.hivekeepers[0]?.id).toBe(world.nonAdminHivekeeperId);
+    });
+  });
+
+  describe('revokeHivekeeperWithCascade', () => {
+    // Helper: insert active Cells for keeper + agents so the cascade has rows to close.
+    // (PRY-003's createParticipantsWriteRepo wires the hook for new participants, but
+    // the seedWorld fixture inserts directly without firing the hook — so we seed cells
+    // here for the participants we need to test.)
+    async function seedCellsFor(
+      world: SeedWorld,
+      ownerIds: { id: string; kind: 'hivekeeper' | 'agent' }[],
+    ): Promise<void> {
+      const now = new Date().toISOString();
+      for (const o of ownerIds) {
+        await world.db
+          .insertInto('cells')
+          .values({
+            id: uuidv7(),
+            hive_id: world.hiveId,
+            owner_id: o.id,
+            owner_kind: o.kind,
+            state: 'active',
+            closed_at: null,
+            created_at: now,
+          })
+          .execute();
+      }
+    }
+
+    async function seedHiveDefaultRetention(world: SeedWorld, ms: number): Promise<void> {
+      await world.db
+        .insertInto('retention_policies')
+        .values({
+          id: uuidv7(),
+          hive_id: world.hiveId,
+          scope: 'hive',
+          scope_id: null,
+          unread_retention_ms: ms,
+          read_retention_ms: ms,
+          frozen_at: null,
+          set_by: null,
+        })
+        .execute();
+    }
+
+    it('revokes keeper + cascades to owned agents + closes all cells (real cellsRepo)', async () => {
+      // Use the real cellsHook adapter so the cascade actually mutates the cells table.
+      const { createCellsRepo } = await import('#domain/cells/repository.js');
+      const { createCellsHookAdapter } = await import('#composition/cells-hook-adapter.js');
+      const cellsRepo = createCellsRepo(world.db);
+      const hook = createCellsHookAdapter(cellsRepo);
+
+      // Seed active cells for the non-admin keeper + their two seeded agents.
+      // Use nonAdminHivekeeperId so we don't affect the admin (LAST_ADMIN_INVARIANT
+      // is not yet enforced but we keep the spirit). For the cascade-via-owner test,
+      // re-parent the existing agents to nonAdminHivekeeperId.
+      await world.db
+        .updateTable('agents')
+        .set({ owner_id: world.nonAdminHivekeeperId })
+        .where('id', 'in', [world.workerAgentId, world.scoutAgentId])
+        .execute();
+      await seedCellsFor(world, [
+        { id: world.nonAdminHivekeeperId, kind: 'hivekeeper' },
+        { id: world.workerAgentId, kind: 'agent' },
+        { id: world.scoutAgentId, kind: 'agent' },
+      ]);
+      await seedHiveDefaultRetention(world, 7 * 24 * 60 * 60 * 1000);
+
+      const repo = createParticipantsWriteRepo(world.db, { cellsHook: hook });
+      const result = await repo.revokeHivekeeperWithCascade(
+        world.nonAdminHivekeeperId,
+        SYSTEM_CALLER,
+      );
+
+      expect(result.revokedAgentIds.sort()).toEqual(
+        [world.workerAgentId, world.scoutAgentId].sort(),
+      );
+      expect(result.closedCellIds.length).toBe(3); // keeper + 2 agents
+
+      // Verify keeper revoked.
+      const keeperRow = await world.db
+        .selectFrom('hivekeepers')
+        .select(['state', 'revoked_at'])
+        .where('id', '=', world.nonAdminHivekeeperId)
+        .executeTakeFirst();
+      expect(keeperRow?.state).toBe('revoked');
+      expect(keeperRow?.revoked_at).not.toBeNull();
+
+      // Verify owned agents revoked.
+      const agents = await world.db
+        .selectFrom('agents')
+        .select(['id', 'state'])
+        .where('owner_id', '=', world.nonAdminHivekeeperId)
+        .execute();
+      expect(agents.every((a) => a.state === 'revoked')).toBe(true);
+
+      // Verify cells closed.
+      const cells = await world.db
+        .selectFrom('cells')
+        .select(['owner_id', 'state', 'closed_at'])
+        .where('owner_id', 'in', [
+          world.nonAdminHivekeeperId,
+          world.workerAgentId,
+          world.scoutAgentId,
+        ])
+        .execute();
+      expect(cells.every((c) => c.state === 'closed')).toBe(true);
+      expect(cells.every((c) => c.closed_at !== null)).toBe(true);
+
+      // Verify retention policy snapshot inserted (no override existed → INSERT path).
+      const frozenPolicy = await world.db
+        .selectFrom('retention_policies')
+        .selectAll()
+        .where('scope', '=', 'hivekeeper')
+        .where('scope_id', '=', world.nonAdminHivekeeperId)
+        .executeTakeFirst();
+      expect(frozenPolicy).toBeDefined();
+      expect(frozenPolicy?.frozen_at).not.toBeNull();
+      expect(frozenPolicy?.unread_retention_ms).toBe(7 * 24 * 60 * 60 * 1000);
+    });
+
+    it('is idempotent on a keeper already revoked (returns empty counts, no error)', async () => {
+      const hook = makeSpyHook();
+      const repo = createParticipantsWriteRepo(world.db, { cellsHook: hook });
+
+      // First revocation.
+      await repo.revokeHivekeeperWithCascade(world.nonAdminHivekeeperId, SYSTEM_CALLER);
+      const firstCloseCount = hook.closeCalls.length;
+      const firstCloseByOwnerCount = hook.closeByOwnerCalls.length;
+
+      // Second revocation: should short-circuit on the WHERE state='active' guard.
+      const result = await repo.revokeHivekeeperWithCascade(
+        world.nonAdminHivekeeperId,
+        SYSTEM_CALLER,
+      );
+      expect(result.revokedAgentIds).toEqual([]);
+      expect(result.closedCellIds).toEqual([]);
+      // The hook should NOT fire again on the no-op call.
+      expect(hook.closeCalls.length).toBe(firstCloseCount);
+      expect(hook.closeByOwnerCalls.length).toBe(firstCloseByOwnerCount);
+    });
+
+    it('rejects target_is_agent when given an Agent id', async () => {
+      const repo = createParticipantsWriteRepo(world.db);
+      try {
+        await repo.revokeHivekeeperWithCascade(world.workerAgentId, SYSTEM_CALLER);
+        expect.fail('expected throw');
+      } catch (err) {
+        expect(isAuthError(err)).toBe(true);
+        const e = err as AuthError;
+        expect(e.code).toBe('INVALID_STATE_TRANSITION');
+        expect(e.subCode).toBe('target_is_agent');
+      }
+    });
+
+    it('rolls back the cascade if cellsHook throws mid-flight (atomicity)', async () => {
+      // Re-parent the seeded agents to the non-admin keeper so the cascade
+      // actually has agents to revoke; otherwise the agent rollback assertion
+      // below is vacuously true.
+      await world.db
+        .updateTable('agents')
+        .set({ owner_id: world.nonAdminHivekeeperId })
+        .where('id', 'in', [world.workerAgentId, world.scoutAgentId])
+        .execute();
+
+      const hookError = new Error('cell-store mid-cascade failure');
+      const failingHook: CellsRepoHook = {
+        createCell(): Promise<void> {
+          return Promise.resolve();
+        },
+        closeCell(): Promise<void> {
+          // Throws on the keeper close — after the keeper + agent UPDATEs ran but
+          // before closeCellsByOwner. The TX must roll back the keeper + agent UPDATEs.
+          return Promise.reject(hookError);
+        },
+        closeCellsByOwner(): Promise<void> {
+          return Promise.resolve();
+        },
+      };
+      const repo = createParticipantsWriteRepo(world.db, { cellsHook: failingHook });
+
+      await expect(
+        repo.revokeHivekeeperWithCascade(world.nonAdminHivekeeperId, SYSTEM_CALLER),
+      ).rejects.toBe(hookError);
+
+      // Atomicity: keeper must still be active.
+      const keeperRow = await world.db
+        .selectFrom('hivekeepers')
+        .select('state')
+        .where('id', '=', world.nonAdminHivekeeperId)
+        .executeTakeFirst();
+      expect(keeperRow?.state).toBe('active');
+
+      // Atomicity: ALL re-parented agents (workerAgentId + scoutAgentId) must
+      // still be active. This is the assertion that previously was vacuous.
+      const ownedAgents = await world.db
+        .selectFrom('agents')
+        .select(['id', 'state'])
+        .where('owner_id', '=', world.nonAdminHivekeeperId)
+        .execute();
+      expect(ownedAgents.length).toBe(2);
+      expect(ownedAgents.every((a) => a.state === 'active')).toBe(true);
+    });
+
+    it('snapshots the hive default policy when keeper has no override', async () => {
+      const hook = makeSpyHook();
+      await seedHiveDefaultRetention(world, 14 * 24 * 60 * 60 * 1000);
+
+      const repo = createParticipantsWriteRepo(world.db, { cellsHook: hook });
+      await repo.revokeHivekeeperWithCascade(world.nonAdminHivekeeperId, SYSTEM_CALLER);
+
+      const frozenPolicy = await world.db
+        .selectFrom('retention_policies')
+        .selectAll()
+        .where('scope', '=', 'hivekeeper')
+        .where('scope_id', '=', world.nonAdminHivekeeperId)
+        .executeTakeFirst();
+      expect(frozenPolicy).toBeDefined();
+      expect(frozenPolicy?.unread_retention_ms).toBe(14 * 24 * 60 * 60 * 1000);
+      expect(frozenPolicy?.read_retention_ms).toBe(14 * 24 * 60 * 60 * 1000);
+      expect(frozenPolicy?.frozen_at).not.toBeNull();
     });
   });
 });

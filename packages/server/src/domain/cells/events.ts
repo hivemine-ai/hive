@@ -1,20 +1,19 @@
 // Internal in-process event emitter for the Cell Store domain.
 //
-// Per the tech spec ("cells/events.ts" section): mono-process per ADR-003. Subscribers
-// such as Waggle, audit log, and metrics attach via `on()` without coupling to the
-// concrete implementation; the typed facade enforces payload shape per event name.
+// Per the tech spec ("cells/events.ts" section): mono-process per ADR-003.
+// Subscribers (Waggle, audit log, metrics) attach via `on()` without coupling to
+// the concrete implementation; the typed facade enforces payload shape per event.
 //
-// The emit-after-commit guarantee (sendMessage → events.emit) is the responsibility
-// of the caller (`cells/send.ts`), not the emitter itself. The emitter is "best
-// effort": a throwing listener is logged by the caller, never rolled back into the
-// originating transaction (per tech spec line 408-409).
+// The emit-after-commit guarantee (sendMessage → events.emit) is the caller's
+// responsibility (`cells/send.ts`), not the emitter's. The emitter is "best
+// effort" per tech spec line 408-409: errors raised by listeners NEVER bubble
+// up to the caller and never participate in the caller's transaction.
 //
-// Implementation: thin typed wrapper around Node's built-in `EventEmitter`. Keeps
-// the surface intentionally small (`emit`, `on`, `off`) so subscribers don't lean
-// on Node-specific affordances (`once`, `prependListener`, etc.) that would couple
-// them to the concrete emitter.
-
-import { EventEmitter } from 'node:events';
+// PRY-010 hardening: emit iterates listeners explicitly, wrapping each invocation
+// in try/catch (sync throws) AND attaching a `.catch(...)` to any returned
+// Promise (async rejections). Both error paths funnel into the `onError`
+// callback the caller may supply per emit. The previous Node EventEmitter-based
+// path silently turned async rejections into `unhandledRejection`.
 
 import type { UUIDv7 } from '#domain/auth/types.js';
 
@@ -43,30 +42,83 @@ export interface CellEventMap {
 
 export type CellEventName = keyof CellEventMap;
 
-export type CellEventListener<E extends CellEventName> = (payload: CellEventMap[E]) => void;
+// Listener return type is intentionally `unknown` — listeners may return void,
+// a Promise, or any other value (which the emitter ignores). Returning a Promise
+// lets us catch async rejections; returning a value-typed expression (e.g.
+// `events.push(payload)` returning `number`) keeps the surface ergonomic.
+export type CellEventListener<E extends CellEventName> = (payload: CellEventMap[E]) => unknown;
+
+export type EmitErrorSink = (err: unknown) => void;
 
 export interface CellEvents {
-  emit<E extends CellEventName>(event: E, payload: CellEventMap[E]): void;
+  /**
+   * Fire `event` to all subscribed listeners. Per-listener exceptions (sync
+   * throws OR returned-Promise rejections) are caught and forwarded to
+   * `onError` if provided, then swallowed. Never throws to the caller.
+   */
+  emit<E extends CellEventName>(event: E, payload: CellEventMap[E], onError?: EmitErrorSink): void;
   on<E extends CellEventName>(event: E, listener: CellEventListener<E>): void;
   off<E extends CellEventName>(event: E, listener: CellEventListener<E>): void;
 }
 
+type AnyListener = (payload: unknown) => unknown;
+
+function isPromiseLike(value: unknown): value is Promise<unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function' &&
+    typeof (value as { catch?: unknown }).catch === 'function'
+  );
+}
+
+function safeReportError(sink: EmitErrorSink | undefined, err: unknown): void {
+  if (!sink) return;
+  try {
+    sink(err);
+  } catch {
+    // Swallow — if the error sink itself throws, we have nothing sensible to
+    // do; never let this leak to unhandledRejection.
+  }
+}
+
 export function createCellEvents(): CellEvents {
-  const emitter = new EventEmitter();
-  // Increase the default cap (10) — multiple subscribers (Waggle, metrics, audit)
-  // are expected in steady state and we don't want spurious "MaxListenersExceeded"
-  // warnings. 0 = unlimited.
-  emitter.setMaxListeners(0);
+  const sets = new Map<CellEventName, Set<AnyListener>>();
+
+  function getOrCreate(event: CellEventName): Set<AnyListener> {
+    let set = sets.get(event);
+    if (!set) {
+      set = new Set();
+      sets.set(event, set);
+    }
+    return set;
+  }
 
   return {
-    emit(event, payload) {
-      emitter.emit(event, payload);
+    emit(event, payload, onError) {
+      const set = sets.get(event);
+      if (!set || set.size === 0) return;
+      // Snapshot first so a listener that mutates the set during emit does not
+      // affect this fan-out (matches Node's EventEmitter contract).
+      const snapshot = Array.from(set);
+      for (const listener of snapshot) {
+        // Each listener gets its own try/catch — an error in one MUST NOT
+        // prevent the rest from firing.
+        try {
+          const result = listener(payload);
+          if (isPromiseLike(result)) {
+            result.catch((err) => safeReportError(onError, err));
+          }
+        } catch (err) {
+          safeReportError(onError, err);
+        }
+      }
     },
     on(event, listener) {
-      emitter.on(event, listener as (...args: unknown[]) => void);
+      getOrCreate(event).add(listener as AnyListener);
     },
     off(event, listener) {
-      emitter.off(event, listener as (...args: unknown[]) => void);
+      sets.get(event)?.delete(listener as AnyListener);
     },
   };
 }
