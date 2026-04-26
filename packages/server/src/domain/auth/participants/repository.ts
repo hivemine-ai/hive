@@ -2,7 +2,7 @@
 // Write functions (createHivekeeper, createAgent, revokeAgent, listAgents,
 // listHivekeepers) are added in Bloque 3 (Hitos 15-18).
 
-import { sql, type Kysely, type Selectable } from 'kysely';
+import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
 
 import { intToBool, isoToDate, jsonParse } from '#persistence/type-mappers.js';
 import type {
@@ -74,6 +74,12 @@ function rowToAgent(row: Selectable<AgentsTable>): Agent {
 
 // ---------- Repository factory ----------
 
+/**
+ * Type alias for the Kysely query executor — either the outer DB handle or an
+ * open Transaction. Mirrors the shape used by `cellsRepo` for symmetric APIs.
+ */
+export type DbExecutor = Kysely<Database> | Transaction<Database>;
+
 export interface ParticipantsReadRepo {
   findHiveById(id: UUIDv7): Promise<Hive | null>;
   findColonyById(id: UUIDv7): Promise<Colony | null>;
@@ -81,8 +87,14 @@ export interface ParticipantsReadRepo {
   findHivekeeperByEmail(hiveId: UUIDv7, email: string): Promise<Hivekeeper | null>;
   findAgentById(id: UUIDv7): Promise<Agent | null>;
   findAgentByName(hiveId: UUIDv7, ownerId: UUIDv7, name: string): Promise<Agent | null>;
-  /** Polymorphic lookup used by the verifier (step 5). Issues two queries in parallel. */
-  findById(id: UUIDv7): Promise<Participant | null>;
+  /**
+   * Polymorphic lookup used by the verifier (step 5). Issues two queries in
+   * parallel. Accepts an optional `executor` so callers inside an open Kysely
+   * transaction can reuse the TX connection — required for SQLite single-
+   * connection determinism (PRY-006 discovery: visibility.canSend invoked
+   * mid-TX from cellStore.sendMessage deadlocked on the outer `db` handle).
+   */
+  findById(id: UUIDv7, executor?: DbExecutor): Promise<Participant | null>;
   /** Minimal projection for hot paths (verifier step 6/7, pre-conditions). */
   getParticipantState(id: UUIDv7): Promise<ParticipantStateSummary | null>;
 }
@@ -139,10 +151,11 @@ export function createParticipantsReadRepo(db: Kysely<Database>): ParticipantsRe
       return row ? rowToAgent(row) : null;
     },
 
-    async findById(id) {
+    async findById(id, executor) {
+      const exec = executor ?? db;
       const [hkRow, agRow] = await Promise.all([
-        db.selectFrom('hivekeepers').selectAll().where('id', '=', id).executeTakeFirst(),
-        db.selectFrom('agents').selectAll().where('id', '=', id).executeTakeFirst(),
+        exec.selectFrom('hivekeepers').selectAll().where('id', '=', id).executeTakeFirst(),
+        exec.selectFrom('agents').selectAll().where('id', '=', id).executeTakeFirst(),
       ]);
       if (hkRow) {
         return {

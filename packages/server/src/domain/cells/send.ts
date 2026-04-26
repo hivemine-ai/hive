@@ -193,6 +193,11 @@ export function createSender(deps: SenderDeps): Sender {
         const allowed = await deps.visibilityEngine.canSend({
           callerContext: input.callerContext,
           recipientId: input.recipientId,
+          // Reuse the TX connection for the inner participants lookup. Required
+          // for SQLite single-connection determinism (the outer `db` handle is
+          // blocked while this TX is open). Postgres tolerates either; the
+          // SQLite path is the gating constraint.
+          executor: tx,
         });
         if (!allowed) {
           throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'visibility_denied' });

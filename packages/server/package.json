@@ -11,7 +11,8 @@
     "#persistence/*": "./dist/persistence/*",
     "#domain/*": "./dist/domain/*",
     "#observability/*": "./dist/observability/*",
-    "#composition/*": "./dist/composition/*"
+    "#composition/*": "./dist/composition/*",
+    "#transport/*": "./dist/transport/*"
   },
   "scripts": {
     "build": "tsc -b",
@@ -21,13 +22,17 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
     "better-sqlite3": "^11.7.0",
+    "fastify": "^5.2.0",
     "jose": "^6.0.0",
     "kysely": "^0.27.5",
     "pg": "^8.13.1",
     "pino": "^9.5.0",
     "pino-pretty": "^13.0.0",
-    "uuid": "^14.0.0"
+    "uuid": "^14.0.0",
+    "zod": "^3.24.0",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

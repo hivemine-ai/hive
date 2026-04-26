@@ -7,14 +7,15 @@ This directory grows incrementally as PRYs close. Each component gets one user-f
 ## Components
 
 - **[Auth + Identity](auth.md)** — JWT-based authentication, Ed25519 signing keys, `hivectl init` bootstrap, credential lifecycle (issue / rotate / revoke), and the canonical error codes.
+- **[MCP Server](mcp-server.md)** — Running the Hive MCP server, environment variables, HTTP endpoints, the 5 Slice 0 tools, and how to talk to it as an MCP client.
 
 ## Operator guides
 
-(Coming in [PRY-008 — Deployment](https://github.com/hivemine-ai/hive-vault) — install paths, backups, monitoring, upgrades.)
+(Full operator guide — install paths, backups, monitoring, upgrades — coming in [PRY-008 — Deployment](https://github.com/hivemine-ai/hive-vault).)
 
 ## API reference
 
-(Coming as the MCP tool surface lands in [PRY-006](https://github.com/hivemine-ai/hive-vault) — schemas for each `tools/call` operation.)
+The MCP tool catalog (5 tools shipped in v0.1 Slice 0) is documented inline in [`mcp-server.md`](mcp-server.md). The remaining 3 tools (`reply_to`, `list_agents`, `get_agent_status`) land in Slice 1+.
 
 ## Architecture & decisions
 

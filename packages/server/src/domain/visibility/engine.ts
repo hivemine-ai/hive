@@ -118,8 +118,13 @@ export function createVisibilityEngine(
       const occurredAt = now();
       const sender = senderClass(input.callerContext);
 
-      // Step 1: resolve recipient.
-      const participant = await deps.participantsRepo.findById(input.recipientId);
+      // Step 1: resolve recipient. Forward the optional executor so callers
+      // inside an open Kysely TX (e.g. cellStore.sendMessage) can reuse the
+      // TX connection — required for SQLite single-connection determinism.
+      const participant = await deps.participantsRepo.findById(
+        input.recipientId,
+        input.executor as Parameters<typeof deps.participantsRepo.findById>[1],
+      );
 
       // Step 2: derive decision (allow / deny with reason).
       let decision: Decision;
