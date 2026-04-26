@@ -17,7 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **Persistence strategy (architectural):** SQLite is now the default database (zero-infra, CLI-driven). PostgreSQL becomes opt-in for Docker / production deploys. The persistence layer is built on [Kysely](https://kysely.dev) (multi-dialect, type-safe SQL) so the same code runs on both backends. PostgreSQL ships working in v0.1.0 but is officially validated in CI starting v0.1.1.
+- **Persistence strategy (architectural):** SQLite is now the default database (zero-infra, CLI-driven). PostgreSQL becomes opt-in for Docker / production deploys. The persistence layer is built on [Kysely](https://kysely.dev) (multi-dialect, type-safe SQL) so the same code runs on both backends. PostgreSQL is functional in v0.1.0 but officially validated in CI starting v0.1.1.
+- **Distribution status (Fase 1):** v0.1 development stays internal — no GHCR image, no `npm publish`, repo private. Operators run from source (`pnpm install && pnpm build`). When v0.1 is battle-tested in internal deploys, a follow-up PRY adds `release.yml` + `npm publish` + repo visibility flip. See ADR-010 for the trigger conditions.
 - **Internal imports use the Node `imports` field aliases** (PRY-009): cross-module imports inside `@hive/server` now use `#persistence/*`, `#domain/*`, `#observability/*` instead of `../../`. ESLint `no-restricted-imports` enforces the convention — relative cross-module specifiers fail CI. Per ADR-009.
 
 ### Added (v0.1.0 progress)

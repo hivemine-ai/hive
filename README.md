@@ -44,8 +44,10 @@ pnpm test          # runs the suite (vitest)
 
 ### Run the MCP server
 
+> During pre-release, `hivectl` runs from the build output (no global `hivectl` binary on `PATH` until v0.1 publishes).
+
 ```bash
-hivectl init --admin-email you@example.com   # bootstrap a fresh Hive (one-time)
+node packages/cli/dist/main.js init --admin-email you@example.com   # one-time bootstrap
 node packages/server/dist/main.js
 # → Listening on http://0.0.0.0:8443/mcp
 ```
@@ -55,18 +57,22 @@ Endpoints exposed: `POST /mcp` (JSON-RPC + SSE), `GET /mcp` (server-initiated SS
 ### Administer the Hive
 
 ```bash
-hivectl hivekeeper create --email teammate@example.com --emit-credential
-hivectl agent create --owner you@example.com --name worker-a --type worker --emit-credential
-hivectl credential rotate <jti> --yes
-hivectl audit query --limit 20
+node packages/cli/dist/main.js hivekeeper create --email teammate@example.com --emit-credential
+node packages/cli/dist/main.js agent create --owner you@example.com --name worker-a --type worker --emit-credential
+node packages/cli/dist/main.js credential rotate <jti> --yes
+node packages/cli/dist/main.js audit query --limit 20
 ```
 
-Full operator surface (12 subcommands across `init` / `migrate` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`) documented in [`docs/hivectl.md`](./docs/hivectl.md).
+Tip: alias `hivectl='node packages/cli/dist/main.js'` in your shell during pre-release. Full operator surface (12 subcommands across `init` / `migrate` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`) documented in [`docs/hivectl.md`](./docs/hivectl.md).
 
-### Planned deploy paths (v0.1.0)
+### Distribution status (v0.1)
 
-- **Local / OSS default:** `pnpm install -g @hive/cli` + `hivectl init` → SQLite at `./var/db/hive.sqlite`. No Docker, no infra.
-- **Production (opt-in):** `docker compose up` with `COMPOSE_PROFILES=postgres` → Postgres-backed deployment (lands in PRY-008).
+Hive is **OSS by design** (Apache 2.0). During Fase 1 v0.1 development the project stays internal — no GHCR publication, no `npm publish`, repo private. Operators run Hive **from source** (`git clone` + `pnpm install` + `pnpm build` + `node packages/<x>/dist/main.js`). When v0.1 is battle-tested in internal deploys, a follow-up PRY adds `release.yml` (push to `ghcr.io/hivemine-ai/hive:vX.Y.Z`), `npm publish` for `@hive/cli`, and flips the repo to public — see vault entry for the trigger conditions.
+
+### Deploy paths (v0.1, build-from-source)
+
+- **Local (CLI + SQLite, default):** `pnpm install && pnpm build` + `node packages/cli/dist/main.js init` → SQLite at `./var/db/hive.sqlite`. Zero infra. Process supervised by systemd / launchd / pm2.
+- **Production (Docker + Postgres, opt-in):** `git clone` + `docker compose -f deployment/docker-compose.yml --profile postgres build && up`. Image built locally on the deploy host (no `docker pull` from a registry during Fase 1).
 
 PostgreSQL support ships in v0.1.0 (the persistence layer is multi-dialect from day one), but is officially validated in CI starting v0.1.1.
 

@@ -22,12 +22,16 @@ What `hivectl` does **not** cover (deferred to Slice 1+):
 
 ## Quick start
 
+> During pre-release (Fase 1), `@hive/cli` is **not published to npm**. Run from the build output instead. Tip: alias `hivectl='node packages/cli/dist/main.js'` in your shell.
+
 ```bash
+# After `pnpm install && pnpm build` from the repo root:
+
 # Local default (SQLite, zero infra)
-hivectl init --admin-email you@example.com --output-credential admin.jwt
+node packages/cli/dist/main.js init --admin-email you@example.com --output-credential admin.jwt
 # → admin.jwt (perms 0600) holds the bootstrap credential
 
-# Common operator workflow
+# Common operator workflow (with shell alias)
 hivectl hivekeeper create --email teammate@example.com --emit-credential \
   --operator-id <admin-uuid> --output-credential teammate.jwt
 hivectl agent create --owner you@example.com --name worker-a --type worker \
@@ -46,6 +50,10 @@ See [`docs/hivectl.md`](../../docs/hivectl.md) for the full subcommand reference
 ## Public API
 
 The `bin` entry is `hivectl` (compiled to `dist/main.js` with shebang `#!/usr/bin/env node`). The package itself does not expose a programmatic API — programmatic callers should consume `@hive/server` directly (`startCli`, `stopCli`, `CliRuntime`).
+
+## Distribution status
+
+Hive v0.1 stays internal during Fase 1 — the CLI is not published to npm. Operators install by cloning the repo and running `pnpm install && pnpm build`. When v0.1 is battle-tested, a follow-up PRY adds `npm publish` for `@hive/cli` (will install via `pnpm install -g @hive/cli` then).
 
 ## Exit codes
 
