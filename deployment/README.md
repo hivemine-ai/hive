@@ -185,7 +185,12 @@ choice (`rsync`, `restic`, S3, etc.).
 # 1. Validate the snapshot pair has matching timestamps
 DUMP=hive-db-20260601-020000.tgz
 KEYS=hive-keys-20260601-020000.tgz
-[[ "${DUMP%.tgz}" != "hive-${KEYS#hive-}" ]] && echo "FATAL: timestamps differ" && exit 1
+DUMP_TS=$(echo "$DUMP" | grep -oE '[0-9]{8}-[0-9]{6}')
+KEYS_TS=$(echo "$KEYS" | grep -oE '[0-9]{8}-[0-9]{6}')
+if [ "$DUMP_TS" != "$KEYS_TS" ] || [ -z "$DUMP_TS" ]; then
+  echo "FATAL: snapshot pair timestamps differ — refusing restore (DUMP=$DUMP_TS, KEYS=$KEYS_TS)"
+  exit 1
+fi
 
 # 2. Re-create the volumes BEFORE compose creates them empty
 docker volume create hive-db
