@@ -100,6 +100,14 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
         tools: {},
         resources: { subscribe: true, listChanged: false },
         prompts: {},
+        // Claude Code Channels — server emits `notifications/claude/channel`
+        // on each Waggle delivery. Claude Code injects the content into the
+        // model context as `<channel source="hive" ...>...</channel>`,
+        // enabling reactive agents without polling. Per ADR-011 (dual emit).
+        // Marked `experimental` because Anthropic ships this as research
+        // preview — the API may change. Trigger of revision: monitor Claude
+        // Code changelog on every SDK MCP bump.
+        experimental: { 'claude/channel': {} },
       },
       instructions: deps.instructions ?? DEFAULT_INSTRUCTIONS,
     });
@@ -214,6 +222,11 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
 
       const notifier: McpServerNotifier = {
         sendResourceUpdated: (params) => mcpServer.server.sendResourceUpdated(params),
+        sendChannelNotification: (params) =>
+          mcpServer.server.notification({
+            method: 'notifications/claude/channel',
+            params,
+          }),
       };
       // Pin the notifier in the SessionState so it stays GC-anchored for the
       // lifetime of the session — the SubscriberHandle holds it via WeakRef.
