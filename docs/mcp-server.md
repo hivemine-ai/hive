@@ -74,7 +74,9 @@ Tool inputs are validated against a JSON Schema (derived from zod). Refer to `to
 
 ### Push notifications (Waggle)
 
-When a message is delivered to a participant's cell, the server emits a `notifications/resources/updated` notification to the recipient's active sessions:
+When a message is delivered to a participant's cell, the server emits **two notifications in parallel** on each delivery — a dual-emit pattern that keeps standard MCP clients working while enabling reactive autonomy in Claude Code. See [Channels](channels.md) for the operator guide on enabling reactive autonomy.
+
+**Envelope 1 — `notifications/resources/updated` (MCP-standard, every client):**
 
 ```json
 {
@@ -95,7 +97,30 @@ When a message is delivered to a participant's cell, the server emits a `notific
 }
 ```
 
-The `waggle_id` is internal telemetry — clients **must not** dedup by it. To dedup, re-read state via `read_mailbox` or `check_unread_messages`.
+**Envelope 2 — `notifications/claude/channel` (Claude Code Channels — research preview):**
+
+```json
+{
+  "method": "notifications/claude/channel",
+  "params": {
+    "content": "You have <N> unread message(s) in your mailbox. Run check_unread_messages to read.\n\n<!-- waggle: kind=<kind>, waggle_id=<UUID v7>, emitted_at=<ISO 8601 UTC> -->",
+    "meta": {
+      "cell_id": "<UUID v7>",
+      "kind": "online" | "replay",
+      "unread_count": "<int as string>",
+      "sender_ids": "<UUID v7,UUID v7,...>",
+      "waggle_id": "<UUID v7>",
+      "emitted_at": "<ISO 8601 UTC>"
+    }
+  }
+}
+```
+
+Claude Code v2.1.80+ injects `params.content` into the model context wrapped as `<channel source="hive" cell_id="..." ...>...</channel>` (the `meta` entries become XML attributes on the tag), which triggers the model to react autonomously without polling. Standard MCP clients ignore this notification (unknown method) and rely on Envelope 1 plus their own polling. The capability is declared as `experimental: { 'claude/channel': {} }` in the `initialize` response.
+
+**Fail-safe.** Envelope 2 is additive: if `sendNotification` rejects (channel-config drift, socket closed mid-deliver, SDK error), the server logs `event: 'mcp_channel_emit_failed'` and continues — Envelope 1 already delivered and is the load-bearing path. Reactive clients lose autonomy on that delivery; the next Waggle re-attempts cleanly.
+
+**Idempotency.** The `waggle_id` (in either envelope) is internal telemetry — clients **must not** dedup by it. To dedup, re-read state via `read_mailbox` or `check_unread_messages`.
 
 Push notifications travel over the SSE stream the client opened with `GET /mcp`. Clients without an open SSE stream can still poll via the tools above.
 
