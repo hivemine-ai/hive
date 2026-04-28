@@ -1,7 +1,8 @@
 // Composition root for the Hive v0.1 OSS process.
 //
-// Builds the dependency graph in normative order (per the MCP Server + Tool
-// Surface tech spec § "Decisión: Composition root manual"):
+// Builds the dependency graph in normative order, per the manual
+// composition-root choice documented in the MCP Server + Tool Surface
+// tech spec:
 //   1. Env config + DB.
 //   2. KeypairStore + Blocklist + Verifier (auth).
 //   3. ParticipantsRepo (auth read repo).

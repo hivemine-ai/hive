@@ -1,4 +1,5 @@
 // Visibility matrix — derived verbatim from the product spec
+// eslint-disable-next-line hive-local/no-spanish-leakage -- vault spec name textually cited
 // "Matriz de Visibilidad y Autorización", full visibility table section.
 //
 // Implementation choice (per tech spec — data-driven decision table): array

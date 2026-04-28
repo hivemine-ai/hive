@@ -2,7 +2,7 @@
 //   [--subject-id <uuid>] [--from <iso>] [--until <iso>] [--limit N]
 //   [--cursor <cursor>]`
 //
-// Per the tech spec § "Decisión: deltas cross-spec — no implementadas acá",
+// Per the tech spec rationale (cross-spec deltas not implemented here),
 // `auditQuery.queryAuditLog` requires a `CallerContext` that the CLI cannot
 // fully synthesize for `system` callers. Slice 0 falls back to direct SQL
 // against `audit_log`. Parameterized — no injection risk. No audit event of

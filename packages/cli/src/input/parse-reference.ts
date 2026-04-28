@@ -4,8 +4,9 @@
 //   (a) UUID v7 canonical → returned as-is (lowercased).
 //   (b) Email (Hivekeeper) → looked up by lower(email).
 //
-// Per the tech spec § "Decisión: hivectl no acepta referencia humana de Agent",
-// agent references like '<name>@<owner>.<hive>' are NOT supported by the CLI.
+// Per the tech spec rationale (hivectl does not accept human-readable
+// agent references), agent references like '<name>@<owner>.<hive>' are
+// NOT supported by the CLI.
 // Operators copy the agent UUID from `agent list`.
 //
 // Errors:

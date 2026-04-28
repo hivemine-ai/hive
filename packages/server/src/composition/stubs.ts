@@ -3,7 +3,7 @@
 // The `VisibilityEngine` interface itself lives in `domain/visibility/types.ts`
 // (PRY-004). The stub below is preserved because PRY-003's domain unit tests
 // inject it to bypass the real engine; the composition root of the server uses
-// the real engine constructed by the visibility factory (PRY-004 Hito 8).
+// the real engine constructed by the visibility factory (PRY-004 milestone 8).
 
 import type { VisibilityEngine } from '#domain/visibility/index.js';
 
