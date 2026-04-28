@@ -253,6 +253,7 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
           {
             event: 'mcp_subscribe_failed',
             sessionId,
+            participantId: identity.participantId,
             err: err instanceof Error ? err.message : String(err),
           },
           'presence subscribe failed during ensureSessionFor',

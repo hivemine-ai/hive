@@ -236,6 +236,19 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
           'http host stop failed',
         );
       });
+      // Stop the presence sweep timer BEFORE closing the DB — keeps the event
+      // loop free of pending intervals during db teardown. Idempotent.
+      try {
+        notifications.presenceRegistry.shutdown();
+      } catch (err) {
+        logger.warn(
+          {
+            event: 'wire_presence_shutdown_failed',
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'presence registry shutdown failed',
+        );
+      }
       try {
         await closeKyselyDb(db);
       } catch (err) {
