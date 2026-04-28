@@ -114,7 +114,89 @@ jobs:
             "$JWT" \
             "${{ steps.init.outputs.admin_participant_id }}"
 
-      - name: Cleanup — stop server
+      - name: Verify observability ACs against server.log (PRY-018)
+        run: |
+          set -euo pipefail
+          LOG="${{ runner.temp }}/server.log"
+
+          # AC1: each HTTP request emits http_request_completed with a unique UUIDv7 requestId.
+          COMPLETED_COUNT=$(grep -c '"event":"http_request_completed"' "$LOG" || true)
+          if [ "$COMPLETED_COUNT" -lt 3 ]; then
+            echo "::error::AC1 — expected ≥ 3 http_request_completed events, got $COMPLETED_COUNT"
+            grep '"event":"http_request_completed"' "$LOG" || true
+            exit 1
+          fi
+          UNIQUE_IDS=$(grep '"event":"http_request_completed"' "$LOG" \
+            | node -e 'const ls=require("fs").readFileSync(0,"utf8").trim().split("\n"); const ids=ls.map(l=>JSON.parse(l).requestId); console.log([...new Set(ids)].length, ids.length)')
+          UNIQUE=$(echo "$UNIQUE_IDS" | awk '{print $1}')
+          TOTAL=$(echo "$UNIQUE_IDS" | awk '{print $2}')
+          if [ "$UNIQUE" != "$TOTAL" ]; then
+            echo "::error::AC1 — requestIds are not unique ($UNIQUE unique / $TOTAL total)"
+            exit 1
+          fi
+          echo "AC1 ✓ — $COMPLETED_COUNT http_request_completed events, all requestIds unique"
+
+          # AC2: required fields present.
+          node -e '
+            const ls=require("fs").readFileSync(process.argv[1],"utf8").split("\n").filter(Boolean);
+            const completed=ls.map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(o=>o&&o.event==="http_request_completed");
+            for (const e of completed) {
+              for (const f of ["requestId","method","path","statusCode","durationMs","level"]) {
+                if (e[f]===undefined) { console.error("AC2 missing field",f,JSON.stringify(e)); process.exit(1); }
+              }
+              if (e.level !== 30) { console.error("AC2 level not 30",JSON.stringify(e)); process.exit(1); }
+            }
+          ' "$LOG"
+          echo "AC2 ✓ — required fields present + level=30"
+
+          # AC3: audit_log row request_id matches the audit_recorded log line requestId.
+          AUDIT_RECORDED_COUNT=$(grep -c '"event":"audit_recorded"' "$LOG" || true)
+          if [ "$AUDIT_RECORDED_COUNT" -ge 1 ]; then
+            LOG_ID=$(grep '"event":"audit_recorded"' "$LOG" | head -1 \
+              | node -e 'const o=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log(o.requestId ?? "")')
+            if [ -z "$LOG_ID" ] || [ "$LOG_ID" = "null" ]; then
+              echo "AC3 ✓ — audit_recorded carries a requestId field (null is valid for CLI-driven events)"
+            else
+              DB_ID=$(sqlite3 "${{ runner.temp }}/hive.sqlite" "SELECT request_id FROM audit_log WHERE request_id IS NOT NULL LIMIT 1;" || true)
+              if [ "$LOG_ID" != "$DB_ID" ]; then
+                echo "::error::AC3 — log requestId ($LOG_ID) ≠ audit_log.request_id ($DB_ID)"
+                exit 1
+              fi
+              echo "AC3 ✓ — audit_log.request_id matches log stream ($LOG_ID)"
+            fi
+          else
+            echo "AC3 ⚠️ — no audit_recorded events in this run (admin operations are CLI-only and the log started fresh after init)"
+          fi
+
+          # AC5: Authorization is masked — JWT prefix `eyJ` MUST NOT appear.
+          if grep -E '"authorization":"Bearer eyJ' "$LOG" > /dev/null 2>&1; then
+            echo "::error::AC5 — bearer token leaked in log"
+            grep -E '"authorization":"Bearer eyJ' "$LOG" | head -3
+            exit 1
+          fi
+          echo "AC5 ✓ — no bearer token leaked"
+
+          # AC6: happy-path info events emitted.
+          for EV in mcp_session_opened auth_credential_verified mcp_tool_dispatch_success wire_started; do
+            COUNT=$(grep -c "\"event\":\"$EV\"" "$LOG" || true)
+            if [ "$COUNT" -lt 1 ]; then
+              echo "::error::AC6 — expected ≥ 1 '$EV' event, got $COUNT"
+              exit 1
+            fi
+          done
+          echo "AC6 ✓ — happy-path info events present"
+
+          # AC8: stdout consumer warn does NOT fire on this healthy run (CI captures stdout).
+          if grep -q '"event":"stdout_consumer_missing"' "$LOG"; then
+            echo "::error::AC8 — stdout_consumer_missing fired on a healthy CI run (false positive)"
+            grep '"event":"stdout_consumer_missing"' "$LOG"
+            exit 1
+          fi
+          echo "AC8 ✓ — stdout consumer healthy"
+
+          echo "All observability ACs satisfied."
+
+      - name: Cleanup — stop server + verify shutdown ACs
         if: always()
         run: |
           set -uo pipefail
@@ -133,6 +215,19 @@ jobs:
           fi
           echo '--- server.log tail ---'
           tail -100 "${{ runner.temp }}/server.log" 2>/dev/null || true
+
+          # AC7 cousin — wire_stopping + wire_stopped emitted on graceful shutdown.
+          # `flushLogger` itself is exercised by unit tests (mock pino flush);
+          # here we verify the surrounding shutdown lifecycle events made it.
+          LOG="${{ runner.temp }}/server.log"
+          if [ -f "$LOG" ]; then
+            if ! grep -q '"event":"wire_stopping"' "$LOG"; then
+              echo "::warning::wire_stopping not found in server.log (server may have crashed)"
+            fi
+            if ! grep -q '"event":"wire_stopped"' "$LOG"; then
+              echo "::warning::wire_stopped not found in server.log (graceful drain may have failed)"
+            fi
+          fi
 
   docker-build:
     name: docker image build (Topology 2)

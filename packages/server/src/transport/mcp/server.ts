@@ -17,7 +17,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-import { v7 as uuidv7 } from 'uuid';
+import { v7 as uuidv7, validate as uuidValidate, version as uuidVersion } from 'uuid';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
 import { AuthError, isAuthError } from '#domain/auth/index.js';
@@ -75,6 +75,13 @@ const DEFAULT_INSTRUCTIONS =
 export function createMcpTransport(deps: McpTransportDeps): McpTransport {
   const sessionStore = createSessionStore();
   const resolver = createReferenceResolver({ participantsRepo: deps.participantsRepo });
+  // Capture the request-id header name once at construction, mirroring the
+  // attachRequestIdHook closure pattern. Reading process.env on every tool
+  // dispatch was both wasteful and a source of test/prod inconsistency
+  // (different evaluation timing vs the hook).
+  const requestIdHeaderName = (
+    process.env['HIVE_OBSERVABILITY_REQUEST_ID_HEADER'] ?? 'x-request-id'
+  ).toLowerCase();
 
   const toolCatalog = createToolCatalog({
     participantsRepo: deps.participantsRepo,
@@ -167,15 +174,31 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
         throw mapToMcpError(err, deps.logger);
       }
 
+      // Resolve the request-scoped requestId. The fastify request-id hook
+      // writes the canonical UUIDv7 back to req.headers[<header>], which the
+      // SDK propagates as extra.requestInfo.headers. Reading it here keeps the
+      // audit log row + http_request_completed log + handler events bound to
+      // the same correlation id (closes AC3 of PRY-018). Falls back to a fresh
+      // uuidv7 if the header is missing (eg. a future direct-stdio invocation
+      // without the fastify hook).
       const ctx: RequestContext = {
         identity: state.identity,
-        requestId: uuidv7(),
+        requestId: resolveRequestIdFromExtra(extra, requestIdHeaderName) ?? uuidv7(),
         sessionState: state,
       };
 
       try {
         const args = request.params.arguments ?? {};
         const result = await tool.handler(args, ctx);
+        deps.logger.info(
+          {
+            event: 'mcp_tool_dispatch_success',
+            tool: toolName,
+            sessionId,
+            participantId: state.identity.participantId,
+          },
+          'mcp tool dispatch success',
+        );
         return {
           content: [{ type: 'text', text: JSON.stringify(result) }],
           structuredContent: result as Record<string, unknown>,
@@ -261,12 +284,41 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
         throw err;
       }
 
+      deps.logger.info(
+        {
+          event: 'mcp_session_opened',
+          sessionId,
+          participantId: identity.participantId,
+          kind: identity.kind,
+        },
+        'mcp session opened',
+      );
+
       return state;
     },
   };
 }
 
 // ---------- helpers ----------
+
+/**
+ * Extracts the canonical UUIDv7 requestId from the SDK's `extra.requestInfo`.
+ * The fastify request-id hook (observability/request-id.ts) writes the value
+ * back to `req.headers[<header>]` so it propagates through the SDK transport.
+ * Returns null if the header is absent or not a valid UUIDv7.
+ */
+function resolveRequestIdFromExtra(
+  extra: { requestInfo?: { headers?: unknown } },
+  headerName: string,
+): string | null {
+  const headers = extra.requestInfo?.headers;
+  if (!headers || typeof headers !== 'object') return null;
+  const raw: unknown = (headers as Record<string, unknown>)[headerName];
+  const value: unknown = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value !== 'string') return null;
+  if (!uuidValidate(value) || uuidVersion(value) !== 7) return null;
+  return value;
+}
 
 function mapToMcpError(err: unknown, logger?: Logger): McpError {
   if (err instanceof McpError) return err;

@@ -136,6 +136,28 @@ Each accepted MCP session registers a presence subscription on the server. Sessi
 
 Both eviction paths emit structured `info` log events for telemetry: `presence_session_evicted_idle` (TTL sweep) and `presence_session_evicted_lru` (cap-hit), each carrying `participantId`, `subscriptionId`, and the relevant timestamps.
 
+### Observability
+
+The server emits structured JSON logs (one event per line) on stdout via [`pino`](https://github.com/pinojs/pino). Operators forward stdout to journald, the docker logs driver, or a sidecar. If no consumer is attached, pino buffers and eventually drops — the server emits a one-shot `stdout_consumer_missing` warn at boot to surface the misconfiguration early.
+
+**Levels.** Per the unified policy:
+
+| Level   | Numeric | When                                                                                              |
+| ------- | ------- | ------------------------------------------------------------------------------------------------- |
+| `debug` | `20`    | Off by default. Enable with `HIVE_LOG_LEVEL=debug` for tracing. Not part of the normative policy. |
+| `info`  | `30`    | Happy-path lifecycle (server, session, request, dispatch, delivery successful).                   |
+| `warn`  | `40`    | Recoverable anomalies (auth fail, deprecations, sweep misconfig, visibility deny).                |
+| `error` | `50`    | Unrecoverable failure of a specific request — process keeps running.                              |
+| `fatal` | `60`    | Process dies (init failure, panic recovery impossible).                                           |
+
+**Request correlation.** Every HTTP request entering the server is tagged with a fresh UUIDv7 `requestId` by the fastify request-id hook. The id propagates through the request-scoped logger, the MCP tool dispatch context, and the audit log row (when the request triggers an audit event), so a single id correlates the full lifecycle of one request across operational logs and the audit table.
+
+Clients can pass their own id via the configured header (default `x-request-id`); the server respects valid UUIDv7 values and discards anything else. The header name is overridable with `HIVE_OBSERVABILITY_REQUEST_ID_HEADER`.
+
+**Redacted paths.** The logger masks bearer tokens, message bodies, and tool call args by default. The redacted paths are: `authorization`, `req.headers.authorization`, `*.authorization`, `*.body`, `*.params.body`, `*.arguments.body`. Components that introduce new sensitive fields can extend the list via `createLogger({ redact: [...] })`.
+
+**Audit log relationship.** Operational logs (this stream) and the audit log (the `audit_log` SQLite/PG table) are separate channels with different retention policies and consumers. The recorder also emits an `audit_recorded` info log line on every successful insert; the row's `request_id` column matches the `requestId` field in that log line, so cross-correlation between the two channels is straightforward (`grep '"event":"audit_recorded"' stdout` ↔ `SELECT request_id FROM audit_log`).
+
 ## HTTP endpoints
 
 | Method   | Path                     | Purpose                                                                  |
@@ -151,17 +173,19 @@ TLS termination is the operator's responsibility — run the server behind nginx
 
 ## Configuration
 
-| Variable                                  | Default   | Purpose                                                                                                                                                                                                   |
-| ----------------------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HIVE_MCP_HTTP_HOST`                      | `0.0.0.0` | Bind address. Set `127.0.0.1` for local-only access.                                                                                                                                                      |
-| `HIVE_MCP_HTTP_PORT`                      | `8443`    | Listening port.                                                                                                                                                                                           |
-| `HIVE_MCP_HTTP_PATH`                      | `/mcp`    | MCP endpoint path.                                                                                                                                                                                        |
-| `HIVE_MCP_LOG_LEVEL`                      | `info`    | Pino log level: `trace` / `debug` / `info` / `warn` / `error` / `fatal` / `silent`.                                                                                                                       |
-| `HIVE_MCP_LOG_PRETTY`                     | `false`   | If `true`, use `pino-pretty` (dev only). Production should leave it false (JSON logs).                                                                                                                    |
-| `HIVE_MCP_RECHECK_SENDER_STATE`           | `true`    | Toggle the `requireActiveSender` middleware. Disable only in performance-critical deployments where you accept that a revoked sender may make a few tool calls before the next domain check catches them. |
-| `HIVE_MCP_READYZ_DB_TIMEOUT_MS`           | `500`     | DB ping timeout for `GET /readyz`.                                                                                                                                                                        |
-| `HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` | `30`      | Max time to drain in-flight requests on SIGTERM/SIGINT.                                                                                                                                                   |
-| `HIVE_AUTH_KEYS_DIR`                      | `./keys`  | Where to load the signing keypairs from.                                                                                                                                                                  |
+| Variable                                  | Default        | Purpose                                                                                                                                                                                                   |
+| ----------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HIVE_MCP_HTTP_HOST`                      | `0.0.0.0`      | Bind address. Set `127.0.0.1` for local-only access.                                                                                                                                                      |
+| `HIVE_MCP_HTTP_PORT`                      | `8443`         | Listening port.                                                                                                                                                                                           |
+| `HIVE_MCP_HTTP_PATH`                      | `/mcp`         | MCP endpoint path.                                                                                                                                                                                        |
+| `HIVE_LOG_LEVEL`                          | `info`         | Pino log level: `trace` / `debug` / `info` / `warn` / `error` / `fatal` / `silent`. Process-wide. Honored by `main.ts` and the CLI logger when no explicit level is passed.                               |
+| `HIVE_MCP_LOG_LEVEL`                      | _unset_        | Legacy override consumed by `main.ts`. Falls back to `HIVE_LOG_LEVEL` when unset. Prefer `HIVE_LOG_LEVEL` in new deploys.                                                                                 |
+| `HIVE_MCP_LOG_PRETTY`                     | `false`        | If `true`, use `pino-pretty` (dev only). Production should leave it false (JSON logs).                                                                                                                    |
+| `HIVE_OBSERVABILITY_REQUEST_ID_HEADER`    | `x-request-id` | Header from which the server reads an inbound `requestId` for cross-system correlation. The value must be a valid UUIDv7; invalid values are discarded and a fresh id is generated.                       |
+| `HIVE_MCP_RECHECK_SENDER_STATE`           | `true`         | Toggle the `requireActiveSender` middleware. Disable only in performance-critical deployments where you accept that a revoked sender may make a few tool calls before the next domain check catches them. |
+| `HIVE_MCP_READYZ_DB_TIMEOUT_MS`           | `500`          | DB ping timeout for `GET /readyz`.                                                                                                                                                                        |
+| `HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` | `30`           | Max time to drain in-flight requests on SIGTERM/SIGINT.                                                                                                                                                   |
+| `HIVE_AUTH_KEYS_DIR`                      | `./keys`       | Where to load the signing keypairs from.                                                                                                                                                                  |
 
 ### Presence (session lifecycle)
 

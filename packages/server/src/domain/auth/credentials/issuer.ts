@@ -22,6 +22,8 @@ import { dateToIso, jsonStringify, validateJsonText } from '#persistence/type-ma
 import { AuthError } from '../errors.js';
 import type { SigningKey } from '../keys/keypair-store.js';
 import type { ParticipantsReadRepo } from '../participants/repository.js';
+import type { Logger } from '#observability/logger.js';
+
 import type { Duration, IssuedCredential, ParticipantKind, UUIDv7 } from '../types.js';
 
 export interface IssueCredentialInput {
@@ -44,6 +46,7 @@ export interface IssuerDeps {
   db: Kysely<Database>;
   // Injectable clock for tests.
   now?: () => Date;
+  logger?: Logger;
 }
 
 export interface Issuer {
@@ -130,6 +133,20 @@ export function createIssuer(deps: IssuerDeps): Issuer {
           revoked_at: null,
         })
         .execute();
+
+      if (deps.logger) {
+        deps.logger.info(
+          {
+            event: 'auth_credential_issued',
+            participantId: input.participantId,
+            kind,
+            jti,
+            kid: deps.signingKey.kid,
+            expiresAt: dateToIso(expiresAt),
+          },
+          'auth credential issued',
+        );
+      }
 
       return {
         jti,

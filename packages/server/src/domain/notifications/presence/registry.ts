@@ -22,6 +22,7 @@
 import { v7 as uuidv7 } from 'uuid';
 
 import type { UUIDv7 } from '#domain/auth/types.js';
+import { warnSweepMisconfig } from '#observability/config-guard.js';
 import type { Logger } from '#observability/logger.js';
 
 import { WaggleError } from '../errors.js';
@@ -152,6 +153,17 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
 
   const sweepIntervalMs = config.sweepIntervalMs ?? 0;
   const lruEvictThresholdMs = config.lruEvictThresholdMs ?? null;
+
+  // Closes N2 of PRY-017: surface a misconfiguration where the idle
+  // threshold is enabled but no sweep timer would mount. Without this guard
+  // the sweep silently never runs and idle sessions accumulate — the very
+  // pathology that drove INC-2026-003.
+  if (logger !== undefined) {
+    warnSweepMisconfig(logger, 'PresenceRegistry', {
+      enabledMs: idleTimeoutMs,
+      intervalMs: sweepIntervalMs,
+    });
+  }
 
   function getOrCreate(participantId: UUIDv7): ParticipantPresence {
     let entry = presenceMap.get(participantId);
@@ -303,6 +315,16 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
         // composition wired something that throws, we still return the
         // subscription; the client can use polling fallbacks.
       }
+
+      logger?.info(
+        {
+          event: 'presence_subscribe_success',
+          participantId,
+          subscriptionId,
+          connectionId: input.handle.connectionId,
+        },
+        'presence subscribe success',
+      );
 
       const subscription: Subscription = {
         id: subscriptionId,

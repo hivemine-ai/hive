@@ -12,6 +12,7 @@
 import type { Kysely } from 'kysely';
 
 import type { UUIDv7 } from '#domain/auth/types.js';
+import type { Logger } from '#observability/logger.js';
 import type { Database } from '#persistence/schema.js';
 
 import { CellError } from './errors.js';
@@ -48,6 +49,8 @@ export interface ReaderDeps {
   db: Kysely<Database>;
   config?: Partial<ReaderConfig>;
   now?: () => Date;
+  /** Optional logger for happy-path observability (info-level events per ADR-013). */
+  logger?: Logger;
 }
 
 export interface Reader {
@@ -95,10 +98,25 @@ export function createReader(deps: ReaderDeps): Reader {
       filter.inReplyTo = input.filter.inReplyTo;
     }
 
-    return deps.cellsRepo.listMessages(cell.id, filter, {
+    const messages = await deps.cellsRepo.listMessages(cell.id, filter, {
       cursor: input.pagination?.cursor ?? null,
       limit: effectiveLimit,
     });
+
+    if (deps.logger) {
+      deps.logger.info(
+        {
+          event: 'cell_mailbox_read',
+          cellId: cell.id,
+          callerId,
+          messageCount: messages.length,
+          limit: effectiveLimit,
+        },
+        'cell mailbox read',
+      );
+    }
+
+    return messages;
   }
 
   async function markRead(input: MarkReadInput): Promise<MarkReadResult> {
@@ -127,6 +145,19 @@ export function createReader(deps: ReaderDeps): Reader {
       } else {
         ignored.push(id);
       }
+    }
+
+    if (deps.logger) {
+      deps.logger.info(
+        {
+          event: 'cell_messages_marked_read',
+          cellId: cell.id,
+          callerId,
+          markedCount: marked.length,
+          ignoredCount: ignored.length,
+        },
+        'cell messages marked read',
+      );
     }
 
     return { marked, ignored };

@@ -3,6 +3,7 @@
 
 import type { Kysely } from 'kysely';
 
+import type { Logger } from '#observability/logger.js';
 import type { Database } from '#persistence/schema.js';
 import { dateToIso } from '#persistence/type-mappers.js';
 import { AuthError } from '../errors.js';
@@ -20,6 +21,7 @@ export interface RevokerDeps {
   blocklist: Blocklist;
   db: Kysely<Database>;
   now?: () => Date;
+  logger?: Logger;
 }
 
 export interface Revoker {
@@ -69,6 +71,13 @@ export function createRevoker(deps: RevokerDeps): Revoker {
       });
 
       deps.blocklist.recordAdded(input.jti);
+
+      if (deps.logger) {
+        deps.logger.info(
+          { event: 'auth_credential_revoked', jti: input.jti },
+          'auth credential revoked',
+        );
+      }
     },
   };
 }

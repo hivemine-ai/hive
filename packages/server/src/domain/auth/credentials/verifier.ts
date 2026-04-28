@@ -120,7 +120,19 @@ export function createVerifier(deps: VerifierDeps): Verifier {
         throw fail(deps, new AuthError('PARTICIPANT_NOT_ACTIVE', { subCode: state }));
       }
 
-      return buildIdentityContext(participant, payload, kid);
+      const identity = buildIdentityContext(participant, payload, kid);
+      if (deps.logger) {
+        deps.logger.info(
+          {
+            event: 'auth_credential_verified',
+            participantId: identity.participantId,
+            kind: identity.kind,
+            kid,
+          },
+          'auth credential verified',
+        );
+      }
+      return identity;
     },
   };
 }

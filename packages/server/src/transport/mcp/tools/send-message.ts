@@ -51,6 +51,7 @@ export function createSendMessageHandler(deps: SendMessageDeps) {
     if (input.reply_to !== undefined) sendInput.replyTo = input.reply_to;
     if (input.ttl_ms !== undefined) sendInput.ttl = input.ttl_ms;
     if (input.idempotency_key !== undefined) sendInput.idempotencyKey = input.idempotency_key;
+    sendInput.requestId = ctx.requestId;
 
     const result = await deps.sender.sendMessage(sendInput);
 

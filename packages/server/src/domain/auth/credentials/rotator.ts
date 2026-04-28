@@ -8,6 +8,7 @@ import type { Kysely } from 'kysely';
 import { v7 as uuidv7 } from 'uuid';
 import * as jose from 'jose';
 
+import type { Logger } from '#observability/logger.js';
 import type { Database, JsonText } from '#persistence/schema.js';
 import { dateToIso, jsonStringify, validateJsonText } from '#persistence/type-mappers.js';
 import { AuthError } from '../errors.js';
@@ -32,6 +33,7 @@ export interface RotatorDeps {
   snapshotMaxBytes?: number;
   db: Kysely<Database>;
   now?: () => Date;
+  logger?: Logger;
 }
 
 export interface Rotator {
@@ -161,6 +163,21 @@ export function createRotator(deps: RotatorDeps): Rotator {
 
       // Mutate the in-memory Set after the TX commits.
       deps.blocklist.recordAdded(input.currentJti);
+
+      if (deps.logger) {
+        deps.logger.info(
+          {
+            event: 'auth_credential_rotated',
+            participantId,
+            kind,
+            previousJti: input.currentJti,
+            newJti,
+            kid: deps.signingKey.kid,
+            expiresAt: dateToIso(expiresAt),
+          },
+          'auth credential rotated',
+        );
+      }
 
       return {
         jti: newJti,

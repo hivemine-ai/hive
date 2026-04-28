@@ -4,13 +4,23 @@
 // installs SIGTERM/SIGINT handlers that drive a graceful shutdown.
 
 import { createLogger } from './observability/logger.js';
+import type { LoggerOptions } from './observability/logger.js';
 import { buildWire } from './composition/wire.js';
 
 async function main(): Promise<void> {
-  const logger = createLogger({
-    level: process.env['HIVE_MCP_LOG_LEVEL'] ?? 'info',
-    pretty: process.env['HIVE_MCP_LOG_PRETTY'] === 'true',
-  });
+  const loggerOpts: LoggerOptions = { pretty: process.env['HIVE_MCP_LOG_PRETTY'] === 'true' };
+  const rawLevel = process.env['HIVE_MCP_LOG_LEVEL'];
+  if (rawLevel !== undefined) {
+    loggerOpts.level = rawLevel as
+      | 'trace'
+      | 'debug'
+      | 'info'
+      | 'warn'
+      | 'error'
+      | 'fatal'
+      | 'silent';
+  }
+  const logger = createLogger(loggerOpts);
 
   let wire: Awaited<ReturnType<typeof buildWire>>;
   try {

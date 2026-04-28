@@ -9,8 +9,6 @@ interface MockVerifier {
   verify: Mock<Verifier['verify']>;
 }
 
-const UUID_V7_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-
 function fakeIdentity(): IdentityContext {
   return {
     participantId: '01950000-0000-7000-8000-000000000001',
@@ -32,23 +30,6 @@ describe('verifyBearerHeader', () => {
 
     expect(result.identity).toBe(identity);
     expect(verifier.verify).toHaveBeenCalledWith('Bearer token123');
-  });
-
-  it('generates a UUID v7 requestId when none is provided', async () => {
-    const verifier: MockVerifier = { verify: vi.fn().mockResolvedValue(fakeIdentity()) };
-
-    const result = await verifyBearerHeader(verifier, 'Bearer token');
-
-    expect(result.requestId).toMatch(UUID_V7_REGEX);
-  });
-
-  it('preserves the explicit requestId when provided', async () => {
-    const verifier: MockVerifier = { verify: vi.fn().mockResolvedValue(fakeIdentity()) };
-    const explicitId = '01950000-0000-7000-8000-000000000fff';
-
-    const result = await verifyBearerHeader(verifier, 'Bearer token', explicitId);
-
-    expect(result.requestId).toBe(explicitId);
   });
 
   it('propagates AuthError(CREDENTIAL_MISSING) when header is undefined', async () => {

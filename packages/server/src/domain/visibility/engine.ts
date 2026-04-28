@@ -16,6 +16,7 @@ import type { Participant, ParticipantsReadRepo } from '#domain/auth/index.js';
 import type { AuditRecorder } from '#domain/audit/recorder.js';
 import type { NewAuditEvent } from '#domain/audit/types.js';
 import { parseBoolEnv } from '#observability/env.js';
+import type { Logger } from '#observability/logger.js';
 
 import { classifyRecipient, lookup, senderClass } from './matrix.js';
 import type {
@@ -39,6 +40,8 @@ export interface EngineDeps {
   recorder: AuditRecorder;
   /** Override clock for tests. Defaults to `() => new Date()`. */
   now?: () => Date;
+  /** Optional logger for happy-path observability (info-level events per ADR-013). */
+  logger?: Logger;
 }
 
 type Decision =
@@ -171,6 +174,18 @@ export function createVisibilityEngine(
           ),
         );
         return false;
+      }
+
+      if (deps.logger) {
+        deps.logger.info(
+          {
+            event: 'visibility_allow',
+            actorId: input.callerContext.participantId,
+            recipientId: input.recipientId,
+            senderClass: sender,
+          },
+          'visibility allow',
+        );
       }
 
       return true;
