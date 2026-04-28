@@ -83,14 +83,16 @@ export function flushLogger(logger: Logger, opts?: FlushOptions): Promise<void> 
   const timeoutMs = opts?.timeoutMs ?? 100;
 
   return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, timeoutMs);
     try {
-      logger.flush(() => resolve());
+      logger.flush(() => {
+        clearTimeout(timer);
+        resolve();
+      });
     } catch (err) {
+      clearTimeout(timer);
       reject(err instanceof Error ? err : new Error(String(err)));
-      return;
     }
-
-    setTimeout(resolve, timeoutMs);
   });
 }
 

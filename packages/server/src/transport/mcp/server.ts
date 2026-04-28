@@ -75,6 +75,13 @@ const DEFAULT_INSTRUCTIONS =
 export function createMcpTransport(deps: McpTransportDeps): McpTransport {
   const sessionStore = createSessionStore();
   const resolver = createReferenceResolver({ participantsRepo: deps.participantsRepo });
+  // Capture the request-id header name once at construction, mirroring the
+  // attachRequestIdHook closure pattern. Reading process.env on every tool
+  // dispatch was both wasteful and a source of test/prod inconsistency
+  // (different evaluation timing vs the hook).
+  const requestIdHeaderName = (
+    process.env['HIVE_OBSERVABILITY_REQUEST_ID_HEADER'] ?? 'x-request-id'
+  ).toLowerCase();
 
   const toolCatalog = createToolCatalog({
     participantsRepo: deps.participantsRepo,
@@ -176,7 +183,7 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
       // without the fastify hook).
       const ctx: RequestContext = {
         identity: state.identity,
-        requestId: resolveRequestIdFromExtra(extra) ?? uuidv7(),
+        requestId: resolveRequestIdFromExtra(extra, requestIdHeaderName) ?? uuidv7(),
         sessionState: state,
       };
 
@@ -300,12 +307,12 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
  * back to `req.headers[<header>]` so it propagates through the SDK transport.
  * Returns null if the header is absent or not a valid UUIDv7.
  */
-function resolveRequestIdFromExtra(extra: { requestInfo?: { headers?: unknown } }): string | null {
+function resolveRequestIdFromExtra(
+  extra: { requestInfo?: { headers?: unknown } },
+  headerName: string,
+): string | null {
   const headers = extra.requestInfo?.headers;
   if (!headers || typeof headers !== 'object') return null;
-  const headerName = (
-    process.env['HIVE_OBSERVABILITY_REQUEST_ID_HEADER'] ?? 'x-request-id'
-  ).toLowerCase();
   const raw: unknown = (headers as Record<string, unknown>)[headerName];
   const value: unknown = Array.isArray(raw) ? raw[0] : raw;
   if (typeof value !== 'string') return null;

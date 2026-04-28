@@ -26,7 +26,7 @@ export interface SweepConfigSnapshot {
  * enabled (`enabledMs > 0`) but no timer will be mounted (`intervalMs <= 0`).
  * Silent in any other configuration.
  *
- * Caller is responsible for invoking this UNA vez at construction. Calling
+ * Caller is responsible for invoking this once at construction. Calling
  * it on every sweep tick would flood the warn channel.
  */
 export function warnSweepMisconfig(
