@@ -190,7 +190,19 @@ export function createAuditRecorder(
       } catch (err) {
         incrementFailureCounter(event.category);
         logRecordFailure(deps.logger, event, err, input.createdAt);
+        return;
       }
+      deps.logger.info(
+        {
+          event: 'audit_recorded',
+          category: event.category,
+          decision: event.decision,
+          actorId: event.actorId,
+          subjectId: event.subjectId,
+          requestId: event.requestId,
+        },
+        'audit event recorded',
+      );
     },
 
     async recordEventBatch(events) {
@@ -205,6 +217,20 @@ export function createAuditRecorder(
           incrementFailureCounter(e.category);
           logRecordFailure(deps.logger, e, err, new Date());
         }
+        return;
+      }
+      for (const e of events) {
+        deps.logger.info(
+          {
+            event: 'audit_recorded',
+            category: e.category,
+            decision: e.decision,
+            actorId: e.actorId,
+            subjectId: e.subjectId,
+            requestId: e.requestId,
+          },
+          'audit event recorded',
+        );
       }
     },
   };

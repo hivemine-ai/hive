@@ -98,15 +98,33 @@ export function createPipeline(deps: PipelineDeps): Pipeline {
       const notification = await deps.builder.buildOnlineWaggle({ cellId, recipientId });
       if (!notification) return;
 
+      let deliveredCount = 0;
+      let attemptedCount = 0;
       await deps.presenceRegistry.forEachSubscriber(
         recipientId,
         async (handle) => {
+          attemptedCount += 1;
           await handle.deliver(notification);
+          deliveredCount += 1;
         },
         (handle, err) => {
           logDeliverFailed(handle.connectionId, recipientId, 'online', err);
         },
       );
+
+      if (deliveredCount > 0) {
+        deps.logger.info(
+          {
+            event: 'waggle_delivered',
+            cellId,
+            recipientId,
+            waggleKind: 'online',
+            deliveredCount,
+            attemptedCount,
+          },
+          'waggle delivered',
+        );
+      }
     } catch (err) {
       // Defense-in-depth — flushCell is invoked from a setTimeout callback, so
       // a thrown error would become an unhandledRejection.

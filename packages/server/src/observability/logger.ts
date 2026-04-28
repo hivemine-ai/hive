@@ -1,18 +1,25 @@
 import pino from 'pino';
-import type { Logger } from 'pino';
+import type { DestinationStream, Logger } from 'pino';
 
 export type { Logger };
 
 export interface LoggerOptions {
-  level?: string;
-  // Force pretty output regardless of NODE_ENV. Used by tests to stay quiet.
+  /** Min level to emit. Default: process.env.HIVE_LOG_LEVEL ?? 'info'. */
+  level?: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'silent';
+  /** Force pino-pretty regardless of NODE_ENV. Tests may set true for selective silencing. */
   pretty?: boolean;
   /**
-   * Pino redact paths. Defaults to `Authorization` header masking and message
-   * body masking — both invariants of the MCP transport per the tech spec
-   * § "Consideraciones de seguridad".
+   * Additional redact paths concatenated with DEFAULT_REDACT_PATHS.
+   * Use when a new surface introduces sensitive fields outside the default set.
    */
   redact?: string[];
+  /** Optional bindings applied to the root logger (not per log line). */
+  bindings?: Record<string, unknown>;
+}
+
+export interface FlushOptions {
+  /** Max time (ms) to wait for the flush. Default 100ms. */
+  timeoutMs?: number;
 }
 
 /**
@@ -32,16 +39,20 @@ export const DEFAULT_REDACT_PATHS: ReadonlyArray<string> = [
  * Builds the application logger.
  * Pretty (colored) in dev (NODE_ENV !== 'production'), JSON in prod.
  *
- * `redact` masks the matched paths with `[redacted]`. The default set covers
- * the JWT and message body — never log either by default.
+ * `redact` masks DEFAULT_REDACT_PATHS + opts.redact with `[redacted]`.
+ * `bindings` are applied to the root logger so every line carries them.
  */
-export function createLogger(opts: LoggerOptions = {}): Logger {
+export function createLogger(opts: LoggerOptions = {}, dest?: DestinationStream): Logger {
   const level = opts.level ?? process.env['HIVE_LOG_LEVEL'] ?? 'info';
   const usePretty = opts.pretty ?? process.env['NODE_ENV'] !== 'production';
-  const redact = opts.redact ?? Array.from(DEFAULT_REDACT_PATHS);
+  const redact = [...DEFAULT_REDACT_PATHS, ...(opts.redact ?? [])];
 
-  if (usePretty) {
-    return pino({
+  let root: Logger;
+
+  if (dest !== undefined) {
+    root = pino({ level, redact: { paths: redact, censor: '[redacted]' } }, dest);
+  } else if (usePretty) {
+    root = pino({
       level,
       redact: { paths: redact, censor: '[redacted]' },
       transport: {
@@ -53,7 +64,42 @@ export function createLogger(opts: LoggerOptions = {}): Logger {
         },
       },
     });
+  } else {
+    root = pino({ level, redact: { paths: redact, censor: '[redacted]' } });
   }
 
-  return pino({ level, redact: { paths: redact, censor: '[redacted]' } });
+  return opts.bindings !== undefined ? root.child(opts.bindings) : root;
+}
+
+/**
+ * Force pino flush with timeout. Resolves in <= timeoutMs:
+ * - Resolves OK if pino completed the flush before the timeout.
+ * - Resolves OK silently if it reaches the timeout (best-effort — no throw).
+ * - Rejects ONLY if pino itself throws a synchronous error when starting the flush.
+ *
+ * Default timeout 100ms.
+ */
+export function flushLogger(logger: Logger, opts?: FlushOptions): Promise<void> {
+  const timeoutMs = opts?.timeoutMs ?? 100;
+
+  return new Promise<void>((resolve, reject) => {
+    try {
+      logger.flush(() => resolve());
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+
+    setTimeout(resolve, timeoutMs);
+  });
+}
+
+/**
+ * Extracts the `requestId` binding from a logger's context.
+ * Returns the string value if present, null otherwise.
+ */
+export function getRequestIdFromLogger(logger: Logger): string | null {
+  const bindings = logger.bindings();
+  const requestId: unknown = bindings['requestId'];
+  return typeof requestId === 'string' ? requestId : null;
 }

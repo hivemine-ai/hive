@@ -19,6 +19,7 @@ import type { Kysely, Transaction } from 'kysely';
 import { v7 as uuidv7, validate as uuidValidate, version as uuidVersion } from 'uuid';
 
 import type { UUIDv7 } from '#domain/auth/types.js';
+import type { Logger } from '#observability/logger.js';
 import type { DbDialect } from '#persistence/db.js';
 import type { Database } from '#persistence/schema.js';
 
@@ -75,6 +76,8 @@ export interface SenderDeps {
   now?: () => Date;
   /** Optional sink for logger.warn-style diagnostics on emit failure. Default: silent. */
   onEmitError?: (err: unknown) => void;
+  /** Optional logger for happy-path observability (info-level events per ADR-013). */
+  logger?: Logger;
 }
 
 export interface Sender {
@@ -190,7 +193,7 @@ export function createSender(deps: SenderDeps): Sender {
           throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'cell_closed_or_missing' });
         }
 
-        const allowed = await deps.visibilityEngine.canSend({
+        const canSendInput: Parameters<typeof deps.visibilityEngine.canSend>[0] = {
           callerContext: input.callerContext,
           recipientId: input.recipientId,
           // Reuse the TX connection for the inner participants lookup. Required
@@ -198,7 +201,9 @@ export function createSender(deps: SenderDeps): Sender {
           // blocked while this TX is open). Postgres tolerates either; the
           // SQLite path is the gating constraint.
           executor: tx,
-        });
+        };
+        if (input.requestId !== undefined) canSendInput.requestId = input.requestId;
+        const allowed = await deps.visibilityEngine.canSend(canSendInput);
         if (!allowed) {
           throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'visibility_denied' });
         }
@@ -281,6 +286,20 @@ export function createSender(deps: SenderDeps): Sender {
       },
       deps.onEmitError,
     );
+
+    if (deps.logger && !result.replayed) {
+      deps.logger.info(
+        {
+          event: 'cell_message_sent',
+          messageId: result.messageId,
+          cellId: resolvedCellId,
+          fromParticipantId: senderId,
+          recipientId: input.recipientId,
+          type: input.type,
+        },
+        'cell message sent',
+      );
+    }
 
     return result;
   }

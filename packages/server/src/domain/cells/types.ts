@@ -105,6 +105,13 @@ export interface SendMessageInput {
   replyTo?: UUIDv7;
   ttl?: Duration;
   idempotencyKey?: string;
+  /**
+   * Request-scoped correlation id propagated to the audit log row when
+   * visibility denies the send. Sourced by the MCP transport handler from
+   * the fastify request-id hook (Observability tech spec § Audit log
+   * relationship). Optional — out-of-HTTP callers (eg. CLI) pass null.
+   */
+  requestId?: string;
 }
 
 export interface SendResult {

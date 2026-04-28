@@ -33,6 +33,7 @@ import type { Verifier, IdentityContext } from '#domain/auth/index.js';
 import { buildJwkSet } from '#domain/auth/index.js';
 import type { SigningKey } from '#domain/auth/keys/keypair-store.js';
 import type { Logger } from '#observability/logger.js';
+import { attachRequestIdHook } from '#observability/request-id.js';
 import type { Database } from '#persistence/schema.js';
 
 import { verifyBearerHeader } from './auth-binding.js';
@@ -72,7 +73,6 @@ interface SessionEntry {
 
 interface HiveAuth {
   identity: IdentityContext;
-  requestId: string;
 }
 
 export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}): HttpHost {
@@ -85,6 +85,13 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
     logger: false,
     bodyLimit: 4 * 1024 * 1024,
   });
+
+  // Request-id hook MUST be attached before any routes or auth hooks so every
+  // request inherits the `requestId`-bound child logger from the start. The
+  // auth hook below logs `mcp_auth_failed` via the request-scoped logger when
+  // available, and the audit recorder downstream reads `requestId` from the
+  // logger context to populate `audit_log.request_id`.
+  attachRequestIdHook(app, deps.logger);
 
   const sessions = new Map<string, SessionEntry>();
 

@@ -59,8 +59,9 @@ interface RuntimeState {
 
 function makeState(rootOpts: RootCliOpts): RuntimeState {
   const verbose = rootOpts.verbose === true;
+  const rawLevel = verbose ? 'debug' : (process.env['HIVE_CLI_LOG_LEVEL'] ?? 'warn');
   const logger = createLogger({
-    level: verbose ? 'debug' : (process.env['HIVE_CLI_LOG_LEVEL'] ?? 'warn'),
+    level: rawLevel as 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'silent',
   });
   const output = resolveOutputMode(rootOpts.output, Boolean(process.stdout.isTTY));
   const globals: GlobalCliOpts = {

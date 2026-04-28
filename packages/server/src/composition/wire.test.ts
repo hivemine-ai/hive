@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { stopWithDrainTimeout } from './wire.js';
+import { stopWithDrainTimeout, warnIfStdoutConsumerMissing } from './wire.js';
 
 describe('stopWithDrainTimeout', () => {
   let unhandledHandler: (reason: unknown) => void;
@@ -106,5 +106,45 @@ describe('stopWithDrainTimeout', () => {
 
     expect(onError).not.toHaveBeenCalled();
     expect(unhandledRejections).toHaveLength(0);
+  });
+});
+
+describe('warnIfStdoutConsumerMissing (AC8)', () => {
+  it('emits warn when stdout.writableEnded === true', () => {
+    const warn = vi.fn();
+    const logger = { warn } as unknown as Parameters<typeof warnIfStdoutConsumerMissing>[0];
+    warnIfStdoutConsumerMissing(logger, { writableEnded: true, destroyed: false });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const call = warn.mock.calls[0]!;
+    const fields = call[0] as Record<string, unknown>;
+    expect(fields['event']).toBe('stdout_consumer_missing');
+    expect(fields['writableEnded']).toBe(true);
+    expect(fields['destroyed']).toBe(false);
+  });
+
+  it('emits warn when stdout.destroyed === true', () => {
+    const warn = vi.fn();
+    const logger = { warn } as unknown as Parameters<typeof warnIfStdoutConsumerMissing>[0];
+    warnIfStdoutConsumerMissing(logger, { writableEnded: false, destroyed: true });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const fields = warn.mock.calls[0]![0] as Record<string, unknown>;
+    expect(fields['event']).toBe('stdout_consumer_missing');
+    expect(fields['destroyed']).toBe(true);
+  });
+
+  it('emits warn when both writableEnded and destroyed are true', () => {
+    const warn = vi.fn();
+    const logger = { warn } as unknown as Parameters<typeof warnIfStdoutConsumerMissing>[0];
+    warnIfStdoutConsumerMissing(logger, { writableEnded: true, destroyed: true });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT emit warn when stdout is healthy (both false)', () => {
+    const warn = vi.fn();
+    const logger = { warn } as unknown as Parameters<typeof warnIfStdoutConsumerMissing>[0];
+    warnIfStdoutConsumerMissing(logger, { writableEnded: false, destroyed: false });
+    expect(warn).not.toHaveBeenCalled();
   });
 });

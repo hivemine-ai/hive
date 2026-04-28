@@ -176,8 +176,9 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
         { event: 'cell_event_emit_failed', err: err instanceof Error ? err.message : String(err) },
         'cell event listener threw',
       ),
+    logger,
   });
-  const reader = createReader({ cellsRepo, db });
+  const reader = createReader({ cellsRepo, db, logger });
 
   // 6. Notifications (Waggle pipeline + Presence Registry) — wires synchronously
   //    to cellEvents BEFORE the HTTP listener accepts requests. The factory
@@ -225,6 +226,15 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
         { event: 'wire_started', host: cfg.httpHost, port: httpHost.port(), mcpPath: cfg.mcpPath },
         'hive server listening',
       );
+      // One-shot stdout consumer check after the first write went through. If
+      // the deploy lacks a stdout consumer (no journald / docker logs driver /
+      // sidecar), pino buffers and eventually drops. We surface the issue
+      // early instead of having operators discover silent log loss in
+      // production. setImmediate gives pino's async write a tick to land plus
+      // the stream state to update.
+      setImmediate(() => {
+        warnIfStdoutConsumerMissing(logger, process.stdout);
+      });
     },
 
     async stop() {
@@ -276,6 +286,28 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
 async function closeKyselyDb(db: Kysely<Database>): Promise<void> {
   await db.destroy();
+}
+
+/**
+ * Emits a one-shot `stdout_consumer_missing` warn iff the stdout stream is
+ * already ended/destroyed when checked. Production callers pass `process.stdout`
+ * after the first write has had a chance to flush (post `wire_started`); tests
+ * pass a fake stream object.
+ */
+export function warnIfStdoutConsumerMissing(
+  logger: Logger,
+  stdout: Pick<NodeJS.WriteStream, 'writableEnded' | 'destroyed'>,
+): void {
+  if (stdout.writableEnded || stdout.destroyed) {
+    logger.warn(
+      {
+        event: 'stdout_consumer_missing',
+        writableEnded: stdout.writableEnded,
+        destroyed: stdout.destroyed,
+      },
+      'stdout has no consumer attached — log lines may be dropped under load',
+    );
+  }
 }
 
 /**
@@ -422,6 +454,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     defaultTtlMs: config.defaultCredentialTtlMs,
     snapshotMaxBytes: config.snapshotMaxBytes,
     db,
+    logger,
   });
   const rotator = createRotator({
     signingKey: activeSigningKey,
@@ -430,8 +463,9 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     defaultTtlMs: config.defaultCredentialTtlMs,
     snapshotMaxBytes: config.snapshotMaxBytes,
     db,
+    logger,
   });
-  const revoker = createRevoker({ blocklist, db });
+  const revoker = createRevoker({ blocklist, db, logger });
 
   const auditRepo = createAuditRepo(db);
   const auditRecorder = createAuditRecorder({ auditRepo, logger });

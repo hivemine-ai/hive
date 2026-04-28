@@ -46,5 +46,5 @@ export function createVisibilityEngineForProduction(
   if (options.auditCanSeeDenials !== undefined) {
     config.auditCanSeeDenials = options.auditCanSeeDenials;
   }
-  return createVisibilityEngine({ participantsRepo, recorder }, config);
+  return createVisibilityEngine({ participantsRepo, recorder, logger: deps.logger }, config);
 }

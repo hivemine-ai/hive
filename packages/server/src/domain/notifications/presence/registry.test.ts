@@ -639,4 +639,54 @@ describe('createPresenceRegistry — Slice 2 (TTL passive + LRU eviction)', () =
     // Even calling sweep manually with stale snapshot does nothing.
     expect(() => reg.__sweepStale(new Date(nowMs + 1_000_000))).not.toThrow();
   });
+
+  it('emits config_sweep_misconfigured warn when idleTimeoutMs > 0 but sweepIntervalMs <= 0 (closes PRY-017 N2)', () => {
+    const { logger, warn } = silentLogger();
+    registry = createPresenceRegistry({
+      idleTimeoutMs: 30 * 60 * 1000,
+      sweepIntervalMs: 0,
+      now: clock,
+      logger,
+    });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const call = warn.mock.calls[0]!;
+    const fields = call[0] as Record<string, unknown>;
+    expect(fields['event']).toBe('config_sweep_misconfigured');
+    expect(fields['component']).toBe('PresenceRegistry');
+    expect(fields['enabledMs']).toBe(30 * 60 * 1000);
+    expect(fields['intervalMs']).toBe(0);
+  });
+
+  it('does NOT emit config_sweep_misconfigured warn when both idleTimeoutMs and sweepIntervalMs are positive', () => {
+    const { logger, warn } = silentLogger();
+    registry = createPresenceRegistry({
+      idleTimeoutMs: 30 * 60 * 1000,
+      sweepIntervalMs: 5 * 60 * 1000,
+      now: clock,
+      logger,
+    });
+
+    const misconfigCalls = warn.mock.calls.filter((c) => {
+      const f = c[0] as Record<string, unknown> | undefined;
+      return f?.['event'] === 'config_sweep_misconfigured';
+    });
+    expect(misconfigCalls.length).toBe(0);
+  });
+
+  it('does NOT emit config_sweep_misconfigured warn when idleTimeoutMs is null (sweep disabled)', () => {
+    const { logger, warn } = silentLogger();
+    registry = createPresenceRegistry({
+      idleTimeoutMs: null,
+      sweepIntervalMs: 0,
+      now: clock,
+      logger,
+    });
+
+    const misconfigCalls = warn.mock.calls.filter((c) => {
+      const f = c[0] as Record<string, unknown> | undefined;
+      return f?.['event'] === 'config_sweep_misconfigured';
+    });
+    expect(misconfigCalls.length).toBe(0);
+  });
 });
