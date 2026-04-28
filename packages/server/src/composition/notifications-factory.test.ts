@@ -46,7 +46,9 @@ describe('resolveNotificationsConfig', () => {
     expect(config.quietWindowMs).toBe(500);
     expect(config.replayDelayMs).toBe(0);
     expect(config.maxSessionsPerParticipant).toBe(16);
-    expect(config.heartbeatTimeoutMs).toBeNull();
+    expect(config.idleTimeoutMs).toBe(30 * 60 * 1000);
+    expect(config.sweepIntervalMs).toBe(5 * 60 * 1000);
+    expect(config.lruEvictThresholdMs).toBe(15 * 60 * 1000);
   });
 
   it('options.quietWindowMs overrides env', () => {
@@ -78,14 +80,37 @@ describe('resolveNotificationsConfig', () => {
     ).toThrow(/must be >= 1/);
   });
 
-  it('HIVE_PRESENCE_HEARTBEAT_TIMEOUT_MS=null literal stays null', () => {
-    const config = resolveNotificationsConfig({ HIVE_PRESENCE_HEARTBEAT_TIMEOUT_MS: 'null' });
-    expect(config.heartbeatTimeoutMs).toBeNull();
+  it('HIVE_PRESENCE_IDLE_TIMEOUT_MS=0 disables the sweep (null)', () => {
+    const config = resolveNotificationsConfig({ HIVE_PRESENCE_IDLE_TIMEOUT_MS: '0' });
+    expect(config.idleTimeoutMs).toBeNull();
   });
 
-  it('HIVE_PRESENCE_HEARTBEAT_TIMEOUT_MS numeric → number', () => {
-    const config = resolveNotificationsConfig({ HIVE_PRESENCE_HEARTBEAT_TIMEOUT_MS: '5000' });
-    expect(config.heartbeatTimeoutMs).toBe(5000);
+  it('HIVE_PRESENCE_IDLE_TIMEOUT_MS numeric override → number', () => {
+    const config = resolveNotificationsConfig({ HIVE_PRESENCE_IDLE_TIMEOUT_MS: '60000' });
+    expect(config.idleTimeoutMs).toBe(60_000);
+  });
+
+  it('HIVE_PRESENCE_SWEEP_INTERVAL_MS override applies', () => {
+    const config = resolveNotificationsConfig({ HIVE_PRESENCE_SWEEP_INTERVAL_MS: '30000' });
+    expect(config.sweepIntervalMs).toBe(30_000);
+  });
+
+  it('HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS=0 disables LRU eviction (null)', () => {
+    const config = resolveNotificationsConfig({ HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS: '0' });
+    expect(config.lruEvictThresholdMs).toBeNull();
+  });
+
+  it('HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS numeric override → number', () => {
+    const config = resolveNotificationsConfig({ HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS: '60000' });
+    expect(config.lruEvictThresholdMs).toBe(60_000);
+  });
+
+  it('options.idleTimeoutMs=null wins over env (explicit disable)', () => {
+    const config = resolveNotificationsConfig(
+      { HIVE_PRESENCE_IDLE_TIMEOUT_MS: '60000' },
+      { idleTimeoutMs: null },
+    );
+    expect(config.idleTimeoutMs).toBeNull();
   });
 });
 

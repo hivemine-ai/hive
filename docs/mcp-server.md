@@ -124,6 +124,18 @@ Claude Code v2.1.80+ injects `params.content` into the model context wrapped as 
 
 Push notifications travel over the SSE stream the client opened with `GET /mcp`. Clients without an open SSE stream can still poll via the tools above.
 
+### Session lifecycle
+
+Each accepted MCP session registers a presence subscription on the server. Sessions are released by any of: a clean `DELETE /mcp`, a closed SSE stream, server shutdown, **or** the lifecycle hardening described here.
+
+**Cap per participant.** A participant can hold up to `HIVE_PRESENCE_MAX_SESSIONS_PER_PARTICIPANT` simultaneous sessions (default `16`). The cap exists because every active session keeps an in-memory entry in the Presence Registry; an unbounded pool would let buggy or malicious clients exhaust memory.
+
+**Idle sweep (TTL passive).** A periodic background sweep evicts sessions whose `lastSeenAt` is older than `HIVE_PRESENCE_IDLE_TIMEOUT_MS` (default `30 min`). The sweep runs every `HIVE_PRESENCE_SWEEP_INTERVAL_MS` (default `5 min`). `lastSeenAt` is refreshed on every successful Waggle delivery to the client, so an SSE-listening client that receives pushes is never evicted just for being passive. Setting `HIVE_PRESENCE_IDLE_TIMEOUT_MS=0` disables the sweep (sessions only freed by explicit close or socket dead — pre-v0.2 behavior).
+
+**LRU at cap-hit.** When a new subscribe would hit the cap, the server checks the oldest session by `lastSeenAt`: if it has been idle for at least `HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS` (default `15 min`), it is evicted and the new session takes its slot; otherwise the new subscribe rejects with the JSON-RPC code `-32602` and a `subCode` of `too_many_sessions`. Setting `HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS=0` disables LRU eviction (cap-hit always rejects).
+
+Both eviction paths emit structured `info` log events for telemetry: `presence_session_evicted_idle` (TTL sweep) and `presence_session_evicted_lru` (cap-hit), each carrying `participantId`, `subscriptionId`, and the relevant timestamps.
+
 ## HTTP endpoints
 
 | Method   | Path                     | Purpose                                                                  |
@@ -150,6 +162,15 @@ TLS termination is the operator's responsibility — run the server behind nginx
 | `HIVE_MCP_READYZ_DB_TIMEOUT_MS`           | `500`     | DB ping timeout for `GET /readyz`.                                                                                                                                                                        |
 | `HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` | `30`      | Max time to drain in-flight requests on SIGTERM/SIGINT.                                                                                                                                                   |
 | `HIVE_AUTH_KEYS_DIR`                      | `./keys`  | Where to load the signing keypairs from.                                                                                                                                                                  |
+
+### Presence (session lifecycle)
+
+| Variable                                     | Default   | Purpose                                                                                                                                                                     |
+| -------------------------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HIVE_PRESENCE_MAX_SESSIONS_PER_PARTICIPANT` | `16`      | Cap on simultaneous sessions per participant.                                                                                                                               |
+| `HIVE_PRESENCE_IDLE_TIMEOUT_MS`              | `1800000` | Idle threshold (30 min). Sessions whose `lastSeenAt` is older are evicted by the periodic sweep. Set `0` to disable the sweep (pre-v0.2 behavior).                          |
+| `HIVE_PRESENCE_SWEEP_INTERVAL_MS`            | `300000`  | Sweep period (5 min). Honored only when `HIVE_PRESENCE_IDLE_TIMEOUT_MS > 0`.                                                                                                |
+| `HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS`       | `900000`  | Threshold for LRU eviction at cap-hit (15 min). The oldest session is evicted only if idle for at least this long; otherwise new subscribes reject. Set `0` to disable LRU. |
 
 The server also reads the env vars defined by the Auth, Cell Store, Visibility, Audit, and Waggle subsystems. See the per-subsystem docs (in this folder) and tech specs (in the vault) for the full list.
 
