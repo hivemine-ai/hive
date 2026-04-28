@@ -335,8 +335,8 @@ describe('createPresenceRegistry', () => {
 
 // ---------- Slice 2: TTL passive sweep + LRU eviction at cap-hit ----------
 // Per ADR-012 and PRY-017. Driven by INC-2026-003 (sev-2 — persistent session
-// leak / cap=16 sin auto-eviction). Tests use an injected `now` clock so the
-// sweep + LRU thresholds are deterministic without real timers.
+// leak / cap=16 without auto-eviction). Tests use an injected `now` clock so
+// the sweep + LRU thresholds are deterministic without real timers.
 
 describe('createPresenceRegistry — Slice 2 (TTL passive + LRU eviction)', () => {
   let nowMs: number;
