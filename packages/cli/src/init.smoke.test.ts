@@ -1,4 +1,4 @@
-// End-to-end smoke test for PRY-002 Hito 22.
+// End-to-end smoke test for PRY-002 milestone 22.
 // Runs the full flow against SQLite on disk (not in-memory) to mirror what
 // `hivectl init` does in production. Each sub-case maps 1:1 to an AC bullet.
 

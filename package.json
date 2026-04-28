@@ -23,7 +23,8 @@
     "lint": "pnpm -r lint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "pnpm -r test",
+    "test": "pnpm -r test && pnpm test:rules",
+    "test:rules": "node --test eslint-rules/*.test.js",
     "prepare": "husky"
   },
   "devDependencies": {

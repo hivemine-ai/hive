@@ -53,7 +53,7 @@ import { createCellsRepo, type CellsRepo } from './repository.js';
 const SYSTEM_CALLER: CallerContext = {
   kind: 'system',
   osUser: 'pry-003-smoke',
-  operatorNote: 'pry-003 hito-14 e2e smoke',
+  operatorNote: 'pry-003 milestone-14 e2e smoke',
 };
 
 interface AgentRecord {

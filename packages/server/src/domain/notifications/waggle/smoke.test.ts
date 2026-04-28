@@ -61,7 +61,7 @@ import type { WaggleNotification } from './types.js';
 const SYSTEM_CALLER: CallerContext = {
   kind: 'system',
   osUser: 'pry-005-smoke',
-  operatorNote: 'pry-005 hito-10 e2e smoke',
+  operatorNote: 'pry-005 milestone-10 e2e smoke',
 };
 
 const QUIET_WINDOW_MS = 10;

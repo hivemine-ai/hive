@@ -9,8 +9,9 @@
 //
 // The naming `config-guard.ts` (not `audit.ts`) avoids semantic collision
 // with `domain/audit/` (the audit log recorder). This helper guards config
-// consistency, not event audit. See Observability tech spec § "Decisión:
-// Naming `observability/config-guard.ts` vs `observability/audit.ts`".
+// consistency, not event audit. See Observability tech spec for the
+// "Naming observability/config-guard.ts vs observability/audit.ts"
+// rationale entry.
 
 import type { Logger } from '#observability/logger.js';
 

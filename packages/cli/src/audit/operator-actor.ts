@@ -1,6 +1,6 @@
 // Build the actor metadata for an audit_log row from CLI globals.
-// Per the tech spec § "Decisión: audit events emitidos por hivectl con
-// actorKind: 'system' por default".
+// Per the tech spec rationale: audit events emitted by hivectl default
+// to actorKind: 'system'.
 
 import type { CliRuntime } from '@hive/server';
 

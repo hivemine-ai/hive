@@ -19,7 +19,7 @@ export type ParsedReference =
 /**
  * Parses a human-readable participant reference string into a structured form.
  *
- * Grammar (per tech spec § reference-resolver.ts and PRY-006 hito 5 decision):
+ * Grammar (per tech spec § reference-resolver.ts and PRY-006 milestone 5 decision):
  *   (a) UUID v7 canonical  — matched case-insensitively, normalised to lowercase.
  *   (b) alias `self`       — case-sensitive, lowercase only.
  *   (c) agent-reference    — exactly 2 `@` separators:

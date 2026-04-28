@@ -51,7 +51,7 @@ import { Writable } from 'node:stream';
 const SYSTEM_CALLER: CallerContext = {
   kind: 'system',
   osUser: 'pry-006-smoke',
-  operatorNote: 'pry-006 hito-18 e2e smoke',
+  operatorNote: 'pry-006 milestone-18 e2e smoke',
 };
 
 interface SmokeWorld {
@@ -803,7 +803,7 @@ describe('MCP smoke E2E (PRY-018 observability ACs)', () => {
     // wired. We assert the looser invariant: the recorder's `audit_recorded`
     // log line carries a `requestId` field (string or null), and when present
     // it is a UUIDv7. The cross-check "matches the SQLite row" is exercised
-    // by the CI smoke job (Hito 9) which spawns a real server process.
+    // by the CI smoke job (milestone 9) which spawns a real server process.
     await rpc(world.baseUrl, world.jwtA, {
       jsonrpc: '2.0',
       id: 1,

@@ -1,0 +1,30 @@
+{
+  "$comment": "Stopwords for the no-spanish-leakage ESLint rule. See ADR-014 + PRY-019. Match is case-insensitive with word boundaries (\\b). Add new stopwords here when a future PRY surfaces a pattern not yet covered. Order is alphabetical for human review.",
+  "stopwords": [
+    "actualizar",
+    "aplicable",
+    "bloque",
+    "cierre",
+    "consideraciones",
+    "crear",
+    "decisión",
+    "eliminar",
+    "función",
+    "hito",
+    "invariante",
+    "matriz",
+    "mensaje",
+    "método",
+    "obtener",
+    "opcional",
+    "parámetro",
+    "patrón",
+    "privado",
+    "privacidad",
+    "público",
+    "sección",
+    "una vez",
+    "usuario",
+    "validar"
+  ]
+}

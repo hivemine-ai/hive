@@ -1,5 +1,5 @@
 // hivectl init — bootstrap a new Hive end-to-end.
-// Per PRY-002 Hito 21:
+// Per PRY-002 milestone 21:
 //   1. Connect to the configured DB.
 //   2. Run Kysely.Migrator.migrateToLatest().
 //   3. Acquire `hive_init` distributed lock (race guard).

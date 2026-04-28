@@ -1,6 +1,6 @@
-// Participants repository — read functions for Slice 0 (Hito 11).
+// Participants repository — read functions for Slice 0 (milestone 11).
 // Write functions (createHivekeeper, createAgent, revokeAgent, listAgents,
-// listHivekeepers) are added in Bloque 3 (Hitos 15-18).
+// listHivekeepers) are added in block 3 (milestones 15-18).
 
 import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
 
