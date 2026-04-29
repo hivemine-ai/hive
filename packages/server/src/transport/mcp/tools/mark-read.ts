@@ -48,22 +48,33 @@ export function createMarkReadHandler(deps: MarkReadDeps) {
       if (entry.kind === 'valid') validNormalized.push(entry.normalized);
     }
 
-    let markedSet = new Set<string>();
+    let markedQueue: readonly string[] = [];
     if (validNormalized.length > 0) {
       const result = await deps.reader.markRead({
         callerContext: ctx.identity,
         messageIds: validNormalized,
       });
-      markedSet = new Set(result.marked);
+      markedQueue = result.marked;
     }
 
+    // Merge by walking partition in input order and consuming the domain
+    // result as ordered queues. Domain pushes ids into `marked` / `ignored`
+    // in valid-input order (one per for-loop iteration in `read.ts::markRead`),
+    // so the next valid entry's bucket is always the head of one of the two
+    // queues. Membership-by-Set would mis-handle duplicate valid ids
+    // (e.g. `[A, A]` with A known unread → domain returns marked:[A], ignored:[A];
+    // a Set-based merge would emit marked:[A, A] instead of marked:[A], ignored:[A]).
     const marked: string[] = [];
     const ignored: string[] = [];
+    let mIdx = 0;
     for (const entry of partition) {
       if (entry.kind === 'malformed') {
         ignored.push(entry.original);
-      } else if (markedSet.has(entry.normalized)) {
+        continue;
+      }
+      if (mIdx < markedQueue.length && markedQueue[mIdx] === entry.normalized) {
         marked.push(entry.normalized);
+        mIdx++;
       } else {
         ignored.push(entry.normalized);
       }

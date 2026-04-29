@@ -196,6 +196,50 @@ describe('mark_read tool — id validation behaviour (PRY-022)', () => {
     });
   });
 
+  it('preserves prior behaviour for duplicate valid ids — first occurrence marked, second occurrence ignored', async () => {
+    // Domain returns `marked: [A]` then `ignored: [A]` because the second
+    // UPDATE finds `read_at IS NOT NULL` after the first UPDATE in the same
+    // call. The tool layer must reproduce that 1:1 mapping per input position.
+    // A naive Set-based membership merge would emit `marked: [A, A]` because
+    // `Set.has(A)` is true for both occurrences.
+    const stubKnown = new Set([VALID_A]);
+    const reader: Reader = {
+      readMailbox() {
+        return Promise.reject(new Error('not used'));
+      },
+      markRead(input: MarkReadInput): Promise<MarkReadResult> {
+        const marked: string[] = [];
+        const ignored: string[] = [];
+        const seenInThisCall = new Set<string>();
+        for (const id of input.messageIds) {
+          if (stubKnown.has(id) && !seenInThisCall.has(id)) {
+            marked.push(id);
+            seenInThisCall.add(id);
+          } else {
+            ignored.push(id);
+          }
+        }
+        return Promise.resolve({ marked, ignored });
+      },
+    };
+    const handler = createMarkReadHandler({ reader });
+
+    const result = await handler({ message_ids: [VALID_A, VALID_A] }, buildContext());
+
+    expect(result.marked).toEqual([VALID_A]);
+    expect(result.ignored).toEqual([VALID_A]);
+  });
+
+  it('preserves prior behaviour for duplicate unknown valid ids — both occurrences ignored, no marked dups', async () => {
+    const { reader } = buildStubReader(); // no known ids
+    const handler = createMarkReadHandler({ reader });
+
+    const result = await handler({ message_ids: [VALID_UNKNOWN, VALID_UNKNOWN] }, buildContext());
+
+    expect(result.marked).toEqual([]);
+    expect(result.ignored).toEqual([VALID_UNKNOWN, VALID_UNKNOWN]);
+  });
+
   it('does NOT call the reader when the batch is entirely malformed (no DB roundtrip cost)', async () => {
     const { reader, state } = buildStubReader();
     const handler = createMarkReadHandler({ reader });
