@@ -1,5 +1,5 @@
 {
-  "$comment": "Stopwords for the no-spanish-leakage ESLint rule. See ADR-014 + PRY-019. Match is case-insensitive with word boundaries (\\b) and the regex `u` flag for accented chars (función, decisión). Add new stopwords here when a future PRY surfaces a pattern not yet covered. Order is alphabetical for human review. Multi-word phrases (eg. 'una vez') match only with the exact whitespace as written here — the hyphen variant 'una-vez' would not match this entry; if such a variant ever surfaces, add it as a separate stopword.",
+  "$comment": "Stopwords for CLAUDE.md regla #3 + ADR-014 enforcement. Two consumers: (1) the no-spanish-leakage ESLint rule (PRY-019, scopes packages/*/src/**/*.{ts,tsx}); (2) the check-commit-msg.js Husky hook (PRY-021, scopes commit message bodies). Both load this file directly — any update propagates automatically. Match is case-insensitive with word boundaries (\\b) and the regex `u` flag for accented chars (función, decisión). Add new stopwords here when a future PRY surfaces a pattern not yet covered. Order is alphabetical for human review. Multi-word phrases (eg. 'una vez') match only with the exact whitespace as written here — the hyphen variant 'una-vez' would not match this entry; if such a variant ever surfaces, add it as a separate stopword.",
   "stopwords": [
     "actualizar",
     "aplicable",
