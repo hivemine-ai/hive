@@ -141,7 +141,11 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
         .type('application/json')
         .send({
           jsonrpc: '2.0',
-          error: { code: mapped.wire.code, message: mapped.wire.message },
+          error: {
+            code: mapped.wire.code,
+            message: mapped.wire.message,
+            ...(mapped.wire.data !== undefined && { data: mapped.wire.data }),
+          },
           id: null,
         });
     }

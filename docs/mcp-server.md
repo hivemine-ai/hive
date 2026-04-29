@@ -211,6 +211,27 @@ The server also reads the env vars defined by the Auth, Cell Store, Visibility, 
 
 The semantic `subCode` (e.g. `cell_closed_or_missing`, `visibility_denied`) is **never** sent to the client — it lives in the structured logs only.
 
+For `-32602` responses originated from input-schema validation (zod), the JSON-RPC error envelope additionally carries a structured `data` field per the JSON-RPC 2.0 spec:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "...",
+  "error": {
+    "code": -32602,
+    "message": "invalid input",
+    "data": {
+      "issues": [
+        { "path": "recipient.email", "code": "invalid_string", "message": "Invalid email" },
+        { "path": "body", "code": "too_small", "message": "..." }
+      ]
+    }
+  }
+}
+```
+
+Each issue carries only `{path, code, message}` — `path` is dot-joined (`"recipient.email"`, `"message_ids.3"`, or `""` for root-level). The value the caller sent (`received` in zod-internals) is **never** echoed (privacy invariant). The `data` field is absent for non-zod paths (auth failures, domain errors with opaque subCodes, etc.). Clients that read only `{code, message}` keep working — `data` is opt-in per spec.
+
 ## See also
 
 - [Auth + Identity](auth.md) — JWT lifecycle, signing keys, error code catalog.

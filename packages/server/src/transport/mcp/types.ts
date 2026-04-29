@@ -48,10 +48,24 @@ export interface RequestContext {
  * Wire-shape of an error that leaves the MCP boundary. The semantic `code`
  * (e.g. RECIPIENT_UNREACHABLE) and `subCode` NEVER cross this boundary — the
  * mapper preserves them only in the structured log for forensics.
+ *
+ * `data` is the JSON-RPC 2.0 standard structured-info slot (opaque-to-spec,
+ * defined-per-method). Currently populated only by the ZodError branch with
+ * sanitized issues `{path, code, message}` so clients can identify which
+ * input field violated which rule. Two invariants enforced by the mapper:
+ *
+ *   - F-S2 invariant (PRY-006): `message` stays a string-literal from the
+ *     mapping table; we never interpolate domain `subCode`s into it. Domain
+ *     `INVALID_INPUT` paths (CellError, WaggleError, etc.) leave `data`
+ *     undefined — their subCodes stay opaque to the wire.
+ *   - Privacy invariant (PRY-023): the sanitizer whitelists only the three
+ *     fields `{path, code, message}`. Notably, zod's `received` field — the
+ *     value the caller sent — is NEVER echoed (PII / echo-amplification risk).
  */
 export interface WireError {
   code: McpErrorCode;
   message: string;
+  data?: unknown;
 }
 
 /**

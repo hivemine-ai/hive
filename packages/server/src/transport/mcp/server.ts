@@ -335,7 +335,7 @@ function mapToMcpError(err: unknown, logger?: Logger): McpError {
         mapped.wire.message,
       );
     }
-    return new McpError(mapped.wire.code, mapped.wire.message);
+    return new McpError(mapped.wire.code, mapped.wire.message, mapped.wire.data);
   }
 
   const mapped = mapDomainError(err);
@@ -349,5 +349,5 @@ function mapToMcpError(err: unknown, logger?: Logger): McpError {
       mapped.wire.message,
     );
   }
-  return new McpError(mapped.wire.code, mapped.wire.message);
+  return new McpError(mapped.wire.code, mapped.wire.message, mapped.wire.data);
 }
