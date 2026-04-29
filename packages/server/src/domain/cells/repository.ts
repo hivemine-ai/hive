@@ -127,6 +127,9 @@ export interface ListMessagesFilter {
   state?: MessageState;
   types?: MessageType[];
   inReplyTo?: UUIDv7;
+  /** Filter by sender (matches `from_participant_id`). Caller resolves any
+   *  human-readable reference (email, "self") to UUIDv7 before passing. */
+  from?: UUIDv7;
 }
 
 export interface ListMessagesPagination {
@@ -390,6 +393,9 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
       }
       if (filter.inReplyTo !== undefined) {
         query = query.where('reply_to', '=', filter.inReplyTo);
+      }
+      if (filter.from !== undefined) {
+        query = query.where('from_participant_id', '=', filter.from);
       }
       if (pagination.cursor) {
         const cursorIso = dateToIso(pagination.cursor.deliveredAt);

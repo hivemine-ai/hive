@@ -476,3 +476,126 @@ describe('readMailbox — additional filter and pagination contracts', () => {
     expect(replies.map((mv) => mv.id)).toEqual([replyId]);
   });
 });
+
+// PRY-020 — filter.from must apply end-to-end. Closes INC-2026-001 #1: the
+// previous implementation declared `from` in the public schema but ignored
+// it in the query, leaking ALL messages to a caller that thought it was
+// filtering by sender (silent footgun pattern from PRY-003 lesson).
+describe('readMailbox — filter.from (PRY-020, INC-2026-001 #1)', () => {
+  let world: ReadWorld;
+
+  beforeEach(async () => {
+    world = await seedReadWorld();
+  });
+
+  afterEach(async () => {
+    await world.db.destroy();
+  });
+
+  /** Inserts a message to `cellId` from `fromId` with a stable ts offset. */
+  async function insertFrom(
+    cellId: UUIDv7,
+    fromId: UUIDv7,
+    toId: UUIDv7,
+    bodySuffix: string,
+    tsOffsetMs: number,
+  ): Promise<UUIDv7> {
+    const id = uuidv7();
+    const ts = new Date('2026-04-26T10:00:00.000Z').getTime() + tsOffsetMs;
+    await world.cellsRepo.insertMessage({
+      id,
+      cellId,
+      fromParticipantId: fromId,
+      toParticipantId: toId,
+      type: 'notification',
+      body: `from-${bodySuffix}`,
+      action: null,
+      replyTo: null,
+      ttl: null,
+      sentAt: new Date(ts),
+      deliveredAt: new Date(ts),
+      readAt: null,
+      state: 'delivered',
+      expiredAt: null,
+    });
+    return id;
+  }
+
+  it('returns only messages from the matching sender when filter.from is set', async () => {
+    // workerB receives 2 messages from workerA + 2 messages from hkA.
+    const fromA1 = await insertFrom(world.cellB, world.workerA, world.workerB, 'a-1', 0);
+    const fromA2 = await insertFrom(world.cellB, world.workerA, world.workerB, 'a-2', 1000);
+    const fromHk1 = await insertFrom(world.cellB, world.hkA, world.workerB, 'hk-1', 2000);
+    const fromHk2 = await insertFrom(world.cellB, world.hkA, world.workerB, 'hk-2', 3000);
+
+    const reader = buildReader(world);
+
+    const onlyA = await reader.readMailbox({
+      callerContext: buildContext(world, world.workerB),
+      filter: { from: world.workerA },
+    });
+    expect(new Set(onlyA.map((mv) => mv.id))).toEqual(new Set([fromA1, fromA2]));
+
+    const onlyHk = await reader.readMailbox({
+      callerContext: buildContext(world, world.workerB),
+      filter: { from: world.hkA },
+    });
+    expect(new Set(onlyHk.map((mv) => mv.id))).toEqual(new Set([fromHk1, fromHk2]));
+  });
+
+  it('returns all messages when filter.from is omitted (no regression)', async () => {
+    await insertFrom(world.cellB, world.workerA, world.workerB, 'a', 0);
+    await insertFrom(world.cellB, world.hkA, world.workerB, 'hk', 1000);
+
+    const reader = buildReader(world);
+    const all = await reader.readMailbox({
+      callerContext: buildContext(world, world.workerB),
+    });
+    expect(all.length).toBe(2);
+  });
+
+  it('returns [] when filter.from points at a sender with no messages in this Cell', async () => {
+    // Insert messages from workerA into cellB; query with filter.from = a fresh UUID.
+    await insertFrom(world.cellB, world.workerA, world.workerB, 'a', 0);
+    const ghostId = uuidv7();
+
+    const reader = buildReader(world);
+    const result = await reader.readMailbox({
+      callerContext: buildContext(world, world.workerB),
+      filter: { from: ghostId },
+    });
+    expect(result).toEqual([]);
+  });
+
+  it('combines filter.from with filter.state (AND semantics)', async () => {
+    // 2 from workerA: 1 delivered, 1 read.
+    // 1 from hkA: delivered.
+    const fromADelivered = await insertFrom(world.cellB, world.workerA, world.workerB, 'a-d', 0);
+    const fromARead = uuidv7();
+    const ts = new Date('2026-04-26T10:00:01.000Z');
+    await world.cellsRepo.insertMessage({
+      id: fromARead,
+      cellId: world.cellB,
+      fromParticipantId: world.workerA,
+      toParticipantId: world.workerB,
+      type: 'notification',
+      body: 'from-a-r',
+      action: null,
+      replyTo: null,
+      ttl: null,
+      sentAt: ts,
+      deliveredAt: ts,
+      readAt: ts,
+      state: 'read',
+      expiredAt: null,
+    });
+    await insertFrom(world.cellB, world.hkA, world.workerB, 'hk-d', 2000);
+
+    const reader = buildReader(world);
+    const onlyDeliveredFromA = await reader.readMailbox({
+      callerContext: buildContext(world, world.workerB),
+      filter: { from: world.workerA, state: 'delivered' },
+    });
+    expect(onlyDeliveredFromA.map((mv) => mv.id)).toEqual([fromADelivered]);
+  });
+});

@@ -73,11 +73,14 @@ export interface Pagination {
 
 export interface ReadMailboxFilter {
   unreadOnly?: boolean;
-  // state/inReplyTo are cross-spec deltas (PRY-005 MCP); declared here as optional
-  // to avoid breaking changes later, but listMessages does NOT filter on them in B0.
   state?: MessageState;
   types?: MessageType[];
   inReplyTo?: UUIDv7;
+  /** Filter by sender — matches `from_participant_id`. Caller resolves any
+   *  human-readable reference (email, "self") to UUIDv7 before passing.
+   *  See INC-2026-001 #1 + PRY-020 for the rationale (filter must apply
+   *  end-to-end; declaring without implementing was a silent footgun). */
+  from?: UUIDv7;
 }
 
 export interface ReadMailboxInput {

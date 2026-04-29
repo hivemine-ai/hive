@@ -61,11 +61,17 @@ export function createReadMailboxHandler(deps: ReadMailboxDeps) {
       if (input.filter.type !== undefined) filter.types = [input.filter.type];
 
       if (input.filter.from !== undefined) {
-        // `from` is informational metadata; resolve to opaque id but Cell Store's
-        // listMessages does NOT filter on it server-side in B0 (declared in
-        // ReadMailboxFilter as forward-compat). Keep the resolution to surface
-        // INVALID_INPUT / RECIPIENT_UNREACHABLE early; we discard the result.
-        await deps.resolver.resolveParticipantReference(input.filter.from, ctx.identity);
+        // Resolve any human-readable reference (UUID / email / "self") to
+        // canonical UUIDv7 and apply it as a sender predicate downstream.
+        // Surfaces INVALID_INPUT / RECIPIENT_UNREACHABLE early when the
+        // reference does not parse or does not resolve to a participant.
+        // Closes INC-2026-001 #1 (PRY-020) — the previous implementation
+        // resolved the reference but discarded the result, leaking ALL
+        // mail to a caller that thought it was filtering by sender.
+        filter.from = await deps.resolver.resolveParticipantReference(
+          input.filter.from,
+          ctx.identity,
+        );
       }
     }
 

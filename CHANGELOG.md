@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Issue templates, pull request template, CODEOWNERS.
 - Apache License 2.0 + NOTICE.
 
+### Fixed
+
+- **`read_mailbox.filter.from` now applies end-to-end** (PRY-020, closes [INC-2026-001](https://github.com/hivemine-ai/hive-vault) finding #1, sev-3): the `filter.from` field declared in the MCP tool's `read_mailbox` schema was previously resolved (validating the participant exists) but its result was silently discarded — clients filtering by sender received the entire mailbox without filtering. Now the resolved UUIDv7 is captured and propagates through `domain/cells/read.ts::readMailbox` → `domain/cells/repository.ts::listMessages` as `WHERE from_participant_id = ?`. Audit of callsites confirmed zero production callers were depending on the (broken) filter prior to this fix, so severity remains sev-3 (no retroactive escalation to sev-2). Adds 4 regression tests in `read.test.ts` covering: filter returns only matching sender's messages, unfiltered returns all, non-existent sender returns `[]`, combination with `filter.state` preserves AND semantics. **627 server tests + 83 cli tests, all green** (+4 new from PRY-020).
+
 ### Changed
 
 - **Persistence strategy (architectural):** SQLite is now the default database (zero-infra, CLI-driven). PostgreSQL becomes opt-in for Docker / production deploys. The persistence layer is built on [Kysely](https://kysely.dev) (multi-dialect, type-safe SQL) so the same code runs on both backends. PostgreSQL is functional in v0.1.0 but officially validated in CI starting v0.1.1.

@@ -97,6 +97,9 @@ export function createReader(deps: ReaderDeps): Reader {
     if (input.filter?.inReplyTo !== undefined) {
       filter.inReplyTo = input.filter.inReplyTo;
     }
+    if (input.filter?.from !== undefined) {
+      filter.from = input.filter.from;
+    }
 
     const messages = await deps.cellsRepo.listMessages(cell.id, filter, {
       cursor: input.pagination?.cursor ?? null,
