@@ -25,6 +25,7 @@
     "format:check": "prettier --check .",
     "test": "pnpm -r test && pnpm test:rules",
     "test:rules": "node --test eslint-rules/*.test.js",
+    "check-commit-msg": "node eslint-rules/check-commit-msg.js",
     "prepare": "husky"
   },
   "devDependencies": {
