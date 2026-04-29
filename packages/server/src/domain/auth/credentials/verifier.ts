@@ -25,7 +25,7 @@ import * as jose from 'jose';
 import type { Logger } from '#observability/logger.js';
 import { AuthError } from '../errors.js';
 import type { SigningKey } from '../keys/keypair-store.js';
-import type { Participant } from '../participants/entities.js';
+import type { Hive, Participant } from '../participants/entities.js';
 import type { CredentialSnapshot, IdentityContext, ParticipantKind, UUIDv7 } from '../types.js';
 
 import type { Blocklist } from './blocklist.js';
@@ -35,7 +35,14 @@ const BEARER_PATTERN = /^[Bb]earer\s+(.+)$/;
 export interface VerifierDeps {
   signingKeys: Map<string, SigningKey>;
   blocklist: Blocklist;
-  participantsRepo: { findById(id: UUIDv7): Promise<Participant | null> };
+  participantsRepo: {
+    findById(id: UUIDv7): Promise<Participant | null>;
+    /**
+     * Looked up once per verify() to populate {@link IdentityContext.hiveName}
+     * (per ADR-015 — required for the agent-reference disambiguation algorithm).
+     */
+    findHiveById(id: UUIDv7): Promise<Hive | null>;
+  };
   hiveStableIdentifier: UUIDv7;
   clockToleranceSeconds?: number;
   logger?: Logger;
@@ -120,7 +127,15 @@ export function createVerifier(deps: VerifierDeps): Verifier {
         throw fail(deps, new AuthError('PARTICIPANT_NOT_ACTIVE', { subCode: state }));
       }
 
-      const identity = buildIdentityContext(participant, payload, kid);
+      // Per ADR-015 — load the Hive row to populate IdentityContext.hiveName.
+      // Single-hive deployment: participant.hiveId === hiveStableIdentifier
+      // (FK-enforced; the lookup is a one-row PK fetch on the warm hot path).
+      const hive = await deps.participantsRepo.findHiveById(deps.hiveStableIdentifier);
+      if (!hive) {
+        throw new Error(`DB anomaly: Hive ${deps.hiveStableIdentifier} row missing during verify`);
+      }
+
+      const identity = buildIdentityContext(participant, hive, payload, kid);
       if (deps.logger) {
         deps.logger.info(
           {
@@ -179,6 +194,7 @@ function mapJoseError(cause: unknown): AuthError {
 
 function buildIdentityContext(
   p: Participant,
+  hive: Hive,
   payload: jose.JWTPayload,
   kid: string,
 ): IdentityContext {
@@ -196,6 +212,7 @@ function buildIdentityContext(
       participantId: hk.id,
       kind: 'hivekeeper',
       hiveId: hk.hiveId,
+      hiveName: hive.name,
       colonyId: hk.colonyId,
       snapshot,
       current: { state: 'active', isAdmin: hk.isAdmin },
@@ -219,6 +236,7 @@ function buildIdentityContext(
     participantId: ag.id,
     kind,
     hiveId: ag.hiveId,
+    hiveName: hive.name,
     colonyId: ag.colonyId,
     ownerId: ag.ownerId,
     snapshot,

@@ -14,6 +14,7 @@ function fakeIdentity(): IdentityContext {
     participantId: '01950000-0000-7000-8000-000000000001',
     kind: 'worker',
     hiveId: '01950000-0000-7000-8000-00000000aaaa',
+    hiveName: 'test-hive',
     colonyId: '01950000-0000-7000-8000-00000000bbbb',
     ownerId: '01950000-0000-7000-8000-00000000cccc',
     snapshot: {} as IdentityContext['snapshot'],

@@ -18,6 +18,7 @@ function makeIdentity(overrides: {
     participantId: '01900000-0000-7000-8000-000000000001',
     kind: overrides.kind,
     hiveId: '01900000-0000-7000-8000-0000000000aa',
+    hiveName: 'test-hive',
     colonyId: '01900000-0000-7000-8000-0000000000bb',
     snapshot: {
       issuedAt: new Date('2026-04-25T12:00:00Z'),

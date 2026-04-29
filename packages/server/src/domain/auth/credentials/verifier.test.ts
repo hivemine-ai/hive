@@ -276,6 +276,25 @@ describe('verifier', () => {
     expect(ctx.current.isAdmin).toBe(true);
   });
 
+  it('IdentityContext.hiveName is loaded from hives.name during verify (per ADR-015)', async () => {
+    const verifier = await buildVerifier();
+    const token = await signWith(world, world.adminHivekeeperId);
+    const ctx = await verifier.verify(`Bearer ${token}`);
+    expect(ctx.hiveName).toBe('Test Hive');
+  });
+
+  it('IdentityContext.hiveName reflects current hives.name when mutated mid-deployment', async () => {
+    const verifier = await buildVerifier();
+    await world.db
+      .updateTable('hives')
+      .set({ name: 'renamed' })
+      .where('id', '=', world.hiveId)
+      .execute();
+    const token = await signWith(world, world.adminHivekeeperId);
+    const ctx = await verifier.verify(`Bearer ${token}`);
+    expect(ctx.hiveName).toBe('renamed');
+  });
+
   it('happy path — issued token via issuer round-trips through verifier', async () => {
     const repo = createParticipantsReadRepo(world.db);
     const issuer = createIssuer({

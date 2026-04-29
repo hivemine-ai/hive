@@ -22,6 +22,7 @@ function makeIdentity(): IdentityContext {
     participantId: '01966e10-0000-7000-8000-000000000001',
     kind: 'worker',
     hiveId: '01966e10-0000-7000-8000-000000000002',
+    hiveName: 'test-hive',
     colonyId: '01966e10-0000-7000-8000-000000000003',
     snapshot: {
       issuedAt: new Date('2026-01-01T00:00:00Z'),

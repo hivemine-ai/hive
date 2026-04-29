@@ -45,6 +45,7 @@ function activeContext(participantId?: UUIDv7): IdentityContext {
     participantId: id,
     kind: 'worker',
     hiveId: uuidv7(),
+    hiveName: 'test-hive',
     colonyId: uuidv7(),
     ownerId: uuidv7(),
     snapshot: {

@@ -20,6 +20,7 @@ function makeIdentity(overrides?: Partial<IdentityContext>): IdentityContext {
     participantId: uuidv7(),
     kind: 'worker',
     hiveId: uuidv7(),
+    hiveName: 'test-hive',
     colonyId: uuidv7(),
     snapshot: {
       issuedAt: new Date('2026-01-01T00:00:00Z'),

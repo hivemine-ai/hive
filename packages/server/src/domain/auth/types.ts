@@ -43,6 +43,13 @@ export interface IdentityContext {
   participantId: UUIDv7;
   kind: ParticipantKind;
   hiveId: UUIDv7;
+  /**
+   * `hive.name` slug — loaded during `verifier.verify()` per ADR-015. Required
+   * for the agent-reference disambiguation algorithm (`<agent>@<owner-local>.<hiveName>`).
+   * Mutable per product spec: callers that mutate `hive.name` mid-session see
+   * stale values until next verify; accepted operational risk for v0.1.
+   */
+  hiveName: string;
   colonyId: UUIDv7;
   ownerId?: UUIDv7; // present only when kind != 'hivekeeper'
   snapshot: CredentialSnapshot;

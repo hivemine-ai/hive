@@ -90,6 +90,7 @@ function ctxFor(
     participantId,
     kind,
     hiveId,
+    hiveName: 'test-hive',
     colonyId,
     snapshot: baseSnapshot,
     current: kind === 'hivekeeper' ? { state: 'active' } : { state: 'active', type: kind },
