@@ -102,6 +102,11 @@ ruleTester.run('no-spanish-leakage', rule, {
       ],
     },
     {
+      // Stopword in HEAD quasi (before the first `${}` interpolation).
+      // The rule visits ALL TemplateElement nodes (head/middle/tail), so
+      // a stopword in a tail quasi would also trigger — covered by the
+      // visitor protocol; explicit fixture would add documentation
+      // value but no behavioral coverage gap.
       name: 'Spanish word in template literal quasi',
       code: 'const m = `validar ${input} antes de continuar`;',
       errors: [{ messageId: 'stopword', data: { word: 'validar' } }],
