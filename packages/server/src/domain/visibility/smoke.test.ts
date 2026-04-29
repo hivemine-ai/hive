@@ -165,6 +165,7 @@ function ctxFor(
     participantId,
     kind,
     hiveId,
+    hiveName: 'test-hive',
     colonyId,
     snapshot: {
       issuedAt: new Date('2026-04-26T00:00:00.000Z'),

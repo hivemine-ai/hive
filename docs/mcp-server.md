@@ -72,6 +72,23 @@ The server registers 5 tools in v0.1 Slice 0:
 
 Tool inputs are validated against a JSON Schema (derived from zod). Refer to `tools/list` from any MCP client to inspect the live schemas. Tool results are returned as `structuredContent` (preferred) plus a JSON-stringified `text` content fallback.
 
+#### Recipient reference formats
+
+Tools that accept a recipient (`send_message`) or a sender filter (`read_mailbox.filter.from`) parse the value against four formats, in order:
+
+| Format           | Example                        | Resolves to                                                                                                                                   |
+| ---------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| UUID v7          | `0190abcd-...`                 | The participant whose id matches (no DB lookup beyond format check).                                                                          |
+| `self`           | `self`                         | The caller's own participant id.                                                                                                              |
+| Hivekeeper email | `admin@example.com`            | The Hivekeeper in the caller's hive whose email matches case-insensitively.                                                                   |
+| Agent reference  | `<agent>@<owner-local>.<hive>` | The agent named `<agent>` owned by the Hivekeeper whose email local-part is `<owner-local>`, where `<hive>` matches the caller's `hive.name`. |
+
+**Agent reference grammar (single `@`):** `<agent-name>@<owner-email-local>.<hive-name>` — for example, `worker-test@leonardo.olivares.cotalker` means "the agent `worker-test` owned by the Hivekeeper whose email starts with `leonardo.olivares@…`, in the hive `cotalker`". The trailing `.<hive-name>` is what disambiguates an agent reference from a Hivekeeper email; it must match the caller's hive name. Local-part chars are restricted to `[A-Za-z0-9._-]`.
+
+> **Operator convention.** Pick a `hive.name` that does NOT collide with a real TLD (e.g. avoid `com`, `net`). A Hivekeeper email whose domain happens to end in `.<hive-name>` would otherwise be parsed as an agent reference.
+
+When parsing fails (no `@`, multiple `@`s, or local-part outside the allowed alphabet), the tool returns JSON-RPC `-32602` with `subCode: 'reference_unparseable'`. When parsing succeeds but the lookup finds nothing, it returns JSON-RPC `-32004` with `subCode: 'reference_unresolved'` (privacy-uniform — the wire never distinguishes "not found" from "not visible").
+
 ### Push notifications (Waggle)
 
 When a message is delivered to a participant's cell, the server emits **two notifications in parallel** on each delivery — a dual-emit pattern that keeps standard MCP clients working while enabling reactive autonomy in Claude Code. See [Channels](channels.md) for the operator guide on enabling reactive autonomy.

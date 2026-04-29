@@ -43,6 +43,48 @@ describe('participants read repository', () => {
     expect(mixed?.id).toBe(world.adminHivekeeperId);
   });
 
+  it('findHivekeeperByEmailLocalPart matches the local-part of an email case-insensitively', async () => {
+    const repo = createParticipantsReadRepo(world.db);
+    const exact = await repo.findHivekeeperByEmailLocalPart(world.hiveId, 'admin');
+    expect(exact?.id).toBe(world.adminHivekeeperId);
+    const upper = await repo.findHivekeeperByEmailLocalPart(world.hiveId, 'ADMIN');
+    expect(upper?.id).toBe(world.adminHivekeeperId);
+  });
+
+  it('findHivekeeperByEmailLocalPart matches a local-part with embedded dots', async () => {
+    const repo = createParticipantsReadRepo(world.db);
+    // Insert a hivekeeper with a dotted local-part so the lookup truly exercises
+    // the substring extraction (admin@example.com would match a naive "starts-with" too).
+    await world.db
+      .insertInto('hivekeepers')
+      .values({
+        id: '019dffff-0000-0000-0000-0000000000aa',
+        hive_id: world.hiveId,
+        colony_id: world.colonyId,
+        email: 'John.Doe@another-domain.com',
+        display_name: null,
+        is_admin: 0,
+        state: 'active',
+        revoked_at: null,
+      })
+      .execute();
+    const found = await repo.findHivekeeperByEmailLocalPart(world.hiveId, 'john.doe');
+    expect(found?.email).toBe('John.Doe@another-domain.com');
+  });
+
+  it('findHivekeeperByEmailLocalPart returns null when no match', async () => {
+    const repo = createParticipantsReadRepo(world.db);
+    expect(await repo.findHivekeeperByEmailLocalPart(world.hiveId, 'no-such-keeper')).toBeNull();
+  });
+
+  it('findHivekeeperByEmailLocalPart does not match when the same local-part lives in a different hive', async () => {
+    const repo = createParticipantsReadRepo(world.db);
+    // The default seed has admin@example.com in world.hiveId; query against a fake hive id.
+    expect(
+      await repo.findHivekeeperByEmailLocalPart('019dffff-0000-0000-0000-0000000000ff', 'admin'),
+    ).toBeNull();
+  });
+
   it('findAgentById parses capabilities JSON into a string array', async () => {
     const repo = createParticipantsReadRepo(world.db);
     const worker = await repo.findAgentById(world.workerAgentId);

@@ -54,7 +54,7 @@ import {
 import type { CellsRepo } from '#domain/cells/index.js';
 import { parseIntEnv } from '#observability/env.js';
 import type { Logger } from '#observability/logger.js';
-import { createDb } from '#persistence/db.js';
+import { createDb, resolveDbConfigFromEnv } from '#persistence/db.js';
 import type { Database } from '#persistence/schema.js';
 
 import { createCellsHookAdapter } from './cells-hook-adapter.js';
@@ -134,7 +134,8 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
   const { logger } = deps;
 
   // 1. DB.
-  const db = createDb();
+  const dbConfig = resolveDbConfigFromEnv();
+  const db = createDb(dbConfig);
 
   // 2. Auth: keypairs + blocklist + verifier.
   const signingKeys = await loadAllKeypairs({ keysDir: cfg.keysDir });
@@ -145,7 +146,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
   }
   const blocklist = await loadBlocklist(db);
 
-  const participantsRepo = createParticipantsReadRepo(db);
+  const participantsRepo = createParticipantsReadRepo(db, dbConfig.dialect);
   // Resolve hiveId — the verifier needs the canonical hive identifier.
   const hiveRow = await db.selectFrom('hives').select('id').executeTakeFirst();
   if (!hiveRow) {
@@ -415,7 +416,8 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   const config = resolveCliConfigFromEnv(process.env, overrides);
   const { logger } = deps;
 
-  const db = createDb();
+  const dbConfig = resolveDbConfigFromEnv();
+  const db = createDb(dbConfig);
 
   const signingKeys = await loadAllKeypairs({ keysDir: config.keysDir });
   if (signingKeys.size === 0) {
@@ -443,7 +445,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     throw new Error('No default Colony found for the Hive. DB state is inconsistent.');
   }
 
-  const participantsRepo = createParticipantsReadRepo(db);
+  const participantsRepo = createParticipantsReadRepo(db, dbConfig.dialect);
   const cellsRepo = createCellsRepo(db);
   const cellsHook = createCellsHookAdapter(cellsRepo);
   const participantsWriteRepo = createParticipantsWriteRepo(db, { cellsHook });

@@ -120,6 +120,7 @@ function buildContext(world: SendWorld, participantId: UUIDv7): IdentityContext 
     participantId,
     kind: 'worker',
     hiveId: world.hiveId,
+    hiveName: 'test-hive',
     colonyId: world.colonyId,
     ownerId: world.hkA,
     snapshot: {

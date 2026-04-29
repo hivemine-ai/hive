@@ -4,6 +4,7 @@
 
 import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
 
+import type { DbDialect } from '#persistence/db.js';
 import { intToBool, isoToDate, jsonParse } from '#persistence/type-mappers.js';
 import type {
   AgentsTable,
@@ -85,6 +86,19 @@ export interface ParticipantsReadRepo {
   findColonyById(id: UUIDv7): Promise<Colony | null>;
   findHivekeeperById(id: UUIDv7): Promise<Hivekeeper | null>;
   findHivekeeperByEmail(hiveId: UUIDv7, email: string): Promise<Hivekeeper | null>;
+  /**
+   * Looks up a Hivekeeper whose email local-part (the segment before `@`)
+   * matches `localPart` case-insensitively within the given Hive. Used by the
+   * MCP transport to resolve agent references of the form
+   * `<agent>@<owner-email-local>.<hive-name>` (per ADR-015).
+   *
+   * Cross-dialect substring extraction:
+   *   - SQLite uses `INSTR(email, '@')` (Postgres has no `INSTR`).
+   *   - Postgres uses `STRPOS(email, '@')` (SQLite has no `STRPOS`).
+   * The dialect is selected at factory time. `lower(...)` is SQL-standard and
+   * works in both, mirroring the case-folding pattern of `findHivekeeperByEmail`.
+   */
+  findHivekeeperByEmailLocalPart(hiveId: UUIDv7, localPart: string): Promise<Hivekeeper | null>;
   findAgentById(id: UUIDv7): Promise<Agent | null>;
   findAgentByName(hiveId: UUIDv7, ownerId: UUIDv7, name: string): Promise<Agent | null>;
   /**
@@ -99,7 +113,15 @@ export interface ParticipantsReadRepo {
   getParticipantState(id: UUIDv7): Promise<ParticipantStateSummary | null>;
 }
 
-export function createParticipantsReadRepo(db: Kysely<Database>): ParticipantsReadRepo {
+export function createParticipantsReadRepo(
+  db: Kysely<Database>,
+  dialect: DbDialect = 'sqlite',
+): ParticipantsReadRepo {
+  // Dialect-aware substring index (1-based) of the first `@` in `email`.
+  // INSTR is SQLite-only; STRPOS is Postgres-only — kept as `sql` fragments so
+  // Kysely passes them through verbatim and the planner picks the right path.
+  const atPosition = dialect === 'sqlite' ? sql`INSTR(email, '@')` : sql`STRPOS(email, '@')`;
+
   return {
     async findHiveById(id) {
       const row = await db.selectFrom('hives').selectAll().where('id', '=', id).executeTakeFirst();
@@ -130,6 +152,16 @@ export function createParticipantsReadRepo(db: Kysely<Database>): ParticipantsRe
         .selectAll()
         .where('hive_id', '=', hiveId)
         .where(sql`lower(email)`, '=', email.toLowerCase())
+        .executeTakeFirst();
+      return row ? rowToHivekeeper(row) : null;
+    },
+
+    async findHivekeeperByEmailLocalPart(hiveId, localPart) {
+      const row = await db
+        .selectFrom('hivekeepers')
+        .selectAll()
+        .where('hive_id', '=', hiveId)
+        .where(sql`lower(SUBSTR(email, 1, ${atPosition} - 1))`, '=', localPart.toLowerCase())
         .executeTakeFirst();
       return row ? rowToHivekeeper(row) : null;
     },

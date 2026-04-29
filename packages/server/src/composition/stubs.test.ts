@@ -8,6 +8,7 @@ const FAKE_CALLER: IdentityContext = {
   participantId: '019dffff-0000-0000-0000-000000000001',
   kind: 'hivekeeper',
   hiveId: '019dffff-0000-0000-0000-000000000002',
+  hiveName: 'test-hive',
   colonyId: '019dffff-0000-0000-0000-000000000003',
   snapshot: {
     issuedAt: new Date(),

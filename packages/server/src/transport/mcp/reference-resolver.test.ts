@@ -27,6 +27,7 @@ function makeIdentity(overrides?: Partial<IdentityContext>): IdentityContext {
     participantId: uuidv7(),
     kind: 'worker',
     hiveId: uuidv7(),
+    hiveName: 'test-hive',
     colonyId: uuidv7(),
     snapshot: {
       issuedAt: new Date('2026-01-01T00:00:00Z'),
@@ -44,6 +45,7 @@ function makeRepo(overrides?: Partial<MockRepo>): MockRepo {
     findColonyById: vi.fn().mockResolvedValue(null),
     findHivekeeperById: vi.fn().mockResolvedValue(null),
     findHivekeeperByEmail: vi.fn().mockResolvedValue(null),
+    findHivekeeperByEmailLocalPart: vi.fn().mockResolvedValue(null),
     findAgentById: vi.fn().mockResolvedValue(null),
     findAgentByName: vi.fn().mockResolvedValue(null),
     findById: vi.fn().mockResolvedValue(null),
@@ -53,22 +55,31 @@ function makeRepo(overrides?: Partial<MockRepo>): MockRepo {
 }
 
 // ---------------------------------------------------------------------------
-// Group 1 — parseReference (pure parser, no async)
+// Group 1 — parseReference (pure, takes hiveName for suffix disambiguation)
+//
+// Per ADR-015 § Decision (8-step algorithm):
+//   1. UUID v7      → kind: 'uuid'
+//   2. 'self'       → kind: 'self'
+//   3. count('@') != 1 → null
+//   4. split [local, afterAt]
+//   5. hiveSuffix = '.' + hiveName
+//   6. afterAt endsWith hiveSuffix AND ownerLocal != '' AND EMAIL_LOCAL_PART_RE
+//                                                  → kind: 'agent-reference'
+//   7. else if EMAIL_RE.test(input) → kind: 'hivekeeper-email'
+//   8. else                          → null
 // ---------------------------------------------------------------------------
 
 describe('parseReference', () => {
-  // UUID v7 — lowercase canonical
+  // --- UUID v7 ---
+
   it('returns uuid kind for lowercase UUID v7', () => {
     const id = uuidv7();
-    const result = parseReference(id);
-    expect(result).toEqual<ParsedReference>({ kind: 'uuid', id });
+    expect(parseReference(id, 'test-hive')).toEqual<ParsedReference>({ kind: 'uuid', id });
   });
 
-  // UUID v7 — uppercase input normalised to lowercase
   it('accepts uppercase UUID v7 and normalises output to lowercase', () => {
     const id = uuidv7();
-    const upper = id.toUpperCase();
-    const result = parseReference(upper);
+    const result = parseReference(id.toUpperCase(), 'test-hive');
     expect(result).not.toBeNull();
     expect(result!.kind).toBe('uuid');
     if (result!.kind === 'uuid') {
@@ -76,99 +87,114 @@ describe('parseReference', () => {
     }
   });
 
-  // 'self' alias — case-sensitive (lowercase only)
+  it('returns null for UUID v4 (version bit 4, not v7)', () => {
+    expect(parseReference('01234567-89ab-4def-89ab-0123456789ab', 'test-hive')).toBeNull();
+  });
+
+  // --- self alias ---
+
   it('returns self kind for literal "self"', () => {
-    expect(parseReference('self')).toEqual<ParsedReference>({ kind: 'self' });
+    expect(parseReference('self', 'test-hive')).toEqual<ParsedReference>({ kind: 'self' });
   });
 
   it('returns null for "Self" (case-sensitive — only lowercase)', () => {
-    expect(parseReference('Self')).toBeNull();
+    expect(parseReference('Self', 'test-hive')).toBeNull();
   });
 
-  it('returns null for "SELF" (case-sensitive — only lowercase)', () => {
-    expect(parseReference('SELF')).toBeNull();
+  it('trims surrounding whitespace before parsing: "  self  " resolves to self kind', () => {
+    expect(parseReference('  self  ', 'test-hive')).toEqual<ParsedReference>({ kind: 'self' });
   });
 
-  // 'self' with surrounding whitespace — trimmed first
-  it('trims whitespace before parsing: "  self  " resolves to self kind', () => {
-    expect(parseReference('  self  ')).toEqual<ParsedReference>({ kind: 'self' });
+  // --- count('@') != 1 ---
+
+  it('returns null when count(@) == 0 (and not self/uuid)', () => {
+    expect(parseReference('not-a-valid-ref', 'test-hive')).toBeNull();
   });
 
-  // Hivekeeper email — single @, no trailing .<hive>
-  it('returns hivekeeper-email kind for simple email format', () => {
-    const result = parseReference('admin@example.com');
+  it('returns null when count(@) > 1 (e.g. legacy double-@ format is rejected)', () => {
+    expect(parseReference('agent@owner@example.com.test-hive', 'test-hive')).toBeNull();
+  });
+
+  it('returns null when count(@) > 1 — three @s', () => {
+    expect(parseReference('a@b@c@d.test-hive', 'test-hive')).toBeNull();
+  });
+
+  // --- agent-reference (single @, suffix matches `.<hiveName>`) ---
+
+  it('returns agent-reference for `<agent>@<owner-local>.<hive-name>`', () => {
+    const result = parseReference('worker-a@admin.test-hive', 'test-hive');
+    expect(result).toEqual<ParsedReference>({
+      kind: 'agent-reference',
+      agentName: 'worker-a',
+      ownerLocal: 'admin',
+    });
+  });
+
+  it('returns agent-reference when owner-local contains dots (john.doe)', () => {
+    const result = parseReference('worker@john.doe.test-hive', 'test-hive');
+    expect(result).toEqual<ParsedReference>({
+      kind: 'agent-reference',
+      agentName: 'worker',
+      ownerLocal: 'john.doe',
+    });
+  });
+
+  it('returns agent-reference when owner-local has dashes/underscores allowed by EMAIL_LOCAL_PART_RE', () => {
+    const result = parseReference('w@first-last_x.test-hive', 'test-hive');
+    expect(result).toEqual<ParsedReference>({
+      kind: 'agent-reference',
+      agentName: 'w',
+      ownerLocal: 'first-last_x',
+    });
+  });
+
+  it('returns null when ownerLocal candidate fails EMAIL_LOCAL_PART_RE (whitespace inside)', () => {
+    // After suffix strip, ownerLocal = 'admin x' — fails the regex.
+    // count('@') == 1, suffix matches, but the pre-suffix portion is invalid →
+    // step 6 fails, step 7 also fails (input has space → not email-shaped) → null.
+    expect(parseReference('worker@admin x.test-hive', 'test-hive')).toBeNull();
+  });
+
+  it('agent-reference takes precedence over hivekeeper-email when suffix matches', () => {
+    // Without the suffix check, `worker@admin.test-hive` could also be parsed
+    // as a hivekeeper email. ADR-015 step 6 happens before step 7.
+    const result = parseReference('worker@admin.test-hive', 'test-hive');
+    expect(result?.kind).toBe('agent-reference');
+  });
+
+  // --- hivekeeper-email (single @, suffix does NOT match) ---
+
+  it('returns hivekeeper-email when suffix does NOT match the caller hiveName', () => {
+    const result = parseReference('admin@example.com', 'cotalker');
     expect(result).toEqual<ParsedReference>({
       kind: 'hivekeeper-email',
       email: 'admin@example.com',
     });
   });
 
-  it('returns hivekeeper-email kind for email with subdomain', () => {
-    const result = parseReference('user@mail.example.com');
-    expect(result).not.toBeNull();
-    expect(result!.kind).toBe('hivekeeper-email');
+  it('returns hivekeeper-email when suffix matches but ownerLocal would be empty (afterAt == hiveSuffix)', () => {
+    // input = 'admin@.cotalker' → afterAt = '.cotalker', hiveSuffix = '.cotalker',
+    // ownerLocal = '' → step 6 fails, step 7 evaluates: EMAIL_RE accepts 'admin@.cotalker'
+    // (lenient `[^@\s]+@[^@\s]+`), so this resolves as an email of last resort.
+    const result = parseReference('admin@.cotalker', 'cotalker');
+    expect(result?.kind).toBe('hivekeeper-email');
   });
 
-  // Agent reference — double @, with trailing .<hive>
-  it('returns agent-reference kind for double-@ format', () => {
-    const result = parseReference('worker-a@admin@example.com.my-hive');
-    expect(result).toEqual<ParsedReference>({
-      kind: 'agent-reference',
-      agentName: 'worker-a',
-      ownerEmail: 'admin@example.com',
-      hiveName: 'my-hive',
-    });
+  it('returns hivekeeper-email when domain happens to look like a longer suffix', () => {
+    // hiveName = 'cotalker', input domain = 'cotalker.example.com'
+    // hiveSuffix = '.cotalker' — afterAt 'cotalker.example.com' does NOT end with '.cotalker'
+    const result = parseReference('admin@cotalker.example.com', 'cotalker');
+    expect(result?.kind).toBe('hivekeeper-email');
   });
 
-  it('returns agent-reference kind when owner email has subdomain', () => {
-    // owner email = admin@mail.example.com → domain contains dots;
-    // split on LAST dot after second @ for hiveName
-    const result = parseReference('scout@admin@mail.example.com.my-hive');
-    expect(result).not.toBeNull();
-    expect(result!.kind).toBe('agent-reference');
-    if (result!.kind === 'agent-reference') {
-      expect(result!.agentName).toBe('scout');
-      expect(result!.ownerEmail).toBe('admin@mail.example.com');
-      expect(result!.hiveName).toBe('my-hive');
-    }
-  });
+  // --- empty / whitespace ---
 
-  // Empty string → null
   it('returns null for empty string', () => {
-    expect(parseReference('')).toBeNull();
+    expect(parseReference('', 'test-hive')).toBeNull();
   });
 
-  // Whitespace only → null (after trim)
   it('returns null for whitespace-only string', () => {
-    expect(parseReference('   ')).toBeNull();
-  });
-
-  // No @ — not self, not UUID, not email → null
-  it('returns null for string with no @ and not self/uuid', () => {
-    expect(parseReference('notavalid')).toBeNull();
-  });
-
-  // Triple @ → null (ambiguous — per grammar: exactly 2 @ = agent-reference, exactly 1 @ = email)
-  it('returns null for triple @ (ambiguous, outside defined grammar)', () => {
-    expect(parseReference('a@b@c@d.hive')).toBeNull();
-  });
-
-  // Malformed UUID (v4-style) → null
-  it('returns null for UUID v4 (version bit 4, not v7)', () => {
-    // UUID v4 has version nibble = 4, not 7
-    const v4like = '01234567-89ab-4def-89ab-0123456789ab';
-    expect(parseReference(v4like)).toBeNull();
-  });
-
-  it('returns null for malformed UUID-shaped string missing version 7', () => {
-    expect(parseReference('01234567-89ab-6def-89ab-0123456789ab')).toBeNull();
-  });
-
-  // Single @ with dotted domain — if exactly one @, routed to hivekeeper-email, not agent-reference
-  it('routes single-@ with dotted domain to hivekeeper-email (not agent-reference)', () => {
-    const result = parseReference('user@sub.domain.com');
-    expect(result).not.toBeNull();
-    expect(result!.kind).toBe('hivekeeper-email');
+    expect(parseReference('   ', 'test-hive')).toBeNull();
   });
 });
 
@@ -187,20 +213,8 @@ describe('resolveParticipantReference — happy paths', () => {
 
     expect(result).toBe(id.toLowerCase());
     expect(repo.findHivekeeperByEmail).not.toHaveBeenCalled();
+    expect(repo.findHivekeeperByEmailLocalPart).not.toHaveBeenCalled();
     expect(repo.findAgentByName).not.toHaveBeenCalled();
-    expect(repo.findHiveById).not.toHaveBeenCalled();
-  });
-
-  it('uppercase UUID v7 passes through normalised to lowercase without repo lookup', async () => {
-    const id = uuidv7();
-    const repo = makeRepo();
-    const resolver = createReferenceResolver({ participantsRepo: repo });
-    const identity = makeIdentity();
-
-    const result = await resolver.resolveParticipantReference(id.toUpperCase(), identity);
-
-    expect(result).toBe(id.toLowerCase());
-    expect(repo.findHivekeeperByEmail).not.toHaveBeenCalled();
   });
 
   it('"self" returns callerContext.participantId without any repo lookup', async () => {
@@ -212,10 +226,10 @@ describe('resolveParticipantReference — happy paths', () => {
 
     expect(result).toBe(identity.participantId);
     expect(repo.findHivekeeperByEmail).not.toHaveBeenCalled();
-    expect(repo.findAgentByName).not.toHaveBeenCalled();
+    expect(repo.findHivekeeperByEmailLocalPart).not.toHaveBeenCalled();
   });
 
-  it('email input resolves to hivekeeper.id when found', async () => {
+  it('hivekeeper email resolves to hivekeeper.id when found', async () => {
     const hivekeeper = {
       id: uuidv7(),
       hiveId: uuidv7(),
@@ -231,26 +245,24 @@ describe('resolveParticipantReference — happy paths', () => {
       findHivekeeperByEmail: vi.fn().mockResolvedValue(hivekeeper),
     });
     const resolver = createReferenceResolver({ participantsRepo: repo });
-    const identity = makeIdentity();
+    const identity = makeIdentity({ hiveName: 'cotalker' });
 
     const result = await resolver.resolveParticipantReference('keeper@example.com', identity);
 
     expect(result).toBe(hivekeeper.id);
     expect(repo.findHivekeeperByEmail).toHaveBeenCalledWith(identity.hiveId, 'keeper@example.com');
+    expect(repo.findHivekeeperByEmailLocalPart).not.toHaveBeenCalled();
   });
 
-  it('agent reference resolves through hive + hivekeeper + agent lookups in order', async () => {
+  it('agent reference resolves through findHivekeeperByEmailLocalPart + findAgentByName', async () => {
     const hiveId = uuidv7();
     const hiveName = 'my-hive';
-    const ownerEmail = 'admin@example.com';
-    const agentName = 'worker-a';
 
-    const hive = { id: hiveId, name: hiveName, createdAt: new Date() };
     const hivekeeper = {
       id: uuidv7(),
       hiveId,
       colonyId: uuidv7(),
-      email: ownerEmail,
+      email: 'admin@external.com',
       displayName: null,
       isAdmin: true,
       state: 'active' as const,
@@ -262,7 +274,7 @@ describe('resolveParticipantReference — happy paths', () => {
       hiveId,
       colonyId: uuidv7(),
       ownerId: hivekeeper.id,
-      name: agentName,
+      name: 'worker-a',
       type: 'worker' as const,
       capabilities: [],
       instructions: '',
@@ -272,20 +284,94 @@ describe('resolveParticipantReference — happy paths', () => {
     };
 
     const repo = makeRepo({
-      findHiveById: vi.fn().mockResolvedValue(hive),
-      findHivekeeperByEmail: vi.fn().mockResolvedValue(hivekeeper),
+      findHivekeeperByEmailLocalPart: vi.fn().mockResolvedValue(hivekeeper),
       findAgentByName: vi.fn().mockResolvedValue(agent),
     });
     const resolver = createReferenceResolver({ participantsRepo: repo });
-    const identity = makeIdentity({ hiveId });
+    const identity = makeIdentity({ hiveId, hiveName });
 
-    const ref = `${agentName}@${ownerEmail}.${hiveName}`;
-    const result = await resolver.resolveParticipantReference(ref, identity);
+    // AC1 — caso nominal
+    const result = await resolver.resolveParticipantReference(
+      `worker-a@admin.${hiveName}`,
+      identity,
+    );
 
     expect(result).toBe(agent.id);
-    expect(repo.findHiveById).toHaveBeenCalledWith(hiveId);
-    expect(repo.findHivekeeperByEmail).toHaveBeenCalledWith(hiveId, ownerEmail);
-    expect(repo.findAgentByName).toHaveBeenCalledWith(hiveId, hivekeeper.id, agentName);
+    expect(repo.findHivekeeperByEmailLocalPart).toHaveBeenCalledWith(hiveId, 'admin');
+    expect(repo.findAgentByName).toHaveBeenCalledWith(hiveId, hivekeeper.id, 'worker-a');
+    // hive lookup is NOT necessary: the suffix check at parse time already
+    // validated the ref belongs to the caller's hive.
+    expect(repo.findHiveById).not.toHaveBeenCalled();
+  });
+
+  it('AC2 — agent reference with dotted owner-local resolves correctly', async () => {
+    const hiveId = uuidv7();
+    const hiveName = 'acme';
+
+    const hivekeeper = {
+      id: uuidv7(),
+      hiveId,
+      colonyId: uuidv7(),
+      email: 'john.doe@example.com',
+      displayName: null,
+      isAdmin: false,
+      state: 'active' as const,
+      createdAt: new Date(),
+      revokedAt: null,
+    };
+    const agent = {
+      id: uuidv7(),
+      hiveId,
+      colonyId: uuidv7(),
+      ownerId: hivekeeper.id,
+      name: 'worker',
+      type: 'worker' as const,
+      capabilities: [],
+      instructions: '',
+      state: 'active' as const,
+      createdAt: new Date(),
+      revokedAt: null,
+    };
+
+    const repo = makeRepo({
+      findHivekeeperByEmailLocalPart: vi.fn().mockResolvedValue(hivekeeper),
+      findAgentByName: vi.fn().mockResolvedValue(agent),
+    });
+    const resolver = createReferenceResolver({ participantsRepo: repo });
+    const identity = makeIdentity({ hiveId, hiveName });
+
+    const result = await resolver.resolveParticipantReference(
+      `worker@john.doe.${hiveName}`,
+      identity,
+    );
+
+    expect(result).toBe(agent.id);
+    expect(repo.findHivekeeperByEmailLocalPart).toHaveBeenCalledWith(hiveId, 'john.doe');
+  });
+
+  it('AC3 — Hivekeeper email whose domain does NOT end in .<hive-name> resolves as hivekeeper-email', async () => {
+    const hivekeeper = {
+      id: uuidv7(),
+      hiveId: uuidv7(),
+      colonyId: uuidv7(),
+      email: 'bob@example.com',
+      displayName: null,
+      isAdmin: false,
+      state: 'active' as const,
+      createdAt: new Date(),
+      revokedAt: null,
+    };
+    const repo = makeRepo({
+      findHivekeeperByEmail: vi.fn().mockResolvedValue(hivekeeper),
+    });
+    const resolver = createReferenceResolver({ participantsRepo: repo });
+    const identity = makeIdentity({ hiveName: 'cotalker' });
+
+    const result = await resolver.resolveParticipantReference('bob@example.com', identity);
+
+    expect(result).toBe(hivekeeper.id);
+    expect(repo.findHivekeeperByEmail).toHaveBeenCalled();
+    expect(repo.findHivekeeperByEmailLocalPart).not.toHaveBeenCalled();
   });
 });
 
@@ -294,7 +380,7 @@ describe('resolveParticipantReference — happy paths', () => {
 // ---------------------------------------------------------------------------
 
 describe('resolveParticipantReference — error paths', () => {
-  it('unparseable input throws CellError INVALID_INPUT reference_unparseable', async () => {
+  it('AC4 — unparseable input throws CellError INVALID_INPUT reference_unparseable', async () => {
     const repo = makeRepo();
     const resolver = createReferenceResolver({ participantsRepo: repo });
     const identity = makeIdentity();
@@ -310,7 +396,7 @@ describe('resolveParticipantReference — error paths', () => {
     });
   });
 
-  it('empty string throws CellError INVALID_INPUT reference_unparseable', async () => {
+  it('AC4 — empty string throws INVALID_INPUT reference_unparseable', async () => {
     const repo = makeRepo();
     const resolver = createReferenceResolver({ participantsRepo: repo });
     const identity = makeIdentity();
@@ -326,7 +412,23 @@ describe('resolveParticipantReference — error paths', () => {
     );
   });
 
-  it('email parses but hivekeeper not found throws RECIPIENT_UNREACHABLE reference_unresolved', async () => {
+  it('AC4 — count(@) > 1 throws INVALID_INPUT reference_unparseable (legacy double-@ rejected)', async () => {
+    const repo = makeRepo();
+    const resolver = createReferenceResolver({ participantsRepo: repo });
+    const identity = makeIdentity({ hiveName: 'test-hive' });
+
+    await expect(
+      resolver.resolveParticipantReference('agent@owner@example.com.test-hive', identity),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(CellError);
+      const e = err as CellError;
+      expect(e.code).toBe('INVALID_INPUT');
+      expect(e.subCode).toBe('reference_unparseable');
+      return true;
+    });
+  });
+
+  it('AC5 — hivekeeper email parses but participant not found → RECIPIENT_UNREACHABLE reference_unresolved', async () => {
     const repo = makeRepo({ findHivekeeperByEmail: vi.fn().mockResolvedValue(null) });
     const resolver = createReferenceResolver({ participantsRepo: repo });
     const identity = makeIdentity();
@@ -342,18 +444,13 @@ describe('resolveParticipantReference — error paths', () => {
     });
   });
 
-  it('agent reference with mismatched hive name throws RECIPIENT_UNREACHABLE reference_unresolved', async () => {
-    const hiveId = uuidv7();
-    // Hive found but its name does NOT match the hive-name in the reference
-    const hive = { id: hiveId, name: 'actual-hive', createdAt: new Date() };
-
-    const repo = makeRepo({ findHiveById: vi.fn().mockResolvedValue(hive) });
+  it('AC5 — agent reference: owner not found by local-part → RECIPIENT_UNREACHABLE reference_unresolved', async () => {
+    const repo = makeRepo({ findHivekeeperByEmailLocalPart: vi.fn().mockResolvedValue(null) });
     const resolver = createReferenceResolver({ participantsRepo: repo });
-    const identity = makeIdentity({ hiveId });
+    const identity = makeIdentity({ hiveName: 'my-hive' });
 
-    // Reference claims hive-name = 'wrong-hive', but the hive's actual name is 'actual-hive'
     await expect(
-      resolver.resolveParticipantReference('agent@owner@example.com.wrong-hive', identity),
+      resolver.resolveParticipantReference('worker@nobody.my-hive', identity),
     ).rejects.toSatisfy((err: unknown) => {
       expect(err).toBeInstanceOf(CellError);
       const e = err as CellError;
@@ -363,33 +460,9 @@ describe('resolveParticipantReference — error paths', () => {
     });
   });
 
-  it('agent reference: hive matches, owner not found → RECIPIENT_UNREACHABLE reference_unresolved', async () => {
+  it('AC5 — agent reference: owner found, agent not found → RECIPIENT_UNREACHABLE reference_unresolved', async () => {
     const hiveId = uuidv7();
     const hiveName = 'my-hive';
-    const hive = { id: hiveId, name: hiveName, createdAt: new Date() };
-
-    const repo = makeRepo({
-      findHiveById: vi.fn().mockResolvedValue(hive),
-      findHivekeeperByEmail: vi.fn().mockResolvedValue(null),
-    });
-    const resolver = createReferenceResolver({ participantsRepo: repo });
-    const identity = makeIdentity({ hiveId });
-
-    await expect(
-      resolver.resolveParticipantReference(`worker@nobody@example.com.${hiveName}`, identity),
-    ).rejects.toSatisfy((err: unknown) => {
-      expect(err).toBeInstanceOf(CellError);
-      const e = err as CellError;
-      expect(e.code).toBe('RECIPIENT_UNREACHABLE');
-      expect(e.subCode).toBe('reference_unresolved');
-      return true;
-    });
-  });
-
-  it('agent reference: hive and owner found but agent not found → RECIPIENT_UNREACHABLE reference_unresolved', async () => {
-    const hiveId = uuidv7();
-    const hiveName = 'my-hive';
-    const hive = { id: hiveId, name: hiveName, createdAt: new Date() };
     const hivekeeper = {
       id: uuidv7(),
       hiveId,
@@ -403,15 +476,14 @@ describe('resolveParticipantReference — error paths', () => {
     };
 
     const repo = makeRepo({
-      findHiveById: vi.fn().mockResolvedValue(hive),
-      findHivekeeperByEmail: vi.fn().mockResolvedValue(hivekeeper),
+      findHivekeeperByEmailLocalPart: vi.fn().mockResolvedValue(hivekeeper),
       findAgentByName: vi.fn().mockResolvedValue(null),
     });
     const resolver = createReferenceResolver({ participantsRepo: repo });
-    const identity = makeIdentity({ hiveId });
+    const identity = makeIdentity({ hiveId, hiveName });
 
     await expect(
-      resolver.resolveParticipantReference(`ghost-agent@admin@example.com.${hiveName}`, identity),
+      resolver.resolveParticipantReference(`ghost-agent@admin.${hiveName}`, identity),
     ).rejects.toSatisfy((err: unknown) => {
       expect(err).toBeInstanceOf(CellError);
       const e = err as CellError;
