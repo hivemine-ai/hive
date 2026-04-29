@@ -1,4 +1,4 @@
-import { ZodError } from 'zod';
+import { ZodError, type ZodIssue } from 'zod';
 
 import { AuthError } from '#domain/auth/index.js';
 import { CellError } from '#domain/cells/index.js';
@@ -141,7 +141,11 @@ export function mapDomainError(err: unknown): MappedError {
 
   if (err instanceof ZodError) {
     return {
-      wire: { code: MCP_ERR_INVALID_PARAMS, message: 'invalid input' },
+      wire: {
+        code: MCP_ERR_INVALID_PARAMS,
+        message: 'invalid input',
+        data: { issues: err.issues.map(sanitizeZodIssue) },
+      },
       domainCode: 'INVALID_INPUT',
       subCode: err.issues[0]?.code ?? null,
     };
@@ -151,5 +155,26 @@ export function mapDomainError(err: unknown): MappedError {
     wire: { code: MCP_ERR_INTERNAL, message: 'internal error' },
     domainCode: null,
     subCode: null,
+  };
+}
+
+/**
+ * Whitelist-based sanitizer for zod issues going to wire.error.data.
+ *
+ * Only `{path, code, message}` cross the boundary. We deliberately do NOT copy
+ * `received` (the caller-provided value) — echoing it back risks PII leakage if
+ * the caller sent sensitive input, and risks echo-amplification on logs that
+ * persist the wire response. Future zod versions may add fields like
+ * `validation` or `option` that could carry context too — the whitelist
+ * approach makes us defaultClosed against new fields rather than defaultOpen.
+ *
+ * The path array is joined with '.' (zod-native, simplest format). Array index
+ * paths surface as `"message_ids.3"`; root-level errors as the empty string.
+ */
+function sanitizeZodIssue(issue: ZodIssue): { path: string; code: string; message: string } {
+  return {
+    path: issue.path.join('.'),
+    code: issue.code,
+    message: issue.message,
   };
 }
