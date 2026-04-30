@@ -136,6 +136,7 @@ export interface RetentionPoliciesTable {
 
 export interface IdempotencyKeysTable {
   sender_id: UUIDv7;
+  recipient_id: UUIDv7;
   key: string;
   message_id: UUIDv7;
   created_at: Generated<IsoTimestamp>;
