@@ -114,6 +114,7 @@ export function createSender(deps: SenderDeps): Sender {
 
   async function idempotencyLookup(
     senderId: UUIDv7,
+    recipientId: UUIDv7,
     key: string,
     executor: Kysely<Database> | Transaction<Database> = deps.db,
   ): Promise<IdempotencyHit | null> {
@@ -126,6 +127,7 @@ export function createSender(deps: SenderDeps): Sender {
         'm.delivered_at as deliveredAt',
       ])
       .where('ik.sender_id', '=', senderId)
+      .where('ik.recipient_id', '=', recipientId)
       .where('ik.key', '=', key)
       .executeTakeFirst();
     if (!row) return null;
@@ -139,6 +141,7 @@ export function createSender(deps: SenderDeps): Sender {
   async function insertIdempotencyKeyOrConflict(
     tx: Transaction<Database>,
     senderId: UUIDv7,
+    recipientId: UUIDv7,
     key: string,
     messageId: UUIDv7,
   ): Promise<boolean> {
@@ -146,10 +149,11 @@ export function createSender(deps: SenderDeps): Sender {
       .insertInto('idempotency_keys')
       .values({
         sender_id: senderId,
+        recipient_id: recipientId,
         key,
         message_id: messageId,
       })
-      .onConflict((oc) => oc.columns(['sender_id', 'key']).doNothing())
+      .onConflict((oc) => oc.columns(['sender_id', 'recipient_id', 'key']).doNothing())
       .executeTakeFirst();
     return (result.numInsertedOrUpdatedRows ?? 0n) > 0n;
   }
@@ -181,7 +185,7 @@ export function createSender(deps: SenderDeps): Sender {
 
     // ── 2. idempotency lookup (best-effort early return) ──
     if (input.idempotencyKey !== undefined) {
-      const existing = await idempotencyLookup(senderId, input.idempotencyKey);
+      const existing = await idempotencyLookup(senderId, input.recipientId, input.idempotencyKey);
       if (existing) {
         return {
           messageId: existing.messageId,
@@ -249,11 +253,12 @@ export function createSender(deps: SenderDeps): Sender {
           const inserted = await insertIdempotencyKeyOrConflict(
             tx,
             senderId,
+            input.recipientId,
             input.idempotencyKey,
             messageId,
           );
           if (!inserted) {
-            // A concurrent send committed the same (sender_id, key) first.
+            // A concurrent send committed the same (sender_id, recipient_id, key) first.
             // Throw a sentinel to roll back our message INSERT and re-read
             // the winning row outside the TX.
             throw new IdempotencyConflictSentinel();
@@ -271,7 +276,11 @@ export function createSender(deps: SenderDeps): Sender {
     } catch (err) {
       if (err instanceof IdempotencyConflictSentinel) {
         // safe-cast: we only reach here if input.idempotencyKey was defined.
-        const winning = await idempotencyLookup(senderId, input.idempotencyKey as string);
+        const winning = await idempotencyLookup(
+          senderId,
+          input.recipientId,
+          input.idempotencyKey as string,
+        );
         if (!winning) {
           throw new CellError('INTERNAL_INCONSISTENCY', {
             subCode: 'idempotency_winner_missing',

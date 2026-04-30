@@ -60,19 +60,26 @@ describe('migrateToLatest', () => {
     const downResult = await migrateDown(db);
     expect(downResult.results?.[0]?.status).toBe('Success');
 
-    // `migrateDown` only rolls back the most recent migration (audit log table);
-    // the auth + cell store tables should still be present. The audit_log table
-    // must be gone.
+    // `migrateDown` only rolls back the most recent migration. With PRY-027 in
+    // the catalog, the latest migration is `20260430120000_idempotency-key-scope-recipient`,
+    // whose DOWN drops + recreates `idempotency_keys` with the legacy
+    // `(sender_id, key)` PK. All tables remain present (the table is recreated
+    // by DOWN); only the schema of `idempotency_keys` is rolled back.
     const tables = await sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'kysely_%'
       ORDER BY name
     `.execute(db);
     const remaining = tables.rows.map((r) => r.name).sort();
-    const expectedAfterDown = [...EXPECTED_AUTH_TABLES, ...EXPECTED_CELL_TABLES].sort();
-    expect(remaining).toEqual(expectedAfterDown);
-    for (const auditTable of EXPECTED_AUDIT_TABLES) {
-      expect(remaining).not.toContain(auditTable);
-    }
+    expect(remaining).toEqual(EXPECTED_TABLES);
+
+    // Schema rollback assertion: the `recipient_id` column added by the latest
+    // migration is gone after DOWN.
+    const cols = await sql<{ name: string }>`
+      PRAGMA table_info(idempotency_keys)
+    `.execute(db);
+    const colNames = cols.rows.map((r) => r.name).sort();
+    expect(colNames).not.toContain('recipient_id');
+    expect(colNames).toEqual(['created_at', 'key', 'message_id', 'sender_id']);
   });
 
   it('inserts a default state row with CURRENT_TIMESTAMP working in SQLite', async () => {

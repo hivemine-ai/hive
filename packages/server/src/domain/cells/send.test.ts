@@ -563,6 +563,7 @@ describe('createSender / sendMessage', () => {
         .insertInto('idempotency_keys')
         .values({
           sender_id: world.workerA,
+          recipient_id: world.workerB,
           key: idempotencyKey,
           message_id: winningMessageId,
         })
@@ -748,10 +749,223 @@ describe('createSender / sendMessage', () => {
         .selectFrom('idempotency_keys')
         .selectAll()
         .where('sender_id', '=', world.workerA)
+        .where('recipient_id', '=', world.workerB)
         .where('key', '=', idempotencyKey)
         .execute();
       expect(idempRows.length).toBe(1);
       expect(idempRows[0]?.message_id).toBe(first.messageId);
+    });
+  });
+
+  // PRY-027 — idempotency_key scope expanded from (sender_id, key) to
+  // (sender_id, recipient_id, key) per ADR-018. Closes INC-2026-001 #4
+  // (silent message loss when a client reused the same key cross-recipient).
+  describe('idempotency cross-recipient (PRY-027, ADR-018)', () => {
+    async function spawnExtraWorkerWithCell(name: string): Promise<UUIDv7> {
+      const id = uuidv7();
+      await world.db
+        .insertInto('agents')
+        .values({
+          id,
+          hive_id: world.hiveId,
+          colony_id: world.colonyId,
+          owner_id: world.hkA,
+          name,
+          type: 'worker',
+          capabilities: '[]',
+          instructions: '',
+          state: 'active',
+          revoked_at: null,
+        })
+        .execute();
+      await world.cellsRepo.createCell({
+        ownerId: id,
+        ownerKind: 'agent',
+        hiveId: world.hiveId,
+      });
+      return id;
+    }
+
+    it('AC2: same sender + same key + DIFFERENT recipients → both persist as distinct messages, neither replayed', async () => {
+      const { sender } = buildSender(world);
+      const ctx = buildContext(world, world.workerA);
+      const idempotencyKey = 'pry-027-cross-recipient';
+      const workerC = await spawnExtraWorkerWithCell('worker-c-cross-recipient');
+
+      const toB = await sender.sendMessage({
+        callerContext: ctx,
+        recipientId: world.workerB,
+        type: 'request',
+        body: 'msg-1-to-B',
+        idempotencyKey,
+      });
+      const toC = await sender.sendMessage({
+        callerContext: ctx,
+        recipientId: workerC,
+        type: 'request',
+        body: 'msg-2-to-C',
+        idempotencyKey,
+      });
+
+      expect(toB.replayed).toBe(false);
+      expect(toC.replayed).toBe(false);
+      expect(toB.messageId).not.toBe(toC.messageId);
+
+      const messageRows = await world.db
+        .selectFrom('messages')
+        .select(['id', 'to_participant_id', 'body'])
+        .orderBy('id')
+        .execute();
+      expect(messageRows.length).toBe(2);
+      const toIds = messageRows.map((r) => r.to_participant_id).sort();
+      expect(toIds).toEqual([world.workerB, workerC].sort());
+
+      const idempRows = await world.db
+        .selectFrom('idempotency_keys')
+        .selectAll()
+        .where('sender_id', '=', world.workerA)
+        .where('key', '=', idempotencyKey)
+        .execute();
+      expect(idempRows.length).toBe(2);
+      expect(idempRows.map((r) => r.recipient_id).sort()).toEqual([world.workerB, workerC].sort());
+    });
+
+    it('AC3: same sender + same key + SAME recipient → second call replayed=true with the original messageId', async () => {
+      const { sender } = buildSender(world);
+      const ctx = buildContext(world, world.workerA);
+      const idempotencyKey = 'pry-027-backward-compat';
+
+      const first = await sender.sendMessage({
+        callerContext: ctx,
+        recipientId: world.workerB,
+        type: 'request',
+        body: 'first',
+        idempotencyKey,
+      });
+      const second = await sender.sendMessage({
+        callerContext: ctx,
+        recipientId: world.workerB,
+        type: 'request',
+        body: 'second',
+        idempotencyKey,
+      });
+
+      expect(first.replayed).toBe(false);
+      expect(second.replayed).toBe(true);
+      expect(second.messageId).toBe(first.messageId);
+
+      const idempRows = await world.db
+        .selectFrom('idempotency_keys')
+        .selectAll()
+        .where('sender_id', '=', world.workerA)
+        .where('recipient_id', '=', world.workerB)
+        .where('key', '=', idempotencyKey)
+        .execute();
+      expect(idempRows.length).toBe(1);
+    });
+
+    it('AC4: DIFFERENT senders + same (recipient, key) → both persist as distinct messages, neither replayed', async () => {
+      const { sender } = buildSender(world);
+      const idempotencyKey = 'pry-027-cross-sender-same-recipient';
+      const workerC = await spawnExtraWorkerWithCell('worker-c-cross-sender');
+
+      const fromA = await sender.sendMessage({
+        callerContext: buildContext(world, world.workerA),
+        recipientId: workerC,
+        type: 'request',
+        body: 'from-A',
+        idempotencyKey,
+      });
+      const fromB = await sender.sendMessage({
+        callerContext: buildContext(world, world.workerB),
+        recipientId: workerC,
+        type: 'request',
+        body: 'from-B',
+        idempotencyKey,
+      });
+
+      expect(fromA.replayed).toBe(false);
+      expect(fromB.replayed).toBe(false);
+      expect(fromA.messageId).not.toBe(fromB.messageId);
+
+      const idempRows = await world.db
+        .selectFrom('idempotency_keys')
+        .selectAll()
+        .where('recipient_id', '=', workerC)
+        .where('key', '=', idempotencyKey)
+        .execute();
+      expect(idempRows.length).toBe(2);
+      expect(idempRows.map((r) => r.sender_id).sort()).toEqual(
+        [world.workerA, world.workerB].sort(),
+      );
+    });
+
+    it('AC5: two concurrent senders to the SAME recipient with the SAME key → no collision, both responses consistent', async () => {
+      // Different senders to the same recipient with the same key — by the new
+      // PK these are TWO independent rows (no race). This test confirms the
+      // 3-column PK does not collide cross-sender even under concurrency.
+      const { sender } = buildSender(world);
+      const idempotencyKey = `pry-027-concurrent-${uuidv7()}`;
+      const workerC = await spawnExtraWorkerWithCell('worker-c-concurrent');
+
+      const [fromA, fromB] = await Promise.all([
+        sender.sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: workerC,
+          type: 'request',
+          body: 'from-A',
+          idempotencyKey,
+        }),
+        sender.sendMessage({
+          callerContext: buildContext(world, world.workerB),
+          recipientId: workerC,
+          type: 'request',
+          body: 'from-B',
+          idempotencyKey,
+        }),
+      ]);
+
+      // Two distinct messages, neither replayed — different sender_id rows.
+      expect(fromA.messageId).not.toBe(fromB.messageId);
+      expect(fromA.replayed).toBe(false);
+      expect(fromB.replayed).toBe(false);
+
+      const messageRows = await world.db
+        .selectFrom('messages')
+        .selectAll()
+        .where('to_participant_id', '=', workerC)
+        .execute();
+      expect(messageRows.length).toBe(2);
+    });
+
+    it('AC6: rows can be deleted by created_at — purge mechanism still functional under the new schema', async () => {
+      // The new PK preserves the idx_idempotency_keys_created index; a future
+      // purge job will DELETE WHERE created_at < cutoff. This test guards the
+      // post-migration shape: a manual DELETE by created_at still works.
+      const { sender } = buildSender(world);
+      const ctx = buildContext(world, world.workerA);
+
+      await sender.sendMessage({
+        callerContext: ctx,
+        recipientId: world.workerB,
+        type: 'request',
+        body: 'msg-to-purge',
+        idempotencyKey: 'pry-027-purge-target',
+      });
+
+      const futureCutoff = new Date('2099-01-01T00:00:00.000Z').toISOString();
+      const result = await world.db
+        .deleteFrom('idempotency_keys')
+        .where('created_at', '<', futureCutoff)
+        .executeTakeFirst();
+
+      expect((result.numDeletedRows ?? 0n) > 0n).toBe(true);
+
+      const remaining = await world.db
+        .selectFrom('idempotency_keys')
+        .select((eb) => eb.fn.countAll().as('n'))
+        .executeTakeFirst();
+      expect(Number(remaining?.n ?? 0)).toBe(0);
     });
   });
 });
