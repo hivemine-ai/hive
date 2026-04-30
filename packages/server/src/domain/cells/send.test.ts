@@ -4,6 +4,7 @@ import { v7 as uuidv7 } from 'uuid';
 import type { Kysely } from 'kysely';
 
 import type { IdentityContext, UUIDv7 } from '#domain/auth/types.js';
+import type { Logger } from '#observability/logger.js';
 import { createDb } from '#persistence/db.js';
 import { migrateToLatest } from '#persistence/migrate.js';
 import type { Database } from '#persistence/schema.js';
@@ -154,6 +155,7 @@ function buildSender(
     config?: Partial<SenderConfig>;
     now?: () => Date;
     onEmitError?: (err: unknown) => void;
+    logger?: Logger;
   } = {},
 ): SenderHarness {
   const visibility = options.visibility ?? ALWAYS_ALLOW;
@@ -165,6 +167,7 @@ function buildSender(
     ...(options.config !== undefined ? { config: options.config } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.onEmitError !== undefined ? { onEmitError: options.onEmitError } : {}),
+    ...(options.logger !== undefined ? { logger: options.logger } : {}),
   });
   return { sender, visibility };
 }
@@ -750,5 +753,117 @@ describe('createSender / sendMessage', () => {
       expect(idempRows.length).toBe(1);
       expect(idempRows[0]?.message_id).toBe(first.messageId);
     });
+  });
+});
+
+// PRY-025 — TTL deferral schema-only formalization (closes INC-2026-001 #3 per
+// ADR-016). The Sender surfaces an info-level event the first time `ttl_ms` is
+// accepted from a caller, so operators relying on retention via `ttl_ms`
+// realise it has no effect in v0.1 OSS. The flag is per-Sender (= per-process
+// in production) and silent on subsequent sends.
+describe('createSender / cell_ttl_no_enforce warn (PRY-025, ADR-016)', () => {
+  let world: SendWorld;
+
+  beforeEach(async () => {
+    world = await seedSendWorld();
+  });
+
+  afterEach(async () => {
+    await world.db.destroy();
+  });
+
+  function captureLogger(): { logger: Logger; infoCalls: Array<{ obj: unknown; msg: unknown }> } {
+    const infoCalls: Array<{ obj: unknown; msg: unknown }> = [];
+    const noop = () => {};
+    const logger = {
+      info: (obj: unknown, msg?: unknown) => {
+        infoCalls.push({ obj, msg });
+      },
+      warn: noop,
+      error: noop,
+      debug: noop,
+      trace: noop,
+      fatal: noop,
+    } as unknown as Logger;
+    return { logger, infoCalls };
+  }
+
+  it('AC5a: emits cell_ttl_no_enforce exactly once on the first ttl_ms > 0 send', async () => {
+    const { logger, infoCalls } = captureLogger();
+    const { sender } = buildSender(world, { logger });
+    const ctx = buildContext(world, world.workerA);
+
+    await sender.sendMessage({
+      callerContext: ctx,
+      recipientId: world.workerB,
+      type: 'request',
+      body: 'first-with-ttl',
+      ttl: 60_000,
+    });
+
+    const ttlEvents = infoCalls.filter(
+      (c) =>
+        typeof c.obj === 'object' &&
+        c.obj !== null &&
+        (c.obj as { event?: unknown }).event === 'cell_ttl_no_enforce',
+    );
+    expect(ttlEvents.length).toBe(1);
+  });
+
+  it('AC5b: does NOT re-emit cell_ttl_no_enforce on subsequent ttl_ms > 0 sends (per-process flag)', async () => {
+    const { logger, infoCalls } = captureLogger();
+    const { sender } = buildSender(world, { logger });
+    const ctx = buildContext(world, world.workerA);
+
+    await sender.sendMessage({
+      callerContext: ctx,
+      recipientId: world.workerB,
+      type: 'request',
+      body: 'first-with-ttl',
+      ttl: 60_000,
+    });
+    await sender.sendMessage({
+      callerContext: ctx,
+      recipientId: world.workerB,
+      type: 'request',
+      body: 'second-with-ttl',
+      ttl: 30_000,
+    });
+    await sender.sendMessage({
+      callerContext: ctx,
+      recipientId: world.workerB,
+      type: 'request',
+      body: 'third-with-ttl',
+      ttl: 1,
+    });
+
+    const ttlEvents = infoCalls.filter(
+      (c) =>
+        typeof c.obj === 'object' &&
+        c.obj !== null &&
+        (c.obj as { event?: unknown }).event === 'cell_ttl_no_enforce',
+    );
+    expect(ttlEvents.length).toBe(1);
+  });
+
+  it('AC5c: does NOT emit cell_ttl_no_enforce when ttl_ms is omitted', async () => {
+    const { logger, infoCalls } = captureLogger();
+    const { sender } = buildSender(world, { logger });
+    const ctx = buildContext(world, world.workerA);
+
+    await sender.sendMessage({
+      callerContext: ctx,
+      recipientId: world.workerB,
+      type: 'request',
+      body: 'no-ttl',
+    });
+
+    const ttlEvents = infoCalls.filter(
+      (c) =>
+        typeof c.obj === 'object' &&
+        c.obj !== null &&
+        (c.obj as { event?: unknown }).event === 'cell_ttl_no_enforce',
+    );
+    expect(ttlEvents.length).toBe(0);
   });
 });

@@ -600,3 +600,104 @@ describe('readMailbox — filter.from (PRY-020, INC-2026-001 #1)', () => {
     expect(onlyDeliveredFromA.map((mv) => mv.id)).toEqual([fromADelivered]);
   });
 });
+
+// PRY-025 — TTL deferral schema-only formalization (closes INC-2026-001 #3 per
+// ADR-016). v0.1 OSS accepts `ttl_ms` for forward-compat but does NOT enforce
+// it: no expiration job, no transition to `expired`, no on-read filtering by
+// TTL. The retention is effectively infinite, aligned with the default Cell
+// retention policy. The four tests below lock in the documented contract so a
+// future commit cannot silently re-introduce partial enforcement (or break the
+// expectation of infinite retention) without CI flagging it.
+describe('TTL deferral lock-in (PRY-025, ADR-016, INC-2026-001 #3)', () => {
+  let world: ReadWorld;
+
+  beforeEach(async () => {
+    world = await seedReadWorld();
+  });
+
+  afterEach(async () => {
+    await world.db.destroy();
+  });
+
+  /**
+   * Inserts a delivered message with `ttl: 1` (1 ms) and a `sentAt` far in the
+   * past, so that under any v0.2+ enforcement semantics the message would be
+   * unambiguously expired by the time the assertion runs. The v0.1 contract is
+   * the opposite: the message stays visible regardless of how long ago `sentAt`
+   * is — `ttl_ms` is persisted but never inspected on read.
+   */
+  async function insertMessageWithExpiredTtl(
+    cellId: UUIDv7,
+    fromId: UUIDv7,
+    toId: UUIDv7,
+  ): Promise<UUIDv7> {
+    const id = uuidv7();
+    const farPast = new Date('2020-01-01T00:00:00.000Z');
+    await world.cellsRepo.insertMessage({
+      id,
+      cellId,
+      fromParticipantId: fromId,
+      toParticipantId: toId,
+      type: 'notification',
+      body: 'pry-025 ttl-1ms',
+      action: null,
+      replyTo: null,
+      ttl: 1,
+      sentAt: farPast,
+      deliveredAt: farPast,
+      readAt: null,
+      state: 'delivered',
+      expiredAt: null,
+    });
+    return id;
+  }
+
+  it('AC1: readMailbox returns a message with ttl_ms=1 long after sentAt+ttl_ms (no on-read TTL filter)', async () => {
+    const id = await insertMessageWithExpiredTtl(world.cellB, world.workerA, world.workerB);
+    const reader = buildReader(world);
+
+    const result = await reader.readMailbox({
+      callerContext: buildContext(world, world.workerB),
+    });
+
+    expect(result.map((mv) => mv.id)).toContain(id);
+  });
+
+  it('AC2: state of a message with ttl_ms=1 is never `expired` in v0.1 (no transition path)', async () => {
+    const id = await insertMessageWithExpiredTtl(world.cellB, world.workerA, world.workerB);
+
+    const row = await world.db
+      .selectFrom('messages')
+      .select(['state', 'expired_at'])
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+
+    // The set of states reachable in v0.1 OSS is exactly {sent, delivered, read}.
+    // `expired` is a sentinel of the schema, written to the wire shape only by
+    // the v0.2+ sweep job (deferred). If a future commit ever flips this row
+    // to `expired`, this test fails — surfacing the contract drift.
+    expect(['sent', 'delivered', 'read']).toContain(row.state);
+    expect(row.state).not.toBe('expired');
+    expect(row.expired_at).toBeNull();
+  });
+
+  it('AC3: findMessageById returns a message with ttl_ms=1 long after sentAt+ttl_ms', async () => {
+    const id = await insertMessageWithExpiredTtl(world.cellB, world.workerA, world.workerB);
+
+    const found = await world.cellsRepo.findMessageById(id, world.cellB);
+
+    expect(found).not.toBeNull();
+    expect(found?.id).toBe(id);
+    expect(found?.ttl).toBe(1);
+    expect(found?.expiredAt).toBeNull();
+  });
+
+  it('AC4: summarizeUnreadForCell counts a message with ttl_ms=1 long after sentAt+ttl_ms', async () => {
+    await insertMessageWithExpiredTtl(world.cellB, world.workerA, world.workerB);
+
+    const summary = await world.cellsRepo.summarizeUnreadForCell(world.cellB);
+
+    expect(summary.unreadCount).toBe(1);
+    expect(summary.distinctSenderIds).toEqual([world.workerA]);
+  });
+});

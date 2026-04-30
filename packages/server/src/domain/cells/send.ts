@@ -105,6 +105,13 @@ export function createSender(deps: SenderDeps): Sender {
   const config: SenderConfig = { ...DEFAULT_SENDER_CONFIG, ...(deps.config ?? {}) };
   const now = deps.now ?? (() => new Date());
 
+  // PRY-025 / ADR-016: surface to operators that v0.1 OSS accepts `ttl_ms` for
+  // forward-compat but does NOT enforce it. Per-instance flag so the info-level
+  // event fires once per Sender (= once per process in production, since the
+  // composition root creates a single Sender at startup) while remaining
+  // testable (each test builds a fresh Sender with a fresh closure).
+  let ttlNoEnforceWarningEmitted = false;
+
   async function idempotencyLookup(
     senderId: UUIDv7,
     key: string,
@@ -157,6 +164,18 @@ export function createSender(deps: SenderDeps): Sender {
 
     const sentAt = now();
     validateTtl(input.ttl, sentAt);
+
+    // After validateTtl, `input.ttl !== undefined` implies `ttl > 0`. Surface
+    // ADR-016 status once per process so operators relying on retention via
+    // `ttl_ms` realise it has no effect in v0.1 OSS. Info level per ADR-013 —
+    // this is documented status, not a recoverable anomaly.
+    if (input.ttl !== undefined && !ttlNoEnforceWarningEmitted) {
+      ttlNoEnforceWarningEmitted = true;
+      deps.logger?.info(
+        { event: 'cell_ttl_no_enforce' },
+        'ttl_ms accepted but not enforced in v0.1 OSS per ADR-016. Effective retention is infinite. Implementation deferred to v0.2+.',
+      );
+    }
 
     const senderId = input.callerContext.participantId;
 
