@@ -900,7 +900,17 @@ describe('createSender / sendMessage', () => {
       );
     });
 
-    it('AC5: two concurrent senders to the SAME recipient with the SAME key → no collision, both responses consistent', async () => {
+    // Note on AC5 coverage: the PRY spec defines AC5 as the same-sender
+    // concurrent case (two simultaneous sends from the SAME sender to the SAME
+    // recipient with the SAME key, exercising the IdempotencyConflictSentinel
+    // + winner-lookup branch in send.ts:277-295). That path is covered by the
+    // pre-existing test 'two concurrent sendMessage with the same
+    // idempotencyKey' at line 711 (in `concurrency (PRY-010)`), which was
+    // adjusted in this PR to use the new 3-column schema (recipient_id added
+    // at line 753). The test below complements it by validating the
+    // *cross-sender* concurrent path under the new PK — different sender_ids
+    // produce two independent rows even under Promise.all concurrency.
+    it('AC5 (cross-sender complement): two concurrent senders to the same recipient with the same key → no collision', async () => {
       // Different senders to the same recipient with the same key — by the new
       // PK these are TWO independent rows (no race). This test confirms the
       // 3-column PK does not collide cross-sender even under concurrency.
