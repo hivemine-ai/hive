@@ -10,7 +10,7 @@ export const SendMessageInputSchema = z
     recipient: z.string().min(1),
     type: z.enum(['request', 'response', 'notification']),
     body: z.string().min(1),
-    action: z.record(z.unknown()).optional(),
+    action: z.record(z.unknown()).nullish(),
     reply_to: z.string().optional(),
     ttl_ms: z.number().int().positive().optional(),
     idempotency_key: z.string().optional(),
@@ -47,7 +47,7 @@ export function createSendMessageHandler(deps: SendMessageDeps) {
       type: input.type,
       body: input.body,
     };
-    if (input.action !== undefined) sendInput.action = input.action;
+    if (input.action != null) sendInput.action = input.action;
     if (input.reply_to !== undefined) sendInput.replyTo = input.reply_to;
     if (input.ttl_ms !== undefined) sendInput.ttl = input.ttl_ms;
     if (input.idempotency_key !== undefined) sendInput.idempotencyKey = input.idempotency_key;
