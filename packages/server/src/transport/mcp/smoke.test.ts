@@ -828,6 +828,143 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     expect(body.error?.code).toBe(-32602);
     expect(body.error?.message).toMatch(/invalid input/);
   });
+
+  it('PRY-029 AC-1 (+ N1 from PRY-028): tools/list exposes exactly 7 tools and includes list_agents', async () => {
+    const initA = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'smoke-list-agents', version: '0.1' },
+      },
+    });
+    const sessionA = initA.sessionId as string;
+    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
+
+    const listRpc = await rpc(
+      world.baseUrl,
+      world.jwtA,
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      sessionA,
+    );
+    const result = listRpc.body?.result as { tools: Array<{ name: string }> };
+    expect(result.tools).toBeDefined();
+    expect(result.tools.length).toBe(7);
+    const names = result.tools.map((t) => t.name).sort();
+    expect(names).toEqual([
+      'check_unread_messages',
+      'get_agent_config',
+      'list_agents',
+      'mark_read',
+      'read_mailbox',
+      'reply_to',
+      'send_message',
+    ]);
+  });
+
+  it('PRY-029 AC-2 + AC-9: list_agents returns visible agents with the wire shape and excludes hivekeepers', async () => {
+    const initA = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'smoke-list-agents-happy', version: '0.1' },
+      },
+    });
+    const sessionA = initA.sessionId as string;
+    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
+
+    const listAgentsRpc = await rpc(
+      world.baseUrl,
+      world.jwtA,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'list_agents', arguments: {} },
+      },
+      sessionA,
+    );
+
+    const listView = parseToolResult<{
+      agents: Array<{
+        id: string;
+        name: string;
+        type: 'worker' | 'scout';
+        owner_id: string;
+        state: 'active' | 'suspended';
+        capabilities: string[];
+      }>;
+      next_cursor: string | null;
+    }>(listAgentsRpc);
+
+    // Same-owner workers see each other in the directory; hivekeepers never appear.
+    const ids = listView.agents.map((a) => a.id).sort();
+    expect(ids).toEqual([world.workerAId, world.workerBId].sort());
+    expect(listView.next_cursor).toBeNull();
+
+    // AC-9: each agent has exactly the wire field set, types are correct.
+    for (const agent of listView.agents) {
+      expect(Object.keys(agent).sort()).toEqual([
+        'capabilities',
+        'id',
+        'name',
+        'owner_id',
+        'state',
+        'type',
+      ]);
+      expect(agent.type).toBe('worker');
+      expect(agent.state).toBe('active');
+      expect(Array.isArray(agent.capabilities)).toBe(true);
+    }
+  });
+
+  it('PRY-029 AC-3 + AC-5: filter type=worker and capability propagate to the list', async () => {
+    const initA = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'smoke-list-agents-filter', version: '0.1' },
+      },
+    });
+    const sessionA = initA.sessionId as string;
+    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
+
+    // Filter by capability that workerA has but no other agent declares.
+    const listRpc = await rpc(
+      world.baseUrl,
+      world.jwtA,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'list_agents',
+          arguments: { filter: { type: 'worker', capability: 'cell.send' } },
+        },
+      },
+      sessionA,
+    );
+
+    const listView = parseToolResult<{
+      agents: Array<{ id: string; type: string; capabilities: string[] }>;
+      next_cursor: string | null;
+    }>(listRpc);
+
+    // Both workers declare 'cell.send' so both should match.
+    expect(listView.agents.length).toBe(2);
+    for (const agent of listView.agents) {
+      expect(agent.type).toBe('worker');
+      expect(agent.capabilities).toContain('cell.send');
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

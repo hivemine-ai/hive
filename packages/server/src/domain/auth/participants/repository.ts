@@ -1,6 +1,9 @@
 // Participants repository — read functions for Slice 0 (milestone 11).
-// Write functions (createHivekeeper, createAgent, revokeAgent, listAgents,
-// listHivekeepers) are added in block 3 (milestones 15-18).
+// Write functions (createHivekeeper, createAgent, revokeAgent, listHivekeepers,
+// revokeHivekeeperWithCascade) live in repository.write.ts. listAgents lives here
+// even though it was added together with the write functions in PRY-002 — it does
+// not require an admin caller and is consumed by the MCP `list_agents` tool which
+// is a pure read operation. Relocated here in PRY-029.
 
 import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
 
@@ -13,7 +16,7 @@ import type {
   HivesTable,
   ColoniesTable,
 } from '#persistence/schema.js';
-import type { UUIDv7 } from '../types.js';
+import type { ParticipantState, UUIDv7 } from '../types.js';
 
 import type {
   Agent,
@@ -23,6 +26,39 @@ import type {
   Participant,
   ParticipantStateSummary,
 } from './entities.js';
+
+// ---------- Pagination + listing types (used by listAgents and listHivekeepers) ----------
+
+/**
+ * Composite keyset cursor for paginated listings ordered by `(created_at DESC, id DESC)`.
+ * Stable under concurrent inserts (UUID v7 is monotonic and `created_at` is set at INSERT
+ * time). Wire-side serialization is the caller's responsibility — the repo treats this
+ * as an opaque value.
+ */
+export interface AuditCursor {
+  createdAt: Date;
+  id: UUIDv7;
+}
+
+export interface ListAgentsFilter {
+  hiveId: UUIDv7;
+  ownerId?: UUIDv7;
+  type?: 'worker' | 'scout';
+  state?: ParticipantState;
+  /**
+   * Substring match against the JSON-stringified `capabilities` text column. Cross-
+   * dialect via `LIKE '%' || ? || '%'`. False positives are possible if the query
+   * string contains JSON-meta characters (`"`, `\`, `[`, `]`, `,`) — accepted as
+   * v0.1 simplicity cost; flag for v0.2 push-down (`array_contains` or similar).
+   */
+  capability?: string;
+  pagination: { cursor: AuditCursor | null; limit: number };
+}
+
+export interface ListAgentsResult {
+  agents: Agent[];
+  nextCursor: AuditCursor | null;
+}
 
 // ---------- Row → entity mappers ----------
 
@@ -111,12 +147,32 @@ export interface ParticipantsReadRepo {
   findById(id: UUIDv7, executor?: DbExecutor): Promise<Participant | null>;
   /** Minimal projection for hot paths (verifier step 6/7, pre-conditions). */
   getParticipantState(id: UUIDv7): Promise<ParticipantStateSummary | null>;
+  /**
+   * Lists agents in a hive with optional filters and keyset pagination ordered by
+   * `(created_at DESC, id DESC)`. Consumed by the MCP `list_agents` tool — the
+   * handler is responsible for projecting `Agent[]` to the wire `AgentSummary`
+   * shape and for serializing `AuditCursor` to an opaque string.
+   */
+  listAgents(filter: ListAgentsFilter): Promise<ListAgentsResult>;
+}
+
+export interface ParticipantsReadRepoOptions {
+  /**
+   * Server-side cap on `pagination.limit` for `listAgents`. The handler in the MCP
+   * transport applies its own zod-level cap from `HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE`
+   * — this option exists for repo-level tests that want to exercise pagination with
+   * a smaller cap without depending on env vars. Defaults to 200 (loose enough that
+   * the wire cap of 100 is the binding constraint in production).
+   */
+  listMaxPageSize?: number;
 }
 
 export function createParticipantsReadRepo(
   db: Kysely<Database>,
   dialect: DbDialect = 'sqlite',
+  opts: ParticipantsReadRepoOptions = {},
 ): ParticipantsReadRepo {
+  const listMaxPageSize = opts.listMaxPageSize ?? 200;
   // Dialect-aware substring index (1-based) of the first `@` in `email`.
   // INSTR is SQLite-only; STRPOS is Postgres-only — kept as `sql` fragments so
   // Kysely passes them through verbatim and the planner picks the right path.
@@ -199,6 +255,51 @@ export function createParticipantsReadRepo(
         return { kind: 'agent', agent: rowToAgent(agRow) };
       }
       return null;
+    },
+
+    async listAgents(filter): Promise<ListAgentsResult> {
+      const limit = Math.min(filter.pagination.limit, listMaxPageSize);
+
+      let query = db.selectFrom('agents').selectAll().where('hive_id', '=', filter.hiveId);
+      if (filter.ownerId !== undefined) {
+        query = query.where('owner_id', '=', filter.ownerId);
+      }
+      if (filter.type !== undefined) {
+        query = query.where('type', '=', filter.type);
+      }
+      if (filter.state !== undefined) {
+        query = query.where('state', '=', filter.state);
+      }
+      if (filter.capability !== undefined) {
+        // Substring match against the JSON-stringified capabilities array. `LIKE`
+        // is portable across SQLite and Postgres. False positives possible for
+        // strings that contain JSON meta-chars — documented in the field's JSDoc.
+        query = query.where('capabilities', 'like', `%${filter.capability}%`);
+      }
+      if (filter.pagination.cursor) {
+        const cursorIso = filter.pagination.cursor.createdAt.toISOString();
+        const cursorId = filter.pagination.cursor.id;
+        // Keyset: rows strictly older than the cursor's (created_at, id).
+        query = query.where((eb) =>
+          eb.or([
+            eb('created_at', '<', cursorIso),
+            eb.and([eb('created_at', '=', cursorIso), eb('id', '<', cursorId)]),
+          ]),
+        );
+      }
+      query = query
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .limit(limit + 1);
+
+      const rows = await query.execute();
+      const hasMore = rows.length > limit;
+      const trimmed = hasMore ? rows.slice(0, limit) : rows;
+      const agents = trimmed.map(rowToAgent);
+      const last = agents.at(-1);
+      const nextCursor: AuditCursor | null =
+        hasMore && last ? { createdAt: last.createdAt, id: last.id } : null;
+      return { agents, nextCursor };
     },
 
     async getParticipantState(id) {

@@ -2,7 +2,7 @@
 
 The Hive MCP server exposes the Auth, Cell Store, Visibility, Audit, and Waggle subsystems behind a Model Context Protocol (MCP) Streamable HTTP transport. Client agents speak JSON-RPC over HTTP to call tools and receive push notifications via SSE.
 
-> **Status:** v0.1 ships Slice 0 (5 tools) plus `reply_to` from Slice 2. The remaining two tools (`list_agents`, `get_agent_status`) land via PRY-029 / PRY-030.
+> **Status:** v0.1 ships Slice 0 (5 tools) plus `reply_to` and `list_agents` from Slice 2. The remaining tool (`get_agent_status`) lands via PRY-030.
 
 ## Quick start
 
@@ -60,13 +60,14 @@ A missing or invalid Bearer returns HTTP 401 with a JSON-RPC error body:
 
 ### Tools
 
-The server registers 6 tools in v0.1 (5 from Slice 0 + `reply_to` from Slice 2):
+The server registers 7 tools in v0.1 (5 from Slice 0 + `reply_to` + `list_agents` from Slice 2):
 
 | Tool                    | Purpose                                                                                                                                                                               |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `get_agent_config`      | Returns the calling participant's identity, hive, colony, and capabilities.                                                                                                           |
 | `send_message`          | Sends a message from the caller to a recipient (UUID v7, email, agent reference, or `self`).                                                                                          |
 | `reply_to`              | Sends a reply to the original sender of a message in the caller's cell. Recipient is derived from the referenced message; the wire `reply_to` field is propagated to the new message. |
+| `list_agents`           | Lists agents (workers and scouts) in the hive visible to the caller per the visibility matrix, with optional filters by `type` / `owner` / `capability` and keyset pagination.        |
 | `read_mailbox`          | Reads messages from the caller's cell, with optional state / type / sender filters and keyset pagination.                                                                             |
 | `mark_read`             | Marks a batch of message ids as read. Returns `marked` + `ignored` arrays for idempotent client logic.                                                                                |
 | `check_unread_messages` | Returns the count of delivered (unread) messages and the distinct senders.                                                                                                            |
@@ -203,6 +204,7 @@ TLS termination is the operator's responsibility — run the server behind nginx
 | `HIVE_MCP_RECHECK_SENDER_STATE`           | `true`         | Toggle the `requireActiveSender` middleware. Disable only in performance-critical deployments where you accept that a revoked sender may make a few tool calls before the next domain check catches them. |
 | `HIVE_MCP_READYZ_DB_TIMEOUT_MS`           | `500`          | DB ping timeout for `GET /readyz`.                                                                                                                                                                        |
 | `HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` | `30`           | Max time to drain in-flight requests on SIGTERM/SIGINT.                                                                                                                                                   |
+| `HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE`      | `100`          | Hard cap server-side for `list_agents.pagination.limit`. The zod schema also enforces a `100` literal cap; this env var is the runtime authority and may be set lower.                                    |
 | `HIVE_AUTH_KEYS_DIR`                      | `./keys`       | Where to load the signing keypairs from.                                                                                                                                                                  |
 
 ### Presence (session lifecycle)
@@ -225,7 +227,7 @@ The server also reads the env vars defined by the Auth, Cell Store, Visibility, 
 | `-32004`      | Recipient not reachable. Cell closed, recipient missing, or visibility denied (the wire never distinguishes these reasons — privacy uniformity). |
 | `-32602`      | Invalid params. Zod validation failed, or domain-side `INVALID_INPUT`.                                                                           |
 | `-32603`      | Internal error. Something unexpected happened — check the server logs.                                                                           |
-| `-32601`      | Method not found. The tool name is not in the catalog (e.g. trying to call `list_agents` or `get_agent_status` while still in Slice 2 work).     |
+| `-32601`      | Method not found. The tool name is not in the catalog (e.g. trying to call `get_agent_status` while still in Slice 2 work).                      |
 
 The semantic `subCode` (e.g. `cell_closed_or_missing`, `visibility_denied`) is **never** sent to the client — it lives in the structured logs only.
 

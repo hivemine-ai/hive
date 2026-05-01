@@ -1,5 +1,7 @@
 // Participants repository — write functions for Slice 0 (Hitos 15-18).
 // Read functions live in repository.ts and are exposed via createParticipantsReadRepo.
+// `listAgents` was relocated to repository.ts in PRY-029 — it does not require an
+// admin caller and is consumed by the read-only MCP `list_agents` tool.
 //
 // Per ADR-007: every admin operation accepts `caller: CallerContext`. The auth check
 // (admin flag) is delegated to requireAdminCaller; domain invariants are enforced ALWAYS.
@@ -17,10 +19,11 @@ import {
 import type { AgentsTable, Database, HivekeepersTable } from '#persistence/schema.js';
 import { requireAdminCaller, type CallerContext } from '../caller-context.js';
 import { AuthError } from '../errors.js';
-import type { ParticipantState, UUIDv7 } from '../types.js';
+import type { UUIDv7 } from '../types.js';
 
 import type { Agent, Hivekeeper } from './entities.js';
 import { noopCellsHook, type CellsRepoHook } from './cells-hook.js';
+import type { AuditCursor } from './repository.js';
 
 // ---------- Shared mappers (kept local to the write module to avoid circular import) ----------
 
@@ -78,24 +81,6 @@ export interface CreateAgentInput {
 const CAPABILITIES_MAX_ELEMENTS = 64;
 const CAPABILITY_MAX_LENGTH = 128;
 
-export interface AuditCursor {
-  createdAt: Date;
-  id: UUIDv7;
-}
-
-export interface ListAgentsFilter {
-  hiveId: UUIDv7;
-  ownerId?: UUIDv7;
-  type?: 'worker' | 'scout';
-  state?: ParticipantState;
-  pagination: { cursor: AuditCursor | null; limit: number };
-}
-
-export interface ListAgentsResult {
-  agents: Agent[];
-  nextCursor: AuditCursor | null;
-}
-
 export interface ListHivekeepersFilter {
   hiveId: UUIDv7;
   state?: 'active' | 'revoked';
@@ -127,12 +112,11 @@ export interface ParticipantsWriteRepo {
    * error.
    */
   revokeHivekeeperWithCascade(id: UUIDv7, caller: CallerContext): Promise<RevokeHivekeeperResult>;
-  listAgents(filter: ListAgentsFilter): Promise<ListAgentsResult>;
   listHivekeepers(filter: ListHivekeepersFilter): Promise<ListHivekeepersResult>;
 }
 
 export interface ParticipantsWriteRepoOptions {
-  // Cap server-side. Per ADR-008 / spec env var HIVE_AUTH_LISTAGENTS_MAX_PAGE_SIZE.
+  // Cap server-side for `listHivekeepers`. Defaults to 200.
   listMaxPageSize?: number;
   // Cross-domain hook into Cell Store. In Slice 0 (PRY-002), defaults to noopCellsHook;
   // PRY-003 will wire the real one at composition root.
@@ -411,45 +395,6 @@ export function createParticipantsWriteRepo(
           closedCellIds: closedRows.map((r) => r.id),
         };
       });
-    },
-
-    async listAgents(filter): Promise<ListAgentsResult> {
-      const limit = Math.min(filter.pagination.limit, listMaxPageSize);
-
-      let query = db.selectFrom('agents').selectAll().where('hive_id', '=', filter.hiveId);
-      if (filter.ownerId !== undefined) {
-        query = query.where('owner_id', '=', filter.ownerId);
-      }
-      if (filter.type !== undefined) {
-        query = query.where('type', '=', filter.type);
-      }
-      if (filter.state !== undefined) {
-        query = query.where('state', '=', filter.state);
-      }
-      if (filter.pagination.cursor) {
-        const cursorIso = dateToIso(filter.pagination.cursor.createdAt);
-        const cursorId = filter.pagination.cursor.id;
-        // Keyset: rows strictly older than the cursor's (created_at, id).
-        query = query.where((eb) =>
-          eb.or([
-            eb('created_at', '<', cursorIso),
-            eb.and([eb('created_at', '=', cursorIso), eb('id', '<', cursorId)]),
-          ]),
-        );
-      }
-      query = query
-        .orderBy('created_at', 'desc')
-        .orderBy('id', 'desc')
-        .limit(limit + 1);
-
-      const rows = await query.execute();
-      const hasMore = rows.length > limit;
-      const trimmed = hasMore ? rows.slice(0, limit) : rows;
-      const agents = trimmed.map(rowToAgent);
-      const last = agents.at(-1);
-      const nextCursor: AuditCursor | null =
-        hasMore && last ? { createdAt: last.createdAt, id: last.id } : null;
-      return { agents, nextCursor };
     },
 
     async listHivekeepers(filter): Promise<ListHivekeepersResult> {

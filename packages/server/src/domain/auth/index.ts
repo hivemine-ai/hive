@@ -41,7 +41,13 @@ export type {
 } from './participants/entities.js';
 
 export { createParticipantsReadRepo } from './participants/repository.js';
-export type { ParticipantsReadRepo } from './participants/repository.js';
+export type {
+  AuditCursor,
+  ListAgentsFilter,
+  ListAgentsResult,
+  ParticipantsReadRepo,
+  ParticipantsReadRepoOptions,
+} from './participants/repository.js';
 
 export { loadBlocklist } from './credentials/blocklist.js';
 export type { AddRevocationInput, Blocklist } from './credentials/blocklist.js';
@@ -60,11 +66,8 @@ export type { Revoker, RevokerDeps, RevokeCredentialInput } from './credentials/
 
 export { createParticipantsWriteRepo } from './participants/repository.write.js';
 export type {
-  AuditCursor,
   CreateAgentInput,
   CreateHivekeeperInput,
-  ListAgentsFilter,
-  ListAgentsResult,
   ListHivekeepersFilter,
   ListHivekeepersResult,
   ParticipantsWriteRepo,

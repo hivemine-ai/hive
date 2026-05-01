@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
+import type { CallerContext } from '../caller-context.js';
 import { createParticipantsReadRepo } from './repository.js';
+import { createParticipantsWriteRepo } from './repository.write.js';
+
+const SYSTEM_CALLER: CallerContext = { kind: 'system', osUser: 'tests' };
 
 describe('participants read repository', () => {
   let world: SeedWorld;
@@ -140,5 +144,183 @@ describe('participants read repository', () => {
     expect(scout?.kind).toBe('scout');
     expect(scout?.ownerId).toBe(world.adminHivekeeperId);
     expect(scout?.isAdmin).toBeNull();
+  });
+
+  describe('listAgents (keyset pagination)', () => {
+    it('returns active agents for the hive ordered by (created_at DESC, id DESC)', async () => {
+      const writeRepo = createParticipantsWriteRepo(world.db);
+      const readRepo = createParticipantsReadRepo(world.db);
+      // Create extra agents to ensure ordering works.
+      for (let i = 0; i < 5; i++) {
+        await writeRepo.createAgent(
+          {
+            hiveId: world.hiveId,
+            colonyId: world.colonyId,
+            ownerId: world.adminHivekeeperId,
+            name: `pg-worker-${i}`,
+            type: 'worker',
+          },
+          SYSTEM_CALLER,
+        );
+      }
+      const result = await readRepo.listAgents({
+        hiveId: world.hiveId,
+        state: 'active',
+        pagination: { cursor: null, limit: 100 },
+      });
+      // Seeded 2 (worker-1, scout-1) + 5 new = 7.
+      expect(result.agents.length).toBe(7);
+      // Most recently created first.
+      const createdMillis = result.agents.map((a) => a.createdAt.getTime());
+      const sortedDesc = [...createdMillis].sort((a, b) => b - a);
+      expect(createdMillis).toEqual(sortedDesc);
+      expect(result.nextCursor).toBeNull();
+    });
+
+    it('paginates deterministically across multiple pages with >limit rows', async () => {
+      const writeRepo = createParticipantsWriteRepo(world.db);
+      const readRepo = createParticipantsReadRepo(world.db);
+      // Create enough agents to need 3 pages.
+      for (let i = 0; i < 20; i++) {
+        await writeRepo.createAgent(
+          {
+            hiveId: world.hiveId,
+            colonyId: world.colonyId,
+            ownerId: world.adminHivekeeperId,
+            name: `pgw-${i}`,
+            type: 'worker',
+          },
+          SYSTEM_CALLER,
+        );
+      }
+      const seenIds = new Set<string>();
+      let cursor: { createdAt: Date; id: string } | null = null;
+      let pages = 0;
+      do {
+        const page = await readRepo.listAgents({
+          hiveId: world.hiveId,
+          pagination: { cursor, limit: 5 },
+        });
+        for (const a of page.agents) {
+          expect(seenIds.has(a.id)).toBe(false); // no duplicates across pages
+          seenIds.add(a.id);
+        }
+        cursor = page.nextCursor;
+        pages++;
+        if (pages > 10) throw new Error('too many pages — bug?');
+      } while (cursor !== null);
+      // Seeded 2 + 20 new = 22 total agents → 5 pages of 5 + 1 of 2.
+      expect(seenIds.size).toBe(22);
+    });
+
+    it('caps the page size to the server-side max', async () => {
+      const readRepo = createParticipantsReadRepo(world.db, 'sqlite', {
+        listMaxPageSize: 3,
+      });
+      const result = await readRepo.listAgents({
+        hiveId: world.hiveId,
+        pagination: { cursor: null, limit: 100 },
+      });
+      // Max 3 returned; seeded 2 active agents → both fit (<3).
+      expect(result.agents.length).toBeLessThanOrEqual(3);
+    });
+  });
+
+  describe('listAgents capability filter (PRY-029)', () => {
+    it('matches agents whose capabilities array contains the substring', async () => {
+      const writeRepo = createParticipantsWriteRepo(world.db);
+      const readRepo = createParticipantsReadRepo(world.db);
+      // Create three agents with distinct capability sets.
+      await writeRepo.createAgent(
+        {
+          hiveId: world.hiveId,
+          colonyId: world.colonyId,
+          ownerId: world.adminHivekeeperId,
+          name: 'summarizer',
+          type: 'worker',
+          capabilities: ['summarize', 'translate'],
+        },
+        SYSTEM_CALLER,
+      );
+      await writeRepo.createAgent(
+        {
+          hiveId: world.hiveId,
+          colonyId: world.colonyId,
+          ownerId: world.adminHivekeeperId,
+          name: 'classifier',
+          type: 'worker',
+          capabilities: ['classify', 'extract'],
+        },
+        SYSTEM_CALLER,
+      );
+      await writeRepo.createAgent(
+        {
+          hiveId: world.hiveId,
+          colonyId: world.colonyId,
+          ownerId: world.adminHivekeeperId,
+          name: 'multi',
+          type: 'worker',
+          capabilities: ['summarize', 'classify', 'extract'],
+        },
+        SYSTEM_CALLER,
+      );
+
+      const summarizers = await readRepo.listAgents({
+        hiveId: world.hiveId,
+        capability: 'summarize',
+        pagination: { cursor: null, limit: 50 },
+      });
+      const names = summarizers.agents.map((a) => a.name).sort();
+      expect(names).toEqual(['multi', 'summarizer']);
+    });
+
+    it('returns empty result when no agent has the capability', async () => {
+      const readRepo = createParticipantsReadRepo(world.db);
+      const result = await readRepo.listAgents({
+        hiveId: world.hiveId,
+        capability: 'no-such-capability-xyz',
+        pagination: { cursor: null, limit: 50 },
+      });
+      expect(result.agents).toEqual([]);
+      expect(result.nextCursor).toBeNull();
+    });
+
+    it('combines capability filter with type and owner filters', async () => {
+      const writeRepo = createParticipantsWriteRepo(world.db);
+      const readRepo = createParticipantsReadRepo(world.db);
+      await writeRepo.createAgent(
+        {
+          hiveId: world.hiveId,
+          colonyId: world.colonyId,
+          ownerId: world.adminHivekeeperId,
+          name: 'admin-summarizer',
+          type: 'worker',
+          capabilities: ['summarize'],
+        },
+        SYSTEM_CALLER,
+      );
+      await writeRepo.createAgent(
+        {
+          hiveId: world.hiveId,
+          colonyId: world.colonyId,
+          ownerId: world.nonAdminHivekeeperId,
+          name: 'other-summarizer',
+          type: 'worker',
+          capabilities: ['summarize'],
+        },
+        SYSTEM_CALLER,
+      );
+
+      const result = await readRepo.listAgents({
+        hiveId: world.hiveId,
+        type: 'worker',
+        ownerId: world.adminHivekeeperId,
+        capability: 'summarize',
+        pagination: { cursor: null, limit: 50 },
+      });
+      const names = result.agents.map((a) => a.name);
+      expect(names).toContain('admin-summarizer');
+      expect(names).not.toContain('other-summarizer');
+    });
   });
 });

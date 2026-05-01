@@ -24,6 +24,7 @@ import { AuthError, isAuthError } from '#domain/auth/index.js';
 import type { ParticipantsReadRepo, Verifier, IdentityContext } from '#domain/auth/index.js';
 import type { CellsRepo, Reader, Sender } from '#domain/cells/index.js';
 import type { PresenceRegistry } from '#domain/notifications/index.js';
+import type { VisibilityEngine } from '#domain/visibility/index.js';
 import type { Logger } from '#observability/logger.js';
 
 import { mapDomainError, SessionError } from './error-mapper.js';
@@ -39,16 +40,19 @@ export interface McpTransportDeps {
   cellsRepo: CellsRepo;
   sender: Sender;
   reader: Reader;
+  visibilityEngine: VisibilityEngine;
   presenceRegistry: PresenceRegistry;
   logger: Logger;
   serverInfo?: { name: string; version: string };
   instructions?: string;
+  /** Hard cap server-side for `list_agents.pagination.limit`. From HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE. */
+  listAgentsMaxPageSize: number;
 }
 
 export interface McpTransport {
   /** Process-wide session store shared across all per-session McpServer instances. */
   sessionStore: SessionStore;
-  /** Tool catalog (6 tools: 5 from Slice 0 + reply_to from Slice 2 / PRY-028). */
+  /** Tool catalog (7 tools: 5 from Slice 0 + reply_to from Slice 2 / PRY-028 + list_agents from Slice 2 / PRY-029). */
   toolCatalog: ToolDefinition[];
   /** Build a new `McpServer` for a brand-new initialize request. */
   buildMcpServerForSession(): McpServer;
@@ -70,7 +74,7 @@ export interface McpTransport {
 
 const DEFAULT_SERVER_INFO = { name: 'hive', version: '0.1.0-dev' };
 const DEFAULT_INSTRUCTIONS =
-  'Hive v0.1 — agent messaging. Use get_agent_config to learn your identity, send_message or reply_to to talk, check_unread_messages and read_mailbox to receive, mark_read to acknowledge.';
+  'Hive v0.1 — agent messaging. Use get_agent_config to learn your identity, list_agents to discover others, send_message or reply_to to talk, check_unread_messages and read_mailbox to receive, mark_read to acknowledge.';
 
 export function createMcpTransport(deps: McpTransportDeps): McpTransport {
   const sessionStore = createSessionStore();
@@ -89,6 +93,8 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
     sender: deps.sender,
     reader: deps.reader,
     resolver,
+    visibilityEngine: deps.visibilityEngine,
+    maxPageSize: deps.listAgentsMaxPageSize,
   });
 
   // The notifier per session is created lazily inside ensureSessionFor; the
@@ -120,7 +126,7 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
     });
 
     // Use the low-level Server API directly. The high-level `registerTool`
-    // wraps this with parsed-args + zod-shape inference; for our 6 tools the
+    // wraps this with parsed-args + zod-shape inference; for our 7 tools the
     // shape inference is brittle (empty `z.object({})` schemas don't round-trip
     // cleanly), so we own the dispatch and validation.
     const lowLevelServer = mcpServer.server;
