@@ -2,7 +2,7 @@
 
 The Hive MCP server exposes the Auth, Cell Store, Visibility, Audit, and Waggle subsystems behind a Model Context Protocol (MCP) Streamable HTTP transport. Client agents speak JSON-RPC over HTTP to call tools and receive push notifications via SSE.
 
-> **Status:** Slice 0 ships in v0.1. Five tools are live; three more (`reply_to`, `list_agents`, `get_agent_status`) land in Slice 1+.
+> **Status:** v0.1 ships Slice 0 (5 tools) plus `reply_to` from Slice 2. The remaining two tools (`list_agents`, `get_agent_status`) land via PRY-029 / PRY-030.
 
 ## Quick start
 
@@ -60,15 +60,16 @@ A missing or invalid Bearer returns HTTP 401 with a JSON-RPC error body:
 
 ### Tools
 
-The server registers 5 tools in v0.1 Slice 0:
+The server registers 6 tools in v0.1 (5 from Slice 0 + `reply_to` from Slice 2):
 
-| Tool                    | Purpose                                                                                                   |
-| ----------------------- | --------------------------------------------------------------------------------------------------------- |
-| `get_agent_config`      | Returns the calling participant's identity, hive, colony, and capabilities.                               |
-| `send_message`          | Sends a message from the caller to a recipient (UUID v7, email, agent reference, or `self`).              |
-| `read_mailbox`          | Reads messages from the caller's cell, with optional state / type / sender filters and keyset pagination. |
-| `mark_read`             | Marks a batch of message ids as read. Returns `marked` + `ignored` arrays for idempotent client logic.    |
-| `check_unread_messages` | Returns the count of delivered (unread) messages and the distinct senders.                                |
+| Tool                    | Purpose                                                                                                                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_agent_config`      | Returns the calling participant's identity, hive, colony, and capabilities.                                                                                                           |
+| `send_message`          | Sends a message from the caller to a recipient (UUID v7, email, agent reference, or `self`).                                                                                          |
+| `reply_to`              | Sends a reply to the original sender of a message in the caller's cell. Recipient is derived from the referenced message; the wire `reply_to` field is propagated to the new message. |
+| `read_mailbox`          | Reads messages from the caller's cell, with optional state / type / sender filters and keyset pagination.                                                                             |
+| `mark_read`             | Marks a batch of message ids as read. Returns `marked` + `ignored` arrays for idempotent client logic.                                                                                |
+| `check_unread_messages` | Returns the count of delivered (unread) messages and the distinct senders.                                                                                                            |
 
 Tool inputs are validated against a JSON Schema (derived from zod). Refer to `tools/list` from any MCP client to inspect the live schemas. Tool results are returned as `structuredContent` (preferred) plus a JSON-stringified `text` content fallback.
 
@@ -224,7 +225,7 @@ The server also reads the env vars defined by the Auth, Cell Store, Visibility, 
 | `-32004`      | Recipient not reachable. Cell closed, recipient missing, or visibility denied (the wire never distinguishes these reasons — privacy uniformity). |
 | `-32602`      | Invalid params. Zod validation failed, or domain-side `INVALID_INPUT`.                                                                           |
 | `-32603`      | Internal error. Something unexpected happened — check the server logs.                                                                           |
-| `-32601`      | Method not found. The tool name is not in the catalog (e.g. trying to call `reply_to` in v0.1 Slice 0).                                          |
+| `-32601`      | Method not found. The tool name is not in the catalog (e.g. trying to call `list_agents` or `get_agent_status` while still in Slice 2 work).     |
 
 The semantic `subCode` (e.g. `cell_closed_or_missing`, `visibility_denied`) is **never** sent to the client — it lives in the structured logs only.
 
