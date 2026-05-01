@@ -20,6 +20,7 @@ import { runListKeepers } from './commands/hive/list-keepers.js';
 import { runCreateHivekeeper } from './commands/hivekeeper/create.js';
 import { runInit } from './commands/init.js';
 import { performMigrate } from './commands/migrate.js';
+import { parseLogLevel, runServe } from './commands/serve.js';
 import { mapErrorToExit } from './error/handler.js';
 import { asOptionalNumber, asOptionalString, asString, asStringArray } from './input/coerce.js';
 import { parseUuidV7 } from './input/parse-uuid.js';
@@ -132,6 +133,54 @@ export function buildProgram(): BuildProgramResult {
     }
     return stateRef.current;
   }
+
+  // ── serve ─────────────────────────────────────────────────────────────
+  // Foreground MCP server. Reuses the server composition root directly.
+  // Does NOT use the lazy CLI runtime — it owns the full server lifetime
+  // and handles its own SIGINT/SIGTERM shutdown.
+  program
+    .command('serve')
+    .description('Run the Hive MCP server in the foreground (blocks until SIGINT/SIGTERM).')
+    .option('--port <n>', 'HTTP listen port (overrides HIVE_MCP_HTTP_PORT)')
+    .option('--host <addr>', 'HTTP bind address (overrides HIVE_MCP_HTTP_HOST)')
+    .option(
+      '--log-level <level>',
+      "log level: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal'",
+    )
+    .option('--log-pretty', 'force pino-pretty output (overrides HIVE_MCP_LOG_PRETTY)')
+    .action(async (cmdOpts: Record<string, unknown>) => {
+      const portStr = asOptionalString(cmdOpts['port']);
+      const port = portStr === undefined ? undefined : Number(portStr);
+      // Port 0 is the OS-assigned ephemeral port — useful for tests and
+      // dev-with-random-port; the listener binds successfully and the bound
+      // port is reported in the `wire_started` log line.
+      if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) {
+        writeError(`error: --port must be an integer between 0 and 65535 (got "${portStr}")`);
+        if (stateRef.current === null) {
+          stateRef.current = makeState(program.opts<RootCliOpts>());
+        }
+        stateRef.current.exitCode = 2;
+        return;
+      }
+      let logLevel: ReturnType<typeof parseLogLevel> = undefined;
+      try {
+        logLevel = parseLogLevel(asOptionalString(cmdOpts['logLevel']));
+      } catch (err) {
+        writeError(`error: ${err instanceof Error ? err.message : String(err)}`);
+        if (stateRef.current === null) {
+          stateRef.current = makeState(program.opts<RootCliOpts>());
+        }
+        stateRef.current.exitCode = 2;
+        return;
+      }
+      const logPretty = cmdOpts['logPretty'] === true ? true : undefined;
+      await runServe({
+        port,
+        host: asOptionalString(cmdOpts['host']),
+        logLevel,
+        logPretty,
+      });
+    });
 
   // ── init ──────────────────────────────────────────────────────────────
   program

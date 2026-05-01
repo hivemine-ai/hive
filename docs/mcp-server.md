@@ -10,10 +10,14 @@ The Hive MCP server exposes the Auth, Cell Store, Visibility, Audit, and Waggle 
 # 1) Bootstrap a Hive (one-time — creates DB + first Hivekeeper + signing key)
 hivectl init
 
-# 2) Start the server
-node packages/server/dist/main.js
+# 2) Start the server (foreground, blocks until SIGINT/SIGTERM)
+hivectl serve
 # → Listening on http://0.0.0.0:8443/mcp
 ```
+
+Flags: `--port <n>`, `--host <addr>`, `--log-level <trace|debug|info|warn|error|fatal>`, `--log-pretty`. Each flag overrides the matching env var; if omitted, the env var (or its default) is used.
+
+For unattended deployments under systemd / launchd, see `hivectl service install` (PRY-032).
 
 By default the server binds to `0.0.0.0:8443`, exposes `/mcp` for the MCP transport, and reads its signing keys from `./keys/`. All defaults are overridable via environment variables (see [Configuration](#configuration)).
 

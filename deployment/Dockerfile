@@ -98,6 +98,7 @@ ENV HIVE_AUTH_KEYS_DIR=/var/lib/hive/keys \
     NODE_ENV=production \
     TZ=UTC
 
-# Server is the default ENTRYPOINT. Override (`--entrypoint hivectl`) to run
-# the CLI without starting the server.
-ENTRYPOINT ["node", "/app/packages/server/dist/main.js"]
+# Server is the default ENTRYPOINT — `hivectl serve` runs the foreground MCP
+# server (PRY-031). Override (`--entrypoint hivectl`) to run admin subcommands
+# without starting the server.
+ENTRYPOINT ["node", "/app/packages/cli/dist/main.js", "serve"]

@@ -48,7 +48,7 @@ pnpm test          # runs the suite (vitest)
 
 ```bash
 node packages/cli/dist/main.js init --admin-email you@example.com   # one-time bootstrap
-node packages/server/dist/main.js
+node packages/cli/dist/main.js serve                                # foreground MCP server
 # → Listening on http://0.0.0.0:8443/mcp
 ```
 

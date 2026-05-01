@@ -10,6 +10,7 @@ What `hivectl` covers (Slice 0):
 
 - `init` — bootstrap a fresh Hive (schema migrations + first admin Hivekeeper + Ed25519 signing key + first credential JWT).
 - `migrate up | down | status` — manage schema migrations directly.
+- `serve` — run the Hive MCP server in the foreground (PRY-031). Replaces the legacy `node packages/server/dist/main.js` entry point.
 - `hive list-keepers` — list Hivekeepers in the Hive.
 - `hivekeeper create` — register a new Hivekeeper, optionally with a credential.
 - `agent create | list | revoke` — full agent lifecycle (cascade-closes its Cell on revoke).
