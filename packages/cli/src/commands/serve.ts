@@ -55,13 +55,14 @@ export function resolveServeOverrides(
   if (resolvedLevel !== undefined) {
     logger.level = resolvedLevel as LogLevel | 'silent';
   }
+  // pino-pretty defaults to ON when NODE_ENV !== 'production' inside
+  // createLogger. Match the legacy `packages/server/src/main.ts` behaviour:
+  // ALWAYS resolve to an explicit boolean here so JSON-only deployments
+  // (CI smoke jobs, journald-piped systemd units) get JSON unless the
+  // operator opts in with --log-pretty or HIVE_MCP_LOG_PRETTY=true.
   const prettyFlag = opts.logPretty;
   const prettyEnv = env['HIVE_MCP_LOG_PRETTY'];
-  if (prettyFlag !== undefined) {
-    logger.pretty = prettyFlag;
-  } else if (prettyEnv !== undefined) {
-    logger.pretty = prettyEnv === 'true';
-  }
+  logger.pretty = prettyFlag ?? prettyEnv === 'true';
   return { wire, logger };
 }
 

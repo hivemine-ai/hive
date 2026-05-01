@@ -83,14 +83,18 @@ describe('PRY-031 — resolveServeOverrides (flag → wire/logger config precede
     expect(out.logger.pretty).toBe(true);
   });
 
-  it('returns empty configs when nothing is set', () => {
+  it('defaults logger.pretty=false when neither flag nor env is set (JSON output)', () => {
     const env: NodeJS.ProcessEnv = {};
     const out = resolveServeOverrides(
       { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
       env,
     );
     expect(out.wire).toEqual({});
-    expect(out.logger).toEqual({});
+    // pretty MUST resolve to an explicit boolean — matches the legacy
+    // packages/server/src/main.ts behaviour so journald/CI deployments get
+    // JSON unless the operator opts in.
+    expect(out.logger.pretty).toBe(false);
+    expect(out.logger.level).toBeUndefined();
   });
 });
 
