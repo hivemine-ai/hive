@@ -48,7 +48,7 @@ export interface McpTransportDeps {
 export interface McpTransport {
   /** Process-wide session store shared across all per-session McpServer instances. */
   sessionStore: SessionStore;
-  /** Tool catalog (5 tools per Slice 0). */
+  /** Tool catalog (6 tools: 5 from Slice 0 + reply_to from Slice 2 / PRY-028). */
   toolCatalog: ToolDefinition[];
   /** Build a new `McpServer` for a brand-new initialize request. */
   buildMcpServerForSession(): McpServer;
@@ -120,7 +120,7 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
     });
 
     // Use the low-level Server API directly. The high-level `registerTool`
-    // wraps this with parsed-args + zod-shape inference; for our 5 tools the
+    // wraps this with parsed-args + zod-shape inference; for our 6 tools the
     // shape inference is brittle (empty `z.object({})` schemas don't round-trip
     // cleanly), so we own the dispatch and validation.
     const lowLevelServer = mcpServer.server;
