@@ -89,12 +89,61 @@ describe('PRY-031 — resolveServeOverrides (flag → wire/logger config precede
       { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
       env,
     );
-    expect(out.wire).toEqual({});
+    // Per PRY-032: httpHost defaults to 127.0.0.1 (local-only, closes
+    // INC-2026-001 FLAG-005). Other fields stay unset.
+    expect(out.wire).toEqual({ httpHost: '127.0.0.1' });
     // pretty MUST resolve to an explicit boolean — matches the legacy
     // packages/server/src/main.ts behaviour so journald/CI deployments get
     // JSON unless the operator opts in.
     expect(out.logger.pretty).toBe(false);
     expect(out.logger.level).toBeUndefined();
+  });
+
+  // ── PRY-032: httpHost precedence (flag > env > config file > default) ──
+
+  it('PRY-032: env HIVE_MCP_HTTP_HOST flows when --host flag is omitted', () => {
+    const env: NodeJS.ProcessEnv = { HIVE_MCP_HTTP_HOST: '10.0.0.1' };
+    const out = resolveServeOverrides(
+      { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+      env,
+    );
+    expect(out.wire.httpHost).toBe('10.0.0.1');
+  });
+
+  it('PRY-032: config file httpHost flows when both flag and env are unset', () => {
+    const out = resolveServeOverrides(
+      { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+      {},
+      { httpHost: '0.0.0.0' },
+    );
+    expect(out.wire.httpHost).toBe('0.0.0.0');
+  });
+
+  it('PRY-032: --host flag wins over env AND config file', () => {
+    const out = resolveServeOverrides(
+      { port: undefined, host: '127.0.0.1', logLevel: undefined, logPretty: undefined },
+      { HIVE_MCP_HTTP_HOST: '10.0.0.1' },
+      { httpHost: '0.0.0.0' },
+    );
+    expect(out.wire.httpHost).toBe('127.0.0.1');
+  });
+
+  it('PRY-032: env wins over config file when --host flag is unset', () => {
+    const out = resolveServeOverrides(
+      { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+      { HIVE_MCP_HTTP_HOST: '10.0.0.1' },
+      { httpHost: '0.0.0.0' },
+    );
+    expect(out.wire.httpHost).toBe('10.0.0.1');
+  });
+
+  it('PRY-032: defaults to 127.0.0.1 (local-only) when nothing is set — closes FLAG-005', () => {
+    const out = resolveServeOverrides(
+      { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+      {},
+      null,
+    );
+    expect(out.wire.httpHost).toBe('127.0.0.1');
   });
 });
 
@@ -296,6 +345,7 @@ describe('PRY-031 — runServe failure paths', () => {
           Promise.reject(new Error('keys not found'))) as unknown as NonNullable<
           RunServeDeps['buildWireFn']
         >,
+        readConfigFileFn: () => null,
       },
     );
 
@@ -345,6 +395,7 @@ describe('PRY-031 — runServe failure paths', () => {
         >,
         buildWireFn: ((): Promise<typeof fakeWire> =>
           Promise.resolve(fakeWire)) as unknown as NonNullable<RunServeDeps['buildWireFn']>,
+        readConfigFileFn: () => null,
       },
     );
 

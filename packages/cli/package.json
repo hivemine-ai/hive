@@ -16,6 +16,7 @@
     "#error/*": "./dist/error/*",
     "#input/*": "./dist/input/*",
     "#output/*": "./dist/output/*",
+    "#platform/*": "./dist/platform/*",
     "#runtime/*": "./dist/runtime/*",
     "#signals/*": "./dist/signals/*",
     "#types.js": "./dist/types.js"

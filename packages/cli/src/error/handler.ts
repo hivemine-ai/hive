@@ -70,6 +70,26 @@ function mapCliError(err: CliError): MappedExit {
         code: EXIT_USER_ERROR,
         message: `invalid configuration${suffix}: ${err.message}`,
       };
+    case 'UNSUPPORTED_PLATFORM':
+      return {
+        code: EXIT_USER_ERROR,
+        message: `unsupported platform${suffix}: ${err.message}`,
+      };
+    case 'ROOT_REQUIRED':
+      return {
+        code: EXIT_PRECONDITION,
+        message: `root privilege required${suffix}: ${err.message}`,
+      };
+    case 'WORKING_DIR_PERMISSION':
+      return {
+        code: EXIT_PRECONDITION,
+        message: `cannot access working directory${suffix}: ${err.message}`,
+      };
+    case 'SERVICE_NOT_INSTALLED':
+      return {
+        code: EXIT_PRECONDITION,
+        message: `service not installed${suffix}: ${err.message}`,
+      };
     default: {
       const exhaustive: never = err.code;
       return {
