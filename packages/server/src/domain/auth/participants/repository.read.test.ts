@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { Logger } from '#observability/logger.js';
 
 import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
 import type { CallerContext } from '../caller-context.js';
@@ -321,6 +323,44 @@ describe('participants read repository', () => {
       const names = result.agents.map((a) => a.name);
       expect(names).toContain('admin-summarizer');
       expect(names).not.toContain('other-summarizer');
+    });
+  });
+
+  // PRY-030 — `last_connected_at` persistence side-effect of `presenceRegistry.subscribe`.
+  describe('updateAgentLastConnectedAt', () => {
+    it('stamps last_connected_at on the agent row and rowToAgent reflects it', async () => {
+      const repo = createParticipantsReadRepo(world.db);
+      const before = await repo.findAgentById(world.workerAgentId);
+      expect(before?.lastConnectedAt).toBeNull();
+
+      const ts = new Date('2026-05-01T12:00:00.000Z');
+      await repo.updateAgentLastConnectedAt(world.workerAgentId, ts);
+
+      const after = await repo.findAgentById(world.workerAgentId);
+      expect(after?.lastConnectedAt?.toISOString()).toBe(ts.toISOString());
+    });
+
+    it('is idempotent — repeated calls overwrite with the latest timestamp', async () => {
+      const repo = createParticipantsReadRepo(world.db);
+      const t1 = new Date('2026-05-01T12:00:00.000Z');
+      const t2 = new Date('2026-05-01T12:30:00.000Z');
+      await repo.updateAgentLastConnectedAt(world.workerAgentId, t1);
+      await repo.updateAgentLastConnectedAt(world.workerAgentId, t2);
+      const after = await repo.findAgentById(world.workerAgentId);
+      expect(after?.lastConnectedAt?.toISOString()).toBe(t2.toISOString());
+    });
+
+    it('is silent no-op + warn when the agent does not exist', async () => {
+      const warn = vi.fn();
+      const logger = { warn } as unknown as Logger;
+      const repo = createParticipantsReadRepo(world.db, 'sqlite', { logger });
+      const ghost = '019dffff-0000-0000-0000-000000000000';
+      await expect(repo.updateAgentLastConnectedAt(ghost, new Date())).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ agentId: ghost }),
+        expect.stringContaining('updateAgentLastConnectedAt_no_row'),
+      );
     });
   });
 });

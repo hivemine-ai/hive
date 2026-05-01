@@ -30,6 +30,7 @@ function buildAgent(overrides: Partial<Agent> = {}): Agent {
     state: 'active',
     createdAt: FIXED_DATE,
     revokedAt: null,
+    lastConnectedAt: null,
     ...overrides,
   };
 }

@@ -829,7 +829,7 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     expect(body.error?.message).toMatch(/invalid input/);
   });
 
-  it('PRY-029 AC-1 (+ N1 from PRY-028): tools/list exposes exactly 7 tools and includes list_agents', async () => {
+  it('PRY-030 AC-5 (closes the v0.1 catalog): tools/list exposes exactly 8 tools and includes get_agent_status', async () => {
     const initA = await rpc(world.baseUrl, world.jwtA, {
       jsonrpc: '2.0',
       id: 1,
@@ -851,11 +851,12 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     );
     const result = listRpc.body?.result as { tools: Array<{ name: string }> };
     expect(result.tools).toBeDefined();
-    expect(result.tools.length).toBe(7);
+    expect(result.tools.length).toBe(8);
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       'check_unread_messages',
       'get_agent_config',
+      'get_agent_status',
       'list_agents',
       'mark_read',
       'read_mailbox',
@@ -964,6 +965,141 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
       expect(agent.type).toBe('worker');
       expect(agent.capabilities).toContain('cell.send');
     }
+  });
+
+  // PRY-030 AC-6 — get_agent_status full lifecycle. Worker B is queried while
+  // never-connected (null), then it opens a session (online with timestamp),
+  // then it closes (offline with persisted timestamp).
+  it('PRY-030 AC-6: get_agent_status across never-connected → online → offline transitions', async () => {
+    // Step 1: workerA initializes its own session.
+    const initA = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'smoke-get-agent-status-a', version: '0.1' },
+      },
+    });
+    const sessionA = initA.sessionId as string;
+    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
+
+    // Step 2: workerA queries get_agent_status(workerB). workerB has not
+    // connected yet → presence offline + last_connected_at null.
+    const queryWorkerBId = world.workerBId;
+    const status1Rpc = await rpc(
+      world.baseUrl,
+      world.jwtA,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'get_agent_status', arguments: { participant: queryWorkerBId } },
+      },
+      sessionA,
+    );
+    const status1 = parseToolResult<{
+      participant_id: string;
+      presence: 'online' | 'offline';
+      last_connected_at: string | null;
+    }>(status1Rpc);
+    expect(status1.participant_id).toBe(queryWorkerBId);
+    expect(status1.presence).toBe('offline');
+    expect(status1.last_connected_at).toBeNull();
+
+    // Step 3: workerB initializes a session. The MCP transport wires the
+    // SubscriberHandle during the init handshake → presence Registry subscribes →
+    // side-effect persists `agents.last_connected_at = <subscribe time>`.
+    // Sample wall-clock before init to bound the persisted timestamp from below.
+    const beforeSubscribe = Date.now();
+    const initB = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'smoke-get-agent-status-b', version: '0.1' },
+      },
+    });
+    const sessionB = initB.sessionId as string;
+    await sendNotification(world.baseUrl, world.jwtB, 'notifications/initialized', sessionB);
+
+    // Step 4: B issues a no-op tool call to ensure the session is fully wired
+    // (and to verify ensureSessionFor is idempotent if subscribe already happened).
+    await rpc(
+      world.baseUrl,
+      world.jwtB,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'get_agent_config', arguments: {} },
+      },
+      sessionB,
+    );
+
+    // The side-effect is non-blocking — drain microtasks and let the UPDATE land.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Step 5: workerA queries get_agent_status(workerB) → online + timestamp.
+    const status2Rpc = await rpc(
+      world.baseUrl,
+      world.jwtA,
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'get_agent_status', arguments: { participant: queryWorkerBId } },
+      },
+      sessionA,
+    );
+    const status2 = parseToolResult<{
+      participant_id: string;
+      presence: 'online' | 'offline';
+      last_connected_at: string | null;
+    }>(status2Rpc);
+    expect(status2.presence).toBe('online');
+    expect(status2.last_connected_at).not.toBeNull();
+    const onlineTs = new Date(status2.last_connected_at as string);
+    expect(onlineTs.getTime()).toBeGreaterThanOrEqual(beforeSubscribe);
+
+    // Step 6: workerB closes its session via DELETE — this should fire the
+    // SubscriberHandle's onClose → registry.unsubscribe → presence offline.
+    await fetch(`${world.baseUrl}/mcp`, {
+      method: 'DELETE',
+      headers: {
+        authorization: `Bearer ${world.jwtB}`,
+        'mcp-session-id': sessionB,
+      },
+    });
+
+    // Drain so the close cascade settles.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Step 7: workerA queries again → offline with the persisted timestamp.
+    const status3Rpc = await rpc(
+      world.baseUrl,
+      world.jwtA,
+      {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: { name: 'get_agent_status', arguments: { participant: queryWorkerBId } },
+      },
+      sessionA,
+    );
+    const status3 = parseToolResult<{
+      participant_id: string;
+      presence: 'online' | 'offline';
+      last_connected_at: string | null;
+    }>(status3Rpc);
+    expect(status3.presence).toBe('offline');
+    expect(status3.last_connected_at).not.toBeNull();
+    // The persisted timestamp should match the one observed while online —
+    // the subscribe was the most recent connection event.
+    expect(status3.last_connected_at).toBe(status2.last_connected_at);
   });
 });
 

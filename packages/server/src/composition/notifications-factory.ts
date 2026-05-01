@@ -191,6 +191,7 @@ export function createNotificationsForProduction(
     sweepIntervalMs: config.sweepIntervalMs,
     lruEvictThresholdMs: config.lruEvictThresholdMs,
     logger: deps.logger,
+    participantsRepo: deps.participantsRepo,
     onSubscribed: ({ participantId, subscriptionId, handle }) => {
       replay.scheduleReplayFor(participantId, handle, subscriptionId);
     },

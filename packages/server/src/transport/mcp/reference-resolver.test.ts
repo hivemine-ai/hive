@@ -51,6 +51,7 @@ function makeRepo(overrides?: Partial<MockRepo>): MockRepo {
     findById: vi.fn().mockResolvedValue(null),
     getParticipantState: vi.fn().mockResolvedValue(null),
     listAgents: vi.fn().mockResolvedValue({ agents: [], nextCursor: null }),
+    updateAgentLastConnectedAt: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

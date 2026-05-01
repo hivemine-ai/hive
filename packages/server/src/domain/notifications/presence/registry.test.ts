@@ -691,3 +691,114 @@ describe('createPresenceRegistry — Slice 2 (TTL passive + LRU eviction)', () =
     expect(misconfigCalls.length).toBe(0);
   });
 });
+
+// PRY-030 — `last_connected_at` persistence side-effect of `subscribe`.
+describe('createPresenceRegistry — last_connected_at side-effect (PRY-030)', () => {
+  let registry: PresenceRegistry;
+
+  afterEach(() => {
+    registry.shutdown();
+  });
+
+  function hivekeeperContext(): IdentityContext {
+    const id = uuidv7();
+    return {
+      participantId: id,
+      kind: 'hivekeeper',
+      hiveId: uuidv7(),
+      hiveName: 'test-hive',
+      colonyId: uuidv7(),
+      snapshot: {
+        issuedAt: new Date(),
+        credentialJti: uuidv7(),
+        credentialKid: 'kid-1',
+      },
+      current: { state: 'active' },
+    };
+  }
+
+  it('worker subscribe → updateAgentLastConnectedAt called once with the subscribe timestamp', async () => {
+    const updateAgentLastConnectedAt = vi.fn().mockResolvedValue(undefined);
+    const fixedNow = new Date('2026-05-01T12:34:56.789Z');
+    registry = createPresenceRegistry({
+      participantsRepo: { updateAgentLastConnectedAt },
+      now: () => fixedNow,
+    });
+    const ctx = activeContext();
+    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+
+    // The side effect is fire-and-forget (`Promise.resolve().then(...)`) so we
+    // need a microtask flush before asserting.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(updateAgentLastConnectedAt).toHaveBeenCalledTimes(1);
+    expect(updateAgentLastConnectedAt).toHaveBeenCalledWith(ctx.participantId, fixedNow);
+  });
+
+  it('scout subscribe → updateAgentLastConnectedAt called', async () => {
+    const updateAgentLastConnectedAt = vi.fn().mockResolvedValue(undefined);
+    registry = createPresenceRegistry({
+      participantsRepo: { updateAgentLastConnectedAt },
+    });
+    const ctx: IdentityContext = {
+      ...activeContext(),
+      kind: 'scout',
+      current: { state: 'active', type: 'scout' },
+    };
+    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(updateAgentLastConnectedAt).toHaveBeenCalledTimes(1);
+  });
+
+  it('hivekeeper subscribe → updateAgentLastConnectedAt is NOT called', async () => {
+    const updateAgentLastConnectedAt = vi.fn().mockResolvedValue(undefined);
+    registry = createPresenceRegistry({
+      participantsRepo: { updateAgentLastConnectedAt },
+    });
+    const ctx = hivekeeperContext();
+    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(updateAgentLastConnectedAt).not.toHaveBeenCalled();
+  });
+
+  it('side-effect failure does NOT abort the subscribe and is logged at warn', async () => {
+    const updateAgentLastConnectedAt = vi.fn().mockRejectedValue(new Error('db unreachable'));
+    const warn = vi.fn();
+    const logger = { warn, info: vi.fn(), error: vi.fn(), debug: vi.fn() } as unknown as Logger;
+    registry = createPresenceRegistry({
+      participantsRepo: { updateAgentLastConnectedAt },
+      logger,
+    });
+    const ctx = activeContext();
+    const sub = await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+
+    // Subscription resolves normally despite the rejected side-effect.
+    expect(sub.id).toBeDefined();
+    expect(sub.participantId).toBe(ctx.participantId);
+
+    // Drain microtasks so `.catch(...)` runs.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(updateAgentLastConnectedAt).toHaveBeenCalledTimes(1);
+    const warnEvents = warn.mock.calls
+      .map((c) => (c[0] as Record<string, unknown> | undefined)?.['event'])
+      .filter((e): e is string => typeof e === 'string');
+    expect(warnEvents).toContain('presence_last_connected_at_update_failed');
+  });
+
+  it('without participantsRepo configured → no side-effect attempted (Slice 0 backwards-compat)', async () => {
+    registry = createPresenceRegistry();
+    const ctx = activeContext();
+    // No throw, no log spam — the registry simply never tries to persist.
+    await expect(
+      registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) }),
+    ).resolves.toBeDefined();
+  });
+});
