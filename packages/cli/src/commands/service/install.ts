@@ -119,7 +119,7 @@ function installLinux(input: RunServiceInstallInput, deps: LinuxDeps): RunServic
     deps.paths?.unitPath ??
     getDefaultUnitPath({ platform: 'linux', homedir: () => '/root', env: process.env });
 
-  ensureSystemUser(user, deps.runner, deps.stderr);
+  ensureSystemUser(user, workingDir, deps.runner, deps.stderr);
   ensureWorkingDir(workingDir, user, deps.runner);
 
   if (existsSync(unitPath)) {
@@ -141,6 +141,7 @@ function installLinux(input: RunServiceInstallInput, deps: LinuxDeps): RunServic
 
 function ensureSystemUser(
   user: string,
+  workingDir: string,
   runner: ProcessRunner,
   stderr: NodeJS.WritableStream,
 ): void {
@@ -161,7 +162,7 @@ function ensureSystemUser(
     '-s',
     '/bin/false',
     '-d',
-    '/var/lib/hive',
+    workingDir,
     user,
   ]);
   if (create.status !== 0) {

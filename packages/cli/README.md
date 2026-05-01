@@ -11,7 +11,7 @@ What `hivectl` covers (Slice 0):
 - `init` — bootstrap a fresh Hive (schema migrations + first admin Hivekeeper + Ed25519 signing key + first credential JWT).
 - `migrate up | down | status` — manage schema migrations directly.
 - `serve` — run the Hive MCP server in the foreground (PRY-031). Replaces the legacy `node packages/server/dist/main.js` entry point.
-- `service install | uninstall | start | stop | restart | status` — manage Hive as an OS-supervised service via systemd (Linux) or launchd (Mac). Thin delegating wrappers per [ADR-019](https://github.com/hivemine-ai/hive-vault) alternative B.2; the OS owns supervision, the CLI owns UX uniformity.
+- `service` group (`install`, `uninstall`, `start`, `stop`, `restart`, `status`) — manage Hive as an OS-supervised service via systemd (Linux) or launchd (Mac). Thin delegating wrappers per [ADR-019](https://github.com/hivemine-ai/hive-vault) alternative B.2; the OS owns supervision, the CLI owns UX uniformity.
 - `config network <local-only | bind-all>` — toggle the persisted bind address consumed by `serve`. `local-only` (127.0.0.1) is the default; `bind-all` (0.0.0.0) emits an explicit TLS warning to stderr (closes [INC-2026-001](https://github.com/hivemine-ai/hive-vault) FLAG-005).
 - `hive list-keepers` — list Hivekeepers in the Hive.
 - `hivekeeper create` — register a new Hivekeeper, optionally with a credential.
@@ -54,12 +54,12 @@ See [`docs/hivectl.md`](../../docs/hivectl.md) for the full subcommand reference
 
 `hivectl service` provides a uniform CLI for the OS-supervised lifecycle of the Hive server, so the operator never has to swap between `systemctl` and `launchctl`:
 
-| Subcommand                  | OS-level effect                                                                                                                                                                                 |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------- |
-| `service install`           | Writes `/etc/systemd/system/hive.service` (Linux, root) or `~/Library/LaunchAgents/com.hivemine.hivectl.plist` (Mac). Linux installs create the dedicated `hive` system user (closes FLAG-002). |
-| `service uninstall`         | Idempotently removes the unit/plist; pre-flight stops the service if active.                                                                                                                    |
-| `service start              | stop                                                                                                                                                                                            | restart` | Thin wrappers around `systemctl <verb> hive` / `launchctl load -w · unload`. |
-| `service status [--logs N]` | Uniform output: `Service / Installed / State / PID / Uptime / Last log`. Exit 0 if running, 1 otherwise (script-friendly).                                                                      |
+| Subcommand                                           | OS-level effect                                                                                                                                                                                 |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `service install`                                    | Writes `/etc/systemd/system/hive.service` (Linux, root) or `~/Library/LaunchAgents/com.hivemine.hivectl.plist` (Mac). Linux installs create the dedicated `hive` system user (closes FLAG-002). |
+| `service uninstall`                                  | Idempotently removes the unit/plist; pre-flight stops the service if active.                                                                                                                    |
+| `service start` / `service stop` / `service restart` | Thin wrappers around `systemctl <verb> hive` (Linux) or `launchctl load -w` / `launchctl unload` (Mac).                                                                                         |
+| `service status [--logs N]`                          | Uniform output: `Service / Installed / State / PID / Uptime / Last log`. Exit 0 if running, 1 otherwise (script-friendly).                                                                      |
 
 ```bash
 # After install + first `hivectl init`:
@@ -71,7 +71,7 @@ hivectl service restart
 hivectl service uninstall
 ```
 
-Linux requires root for `service install / uninstall / start / stop / restart` (the unit lives in `/etc/systemd/system/`). Mac uses user-level launchd agents — no root needed.
+Linux requires root for `service install` and `service uninstall` (the unit lives in `/etc/systemd/system/`). `service start` / `stop` / `restart` delegate to `systemctl` and inherit whatever permissions polkit / sudoers grant the calling user — typical setups need root or `sudo`. Mac uses user-level launchd agents — no root needed.
 
 `hivectl config network <local-only | bind-all>` persists the bind address to `<workingDir>/config.json`. The `serve` boot resolves the host with precedence: `--host` flag > `HIVE_MCP_HTTP_HOST` env > config file > default `127.0.0.1`. `bind-all` emits an explicit warning to stderr citing the FLAG-005 TLS-termination requirement.
 

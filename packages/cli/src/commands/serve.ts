@@ -141,18 +141,34 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
   const readCfg = deps.readConfigFileFn ?? readConfigFile;
 
   let configFile: PersistedConfig | null = null;
+  let configReadError: Error | null = null;
+  let resolvedConfigPath: string | null = null;
   try {
-    const cfgPath = deps.configPath ?? getDefaultConfigPath();
-    configFile = readCfg(cfgPath);
-  } catch {
-    // Best-effort: a malformed config file is logged below via the logger
-    // (after creation). For now we proceed with `null`, falling back to the
-    // env / default chain. Operators see the warning in the boot log.
+    resolvedConfigPath = deps.configPath ?? getDefaultConfigPath();
+    configFile = readCfg(resolvedConfigPath);
+  } catch (err) {
+    // Best-effort: capture the error and surface it via the logger once it
+    // exists (the read happens before logger creation because the persisted
+    // `httpHost` may need to flow into the wire override). Falling back to
+    // the env / default chain means the operator's config drift is silently
+    // ignored unless we log here.
     configFile = null;
+    configReadError = err instanceof Error ? err : new Error(String(err));
   }
 
   const { wire: wireOverrides, logger: loggerOpts } = resolveServeOverrides(opts, env, configFile);
   const logger = createLoggerFn(loggerOpts);
+
+  if (configReadError !== null) {
+    logger.warn(
+      {
+        event: 'config_file_read_failed',
+        configPath: resolvedConfigPath,
+        err: configReadError.message,
+      },
+      'config file unreadable; falling back to env/default for httpHost',
+    );
+  }
 
   let wire: Awaited<ReturnType<typeof buildWireFn>>;
   try {

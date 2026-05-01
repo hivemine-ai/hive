@@ -8,6 +8,7 @@
 import type { Command } from 'commander';
 
 import { mapErrorToExit } from '#error/handler.js';
+import { detectPlatform, getDefaultMacLogPaths } from '#platform/detect.js';
 
 import type { NetworkMode } from '../config/network.js';
 
@@ -109,7 +110,21 @@ export function registerServiceGroup(program: Command, hooks: ServiceGroupHooks)
           }
           logs = n;
         }
-        const result = await runServiceStatus(logs !== undefined ? { logs } : {});
+        // Mac log tailing requires the launchd `StandardErrorPath`. Eagerly
+        // resolve it on darwin so `hivectl service status --logs N` actually
+        // shows logs in production (the dep was previously a test-only seam,
+        // leaving the production path silently no-op on Mac).
+        const input: Parameters<typeof runServiceStatus>[0] = logs !== undefined ? { logs } : {};
+        const deps: Parameters<typeof runServiceStatus>[1] = {};
+        try {
+          if (detectPlatform() === 'darwin') {
+            deps.macStderrPath = getDefaultMacLogPaths().stderrPath;
+          }
+        } catch {
+          // detectPlatform throws on unsupported platforms — runServiceStatus
+          // will surface the same error consistently when it runs.
+        }
+        const result = await runServiceStatus(input, deps);
         if (result.exitCode !== 0) hooks.setExitCode(result.exitCode);
       } catch (err) {
         const mapped = mapErrorToExit(err);
