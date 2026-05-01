@@ -25,7 +25,7 @@ What `hivectl` does **not** cover (deferred to Slice 1+):
 
 ## Quick start
 
-> During pre-release (Fase 1), `@hive/cli` is **not published to npm**. Run from the build output instead. Tip: alias `hivectl='node packages/cli/dist/main.js'` in your shell.
+> Once `v0.1.0` is published to npm, the supported install path is `npm install -g @hivemine/hivectl` (self-contained binary, no Node runtime required at runtime). Until then, run from the build output and alias `hivectl='node packages/cli/dist/main.js'` in your shell.
 
 ```bash
 # After `pnpm install && pnpm build` from the repo root:
@@ -83,7 +83,21 @@ The `bin` entry is `hivectl` (compiled to `dist/main.js` with shebang `#!/usr/bi
 
 ## Distribution status
 
-Hive v0.1 stays internal during Fase 1 — the CLI is not published to npm. Operators install by cloning the repo and running `pnpm install && pnpm build`. When v0.1 is battle-tested, a follow-up PRY adds `npm publish` for `@hive/cli` (will install via `pnpm install -g @hive/cli` then).
+Hive v0.1 stays internal during Fase 1 — `npm publish` is gated on the close of the [INC-2026-001](https://github.com/hivemine-ai/hive-vault) sev-3 cluster's observation period (~2026-05-12). Until then, operators install by cloning the repo and running `pnpm install && pnpm build`. The release pipeline ([SEA build matrix + 5-package npm publish under `@hivemine`](../../.github/workflows/release.yml)) ships ready-to-run as part of `v0.1.0` per the maintainer-facing release runbook in the vault. Post-release the supported install becomes `npm install -g @hivemine/hivectl` (self-contained binary, no Node runtime required at the install host).
+
+## SEA build (release engineering)
+
+The `release.yml` workflow drives the full build matrix; the underlying scripts are also runnable locally for smoke tests:
+
+```bash
+# From the repo root, on macOS arm64:
+pnpm --filter @hive/cli build
+pnpm --filter @hive/cli sea:build:darwin
+ls -lh packages/cli/dist-sea/hivectl   # ~108 MB Mach-O 64-bit executable arm64
+./packages/cli/dist-sea/hivectl --help
+```
+
+`sea:build:linux` runs the same pipeline minus the `codesign` steps (Linux). The bundled `bundle.cjs` marks `better-sqlite3`, `pg`, `pg-native`, `fsevents` as external — at runtime, the SEA's `require` is overridden via an `esbuild` banner to `createRequire(__filename)` so externals resolve via standard Node module resolution from the binary's directory. Each published `@hivemine/hivectl-<os>-<arch>` package declares `better-sqlite3` as a `dependency` so npm materialises the prebuilt native binding next to the binary on install.
 
 ## Exit codes
 

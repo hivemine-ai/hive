@@ -26,7 +26,16 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "sea:bundle": "esbuild src/main.ts --bundle --platform=node --format=cjs --outfile=dist-sea/bundle.cjs --external:better-sqlite3 --external:pg --external:pg-native --external:fsevents --banner:js=\"require=require('node:module').createRequire(__filename);\"",
+    "sea:patch": "node scripts/patch-sea-bundle.mjs",
+    "sea:blob": "node --experimental-sea-config sea-config.json",
+    "sea:copy": "node -e \"require('node:fs').copyFileSync(process.execPath, 'dist-sea/hivectl')\"",
+    "sea:unsign": "codesign --remove-signature dist-sea/hivectl",
+    "sea:inject": "npx --yes postject@1.0.0-alpha.6 dist-sea/hivectl NODE_SEA_BLOB dist-sea/sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2 --macho-segment-name NODE_SEA",
+    "sea:resign": "codesign --sign - dist-sea/hivectl",
+    "sea:build:linux": "pnpm run sea:bundle && pnpm run sea:patch && pnpm run sea:blob && pnpm run sea:copy && pnpm run sea:inject",
+    "sea:build:darwin": "pnpm run sea:bundle && pnpm run sea:patch && pnpm run sea:blob && pnpm run sea:copy && pnpm run sea:unsign && pnpm run sea:inject && pnpm run sea:resign"
   },
   "dependencies": {
     "@hive/server": "workspace:*",
@@ -36,6 +45,7 @@
     "yaml": "^2.6.0"
   },
   "devDependencies": {
+    "esbuild": "^0.24.0",
     "vitest": "^2.1.8"
   }
 }

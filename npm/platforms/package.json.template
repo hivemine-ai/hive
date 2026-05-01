@@ -1,0 +1,26 @@
+{
+  "name": "@hivemine/hivectl-{{PLATFORM_NAME}}",
+  "version": "{{VERSION}}",
+  "description": "hivectl SEA binary for {{PLATFORM_NAME}}.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/hivemine-ai/hive",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hivemine-ai/hive.git"
+  },
+  "os": ["{{OS}}"],
+  "cpu": ["{{CPU}}"],
+  "files": [
+    "bin/"
+  ],
+  "dependencies": {
+    "better-sqlite3": "^11.7.0"
+  },
+  "optionalDependencies": {
+    "pg": "^8.13.1"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  }
+}

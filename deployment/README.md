@@ -16,16 +16,13 @@ This directory ships:
 - `.env.example` — copy to `.env` to override defaults.
 - `.dockerignore` — keeps the build context lean.
 
-## Standalone install (no Docker, native systemd / launchd)
+## Standalone install via npm (no Docker, no Node runtime, native systemd / launchd)
 
-For operators who prefer running Hive directly under the host's process supervisor — bare metal, VMs, or a single-tenant box — `hivectl service install` writes the systemd unit (Linux) or launchd plist (Mac) and the `service` group manages the lifecycle uniformly across both OSes:
+Once `v0.1.0` is published, the supported install path on Linux and macOS is the published `@hivemine/hivectl` package — a small JS shim plus a self-contained SEA binary for the host's platform/arch:
 
 ```bash
-# 1. Build hivectl from source (until PRY-033 ships SEA + npm publish).
-git clone https://github.com/hivemine-ai/hive
-cd hive
-pnpm install && pnpm build
-alias hivectl='node $PWD/packages/cli/dist/main.js'
+# 1. Install hivectl (binary + matching platform package, no global Node required at runtime).
+npm install -g @hivemine/hivectl
 
 # 2. Bootstrap the Hive (creates schema + signing key + admin Hivekeeper).
 hivectl init --admin-email you@example.com --output-credential admin.jwt
@@ -44,6 +41,18 @@ curl -i http://127.0.0.1:8443/healthz   # → 200 OK
 hivectl config network bind-all
 hivectl service restart
 # → Front with TLS-terminating reverse proxy before exposing publicly. See § TLS termination.
+```
+
+## Standalone install from source (pre-release, contributors)
+
+Until `v0.1.0` ships to npm, build from source and alias the CLI:
+
+```bash
+git clone https://github.com/hivemine-ai/hive
+cd hive
+pnpm install && pnpm build
+alias hivectl='node $PWD/packages/cli/dist/main.js'
+# Then steps 2–5 above as-is.
 ```
 
 Linux installs run the server under a dedicated `hive` system user (created at install time via `useradd -r -s /bin/false`). The working directory is `/var/lib/hive` (override with `--working-dir`); the server's data, signing keys, and config live there. Mac installs run as the calling user (launchd user-level agents); the working directory is `~/Library/Application Support/Hive` and logs go to `~/Library/Logs/Hive/{hive.log,hive.err}`.
