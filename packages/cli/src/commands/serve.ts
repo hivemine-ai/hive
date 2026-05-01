@@ -3,14 +3,15 @@
 // Foreground MCP server. Reuses the server composition root (`buildWire`)
 // directly — same boot sequence, same graceful shutdown semantics.
 //
-// Per the hivectl + Admin Operations tech spec § "serve + grupo service":
+// Per the hivectl + Admin Operations tech spec § "serve + service group":
 //   - Foreground process. Blocks until SIGINT/SIGTERM.
-//   - Logs to stdout/stderr (JSON by default, pretty if `--log-pretty` or TTY).
+//   - Logs to stdout/stderr — JSON by default; pretty only if `--log-pretty`
+//     or `HIVE_MCP_LOG_PRETTY=true`.
 //   - No daemonize, no PID file (delegate-to-OS — systemd / launchd via PRY-032).
-//   - Flag precedence: `--flag > env var > default`. Flags map to the env vars
-//     the wire already reads (`HIVE_MCP_HTTP_PORT`, `HIVE_MCP_HTTP_HOST`,
-//     `HIVE_MCP_LOG_LEVEL`, `HIVE_MCP_LOG_PRETTY`) by setting them before
-//     `buildWire` resolves config.
+//   - Flag precedence: flag > env > default. Flags map to a `WireConfig`
+//     override + `LoggerOptions` fed directly to `buildWire` and `createLogger`
+//     (env vars are read inside `resolveWireConfigFromEnv` for the unset
+//     fields). `process.env` is never mutated on the production path.
 
 import { buildWire, createLogger } from '@hive/server';
 import type { LoggerOptions, Wire, WireConfig } from '@hive/server';
@@ -131,7 +132,13 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
       { event: 'wire_boot_failed', err: err instanceof Error ? err.message : String(err) },
       'failed to bootstrap hive server',
     );
+    // Must call proc.exit(1) explicitly — returning here lets commander +
+    // main.ts collapse to process.exit(0) (stateRef is never populated by
+    // this action handler, so getExitCode() falls back to 0). Without the
+    // explicit exit, systemd / Docker would see a healthy 0 on a bootstrap
+    // failure.
     proc.exitCode = 1;
+    proc.exit(1);
     return;
   }
 
@@ -168,7 +175,10 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
       { event: 'wire_start_failed', err: err instanceof Error ? err.message : String(err) },
       'failed to start hive server',
     );
+    // Same reasoning as the wire_boot_failed branch — explicit exit(1) is
+    // mandatory here; commander + main.ts would otherwise drop the failure.
     proc.exitCode = 1;
+    proc.exit(1);
     return;
   }
 

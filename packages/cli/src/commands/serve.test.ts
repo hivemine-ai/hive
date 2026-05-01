@@ -12,7 +12,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { parseLogLevel, resolveServeOverrides, runServe, type SignalsProcess } from './serve.js';
-import type { LogLevel, ServeCommandOpts } from './serve.js';
+import type { LogLevel, RunServeDeps, ServeCommandOpts } from './serve.js';
 import { runInit } from './init.js';
 import type { GlobalCliOpts } from '../types.js';
 
@@ -240,4 +240,122 @@ describe('PRY-031 — runServe (smoke E2E on ephemeral port)', () => {
     // promise after start) — drop the handle so vitest doesn't flag it.
     void runPromise;
   }, 30_000);
+});
+
+type LoggerStub = {
+  level: string;
+  info: () => undefined;
+  warn: () => undefined;
+  error: (obj: unknown) => void;
+  debug: () => undefined;
+  trace: () => undefined;
+  fatal: () => undefined;
+  child: () => LoggerStub;
+};
+
+function makeLoggerStub(errorSink: unknown[]): LoggerStub {
+  const stub: LoggerStub = {
+    level: 'silent',
+    info: () => undefined,
+    warn: () => undefined,
+    error: (obj: unknown) => {
+      errorSink.push(obj);
+    },
+    debug: () => undefined,
+    trace: () => undefined,
+    fatal: () => undefined,
+    child: () => stub,
+  };
+  return stub;
+}
+
+describe('PRY-031 — runServe failure paths', () => {
+  it('exits with code 1 when buildWire throws (wire_boot_failed)', async () => {
+    let exitCalls = 0;
+    let lastExitCode: number | undefined;
+    const fakeProc: SignalsProcess = {
+      on() {
+        return undefined;
+      },
+      exit(code) {
+        exitCalls += 1;
+        lastExitCode = code;
+      },
+    };
+    const errorLogs: unknown[] = [];
+    const fakeLogger = makeLoggerStub(errorLogs);
+
+    await runServe(
+      { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+      {
+        proc: fakeProc,
+        createLoggerFn: ((): LoggerStub => fakeLogger) as unknown as NonNullable<
+          RunServeDeps['createLoggerFn']
+        >,
+        buildWireFn: ((): Promise<never> =>
+          Promise.reject(new Error('keys not found'))) as unknown as NonNullable<
+          RunServeDeps['buildWireFn']
+        >,
+      },
+    );
+
+    expect(exitCalls).toBe(1);
+    expect(lastExitCode).toBe(1);
+    const bootEvents = errorLogs.filter(
+      (l): l is { event: string } =>
+        typeof l === 'object' &&
+        l !== null &&
+        (l as { event?: string }).event === 'wire_boot_failed',
+    );
+    expect(bootEvents).toHaveLength(1);
+  });
+
+  it('exits with code 1 when wire.start() throws (wire_start_failed)', async () => {
+    let exitCalls = 0;
+    let lastExitCode: number | undefined;
+    const fakeProc: SignalsProcess = {
+      on() {
+        return undefined;
+      },
+      exit(code) {
+        exitCalls += 1;
+        lastExitCode = code;
+      },
+    };
+    const errorLogs: unknown[] = [];
+    const fakeLogger = makeLoggerStub(errorLogs);
+    const fakeWire = {
+      start: (): Promise<void> => Promise.reject(new Error('listen EADDRINUSE')),
+      stop: (): Promise<void> => Promise.resolve(),
+      port: (): number | null => null,
+      _httpHost: (): never => {
+        throw new Error('test stub');
+      },
+      _cellEvents: (): never => {
+        throw new Error('test stub');
+      },
+    };
+
+    await runServe(
+      { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+      {
+        proc: fakeProc,
+        createLoggerFn: ((): LoggerStub => fakeLogger) as unknown as NonNullable<
+          RunServeDeps['createLoggerFn']
+        >,
+        buildWireFn: ((): Promise<typeof fakeWire> =>
+          Promise.resolve(fakeWire)) as unknown as NonNullable<RunServeDeps['buildWireFn']>,
+      },
+    );
+
+    expect(exitCalls).toBe(1);
+    expect(lastExitCode).toBe(1);
+    const startEvents = errorLogs.filter(
+      (l): l is { event: string } =>
+        typeof l === 'object' &&
+        l !== null &&
+        (l as { event?: string }).event === 'wire_start_failed',
+    );
+    expect(startEvents).toHaveLength(1);
+  });
 });

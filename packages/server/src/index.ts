@@ -89,6 +89,6 @@ export { startCli, stopCli, resolveCliConfigFromEnv } from './composition/wire.j
 export type { CliRuntime, CliWireConfig, CliResolvedConfig } from './composition/wire.js';
 
 // Server wire — public surface for `hivectl serve` per the hivectl + Admin
-// Operations tech spec § "serve + grupo service" (PRY-031).
+// Operations tech spec § "serve + service group" (PRY-031).
 export { buildWire, resolveWireConfigFromEnv } from './composition/wire.js';
 export type { Wire, WireConfig, WireDeps } from './composition/wire.js';
