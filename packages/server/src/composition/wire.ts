@@ -77,6 +77,8 @@ export interface WireConfig {
   shutdownDrainTimeoutSeconds?: number;
   /** Default `'./keys'`. Where to find the signing keypairs. */
   keysDir?: string;
+  /** Default 100. Hard cap server-side for `list_agents.pagination.limit` (PRY-029). */
+  listAgentsMaxPageSize?: number;
 }
 
 export interface WireDeps {
@@ -121,6 +123,13 @@ export function resolveWireConfigFromEnv(
         min: 1,
       }),
     keysDir: overrides.keysDir ?? env['HIVE_AUTH_KEYS_DIR'] ?? './keys',
+    listAgentsMaxPageSize:
+      overrides.listAgentsMaxPageSize ??
+      parseIntEnv(env['HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE'], 100, {
+        name: 'HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE',
+        min: 1,
+        max: 1000,
+      }),
   };
 }
 
@@ -200,8 +209,10 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     cellsRepo,
     sender,
     reader,
+    visibilityEngine,
     presenceRegistry: notifications.presenceRegistry,
     logger,
+    listAgentsMaxPageSize: cfg.listAgentsMaxPageSize,
   });
 
   // 8. HTTP host.

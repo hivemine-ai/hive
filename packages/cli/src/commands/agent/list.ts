@@ -33,7 +33,7 @@ export async function runListAgents(
   runtime: CliRuntime,
   opts: ListAgentsOpts,
 ): Promise<{ agents: ListedAgent[]; nextCursor: string | null }> {
-  const filter: Parameters<typeof runtime.participantsWriteRepo.listAgents>[0] = {
+  const filter: Parameters<typeof runtime.participantsRepo.listAgents>[0] = {
     hiveId: runtime.hiveStableIdentifier,
     pagination: { cursor: parseCursor(opts.cursor), limit: opts.limit ?? 50 },
   };
@@ -43,7 +43,7 @@ export async function runListAgents(
   if (opts.type !== undefined) filter.type = opts.type;
   if (opts.state !== undefined) filter.state = opts.state;
 
-  const result = await runtime.participantsWriteRepo.listAgents(filter);
+  const result = await runtime.participantsRepo.listAgents(filter);
   return {
     agents: result.agents.map((a) => ({
       id: a.id,

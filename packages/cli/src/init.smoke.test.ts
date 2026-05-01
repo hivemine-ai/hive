@@ -309,6 +309,7 @@ describe('PRY-002 smoke E2E (SQLite file)', () => {
     const db = createDb(dbConfig);
     try {
       const writeRepo = createParticipantsWriteRepo(db);
+      const readRepo = createParticipantsReadRepo(db);
       // Create 12 agents.
       for (let i = 0; i < 12; i++) {
         await writeRepo.createAgent(
@@ -326,7 +327,7 @@ describe('PRY-002 smoke E2E (SQLite file)', () => {
       let cursor: { createdAt: Date; id: string } | null = null;
       let pages = 0;
       do {
-        const page = await writeRepo.listAgents({
+        const page = await readRepo.listAgents({
           hiveId: init.hiveId,
           pagination: { cursor, limit: 4 },
         });

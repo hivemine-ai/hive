@@ -1,7 +1,7 @@
 // Tool catalog for the MCP transport. Slice 0 (PRY-006) declared 5 tools;
-// Slice 2 adds the 3 deferred tools one at a time. PRY-028 adds `reply_to`,
-// bringing the catalog to 6/8. The remaining 2 (`list_agents`,
-// `get_agent_status`) land in PRY-029 and PRY-030.
+// Slice 2 adds the 3 deferred tools one at a time. PRY-028 added `reply_to`
+// (6/8), PRY-029 adds `list_agents` (7/8). The remaining 1
+// (`get_agent_status`) lands in PRY-030.
 
 import type { z } from 'zod';
 
@@ -18,6 +18,11 @@ import {
   createGetAgentConfigHandler,
   type GetAgentConfigDeps,
 } from './get-agent-config.js';
+import {
+  ListAgentsInputSchema,
+  createListAgentsHandler,
+  type ListAgentsDeps,
+} from './list-agents.js';
 import {
   MarkReadInputSchema,
   type MarkReadOutput,
@@ -42,6 +47,7 @@ import {
   type SendMessageDeps,
 } from './send-message.js';
 import type { AgentConfigView } from '../views/agent-config-view.js';
+import type { AgentListView } from '../views/agent-list-view.js';
 import type { ReadMailboxWireOutput } from '../views/message-view-wire.js';
 
 export type ToolName =
@@ -50,7 +56,8 @@ export type ToolName =
   | 'reply_to'
   | 'read_mailbox'
   | 'mark_read'
-  | 'check_unread_messages';
+  | 'check_unread_messages'
+  | 'list_agents';
 
 export interface ToolDefinition {
   name: ToolName;
@@ -69,7 +76,8 @@ export interface ToolCatalogDeps
     ReplyToDeps,
     ReadMailboxDeps,
     MarkReadDeps,
-    CheckUnreadMessagesDeps {}
+    CheckUnreadMessagesDeps,
+    ListAgentsDeps {}
 
 /**
  * Output type union — convenience export for callers that want to type-narrow
@@ -81,7 +89,8 @@ export type ToolOutput =
   | ReplyToOutput
   | ReadMailboxWireOutput
   | MarkReadOutput
-  | CheckUnreadMessagesOutput;
+  | CheckUnreadMessagesOutput
+  | AgentListView;
 
 export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
   const getAgentConfig = createGetAgentConfigHandler(deps);
@@ -90,6 +99,7 @@ export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
   const readMailbox = createReadMailboxHandler(deps);
   const markRead = createMarkReadHandler(deps);
   const checkUnreadMessages = createCheckUnreadMessagesHandler(deps);
+  const listAgents = createListAgentsHandler(deps);
 
   return [
     {
@@ -137,6 +147,14 @@ export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
       inputSchema: CheckUnreadMessagesInputSchema,
       handler: async (input, ctx) =>
         checkUnreadMessages(CheckUnreadMessagesInputSchema.parse(input), ctx),
+    },
+    {
+      name: 'list_agents',
+      title: 'List agents',
+      description:
+        'Lists agents (workers and scouts) in the hive visible to the caller per the visibility matrix, with optional filters by type, owner, and capability, and keyset pagination.',
+      inputSchema: ListAgentsInputSchema,
+      handler: async (input, ctx) => listAgents(input, ctx),
     },
   ];
 }
