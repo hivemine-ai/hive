@@ -1,7 +1,7 @@
-// Tool catalog for the MCP transport — Slice 0 declares 5 tools per the
-// PRY-006 alcance. The 3 deferred tools (`reply_to`, `list_agents`,
-// `get_agent_status`) are NOT registered here; clients see only the active
-// catalog and never observe stub-not-implemented errors.
+// Tool catalog for the MCP transport. Slice 0 (PRY-006) declared 5 tools;
+// Slice 2 adds the 3 deferred tools one at a time. PRY-028 adds `reply_to`,
+// bringing the catalog to 6/8. The remaining 2 (`list_agents`,
+// `get_agent_status`) land in PRY-029 and PRY-030.
 
 import type { z } from 'zod';
 
@@ -30,6 +30,12 @@ import {
   type ReadMailboxDeps,
 } from './read-mailbox.js';
 import {
+  ReplyToInputSchema,
+  type ReplyToOutput,
+  createReplyToHandler,
+  type ReplyToDeps,
+} from './reply-to.js';
+import {
   SendMessageInputSchema,
   type SendMessageOutput,
   createSendMessageHandler,
@@ -41,6 +47,7 @@ import type { ReadMailboxWireOutput } from '../views/message-view-wire.js';
 export type ToolName =
   | 'get_agent_config'
   | 'send_message'
+  | 'reply_to'
   | 'read_mailbox'
   | 'mark_read'
   | 'check_unread_messages';
@@ -59,6 +66,7 @@ export interface ToolCatalogDeps
   extends
     GetAgentConfigDeps,
     SendMessageDeps,
+    ReplyToDeps,
     ReadMailboxDeps,
     MarkReadDeps,
     CheckUnreadMessagesDeps {}
@@ -70,6 +78,7 @@ export interface ToolCatalogDeps
 export type ToolOutput =
   | AgentConfigView
   | SendMessageOutput
+  | ReplyToOutput
   | ReadMailboxWireOutput
   | MarkReadOutput
   | CheckUnreadMessagesOutput;
@@ -77,6 +86,7 @@ export type ToolOutput =
 export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
   const getAgentConfig = createGetAgentConfigHandler(deps);
   const sendMessage = createSendMessageHandler(deps);
+  const replyTo = createReplyToHandler(deps);
   const readMailbox = createReadMailboxHandler(deps);
   const markRead = createMarkReadHandler(deps);
   const checkUnreadMessages = createCheckUnreadMessagesHandler(deps);
@@ -96,6 +106,14 @@ export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
         'Sends a message from the caller to the recipient (referenced by id, email, agent reference, or "self").',
       inputSchema: SendMessageInputSchema,
       handler: async (input, ctx) => sendMessage(SendMessageInputSchema.parse(input), ctx),
+    },
+    {
+      name: 'reply_to',
+      title: 'Reply to message',
+      description:
+        'Sends a reply to the original sender of a message in the caller cell. Resolves the recipient from the referenced message and propagates reply_to.',
+      inputSchema: ReplyToInputSchema,
+      handler: async (input, ctx) => replyTo(ReplyToInputSchema.parse(input), ctx),
     },
     {
       name: 'read_mailbox',

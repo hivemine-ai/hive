@@ -657,6 +657,177 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     expect(reRead.messages).toHaveLength(1);
     expect(reRead.messages[0]?.state).toBe('read');
   });
+
+  it('PRY-028 AC-7: reply_to roundtrip — A sends to B → B replies via reply_to → A receives reply with reply_to populated', async () => {
+    // Initialize both sessions.
+    const initA = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'smoke-a', version: '0.1' },
+      },
+    });
+    const sessionA = initA.sessionId as string;
+    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
+
+    const initB = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'smoke-b', version: '0.1' },
+      },
+    });
+    const sessionB = initB.sessionId as string;
+    await sendNotification(world.baseUrl, world.jwtB, 'notifications/initialized', sessionB);
+
+    // Step 1: A sends a request to B.
+    const sendRpc = await rpc(
+      world.baseUrl,
+      world.jwtA,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'send_message',
+          arguments: {
+            recipient: world.workerBId,
+            type: 'request',
+            body: 'are you there?',
+          },
+        },
+      },
+      sessionA,
+    );
+    const originalSendResult = parseToolResult<{ message_id: string }>(sendRpc);
+    const originalMessageId = originalSendResult.message_id;
+
+    // Step 2: B reads its mailbox to discover the message id (the original
+    // message_id from send_message is also valid; reading is what a real
+    // client would do).
+    const readRpc = await rpc(
+      world.baseUrl,
+      world.jwtB,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'read_mailbox', arguments: {} },
+      },
+      sessionB,
+    );
+    const readForB = parseToolResult<{
+      messages: Array<{ id: string; from: string; reply_to: string | null }>;
+    }>(readRpc);
+    expect(readForB.messages).toHaveLength(1);
+    expect(readForB.messages[0]?.id).toBe(originalMessageId);
+    expect(readForB.messages[0]?.from).toBe(world.workerAId);
+    expect(readForB.messages[0]?.reply_to).toBeNull();
+
+    // Step 3: B replies via reply_to. The handler resolves recipient = A
+    // automatically from the original message's from_participant_id.
+    const replyRpc = await rpc(
+      world.baseUrl,
+      world.jwtB,
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: {
+          name: 'reply_to',
+          arguments: {
+            message_id: originalMessageId,
+            type: 'response',
+            body: 'yes I am here',
+          },
+        },
+      },
+      sessionB,
+    );
+    const replyResult = parseToolResult<{
+      message_id: string;
+      replayed: boolean;
+    }>(replyRpc);
+    expect(replyResult.message_id).toMatch(/^[0-9a-f]{8}-/);
+    expect(replyResult.replayed).toBe(false);
+
+    // Step 4: A reads its mailbox and finds the reply with reply_to populated
+    // pointing back at the original message id.
+    const readForA = await rpc(
+      world.baseUrl,
+      world.jwtA,
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'read_mailbox', arguments: {} },
+      },
+      sessionA,
+    );
+    const aMailbox = parseToolResult<{
+      messages: Array<{
+        id: string;
+        from: string;
+        type: string;
+        body: string;
+        reply_to: string | null;
+      }>;
+    }>(readForA);
+    expect(aMailbox.messages).toHaveLength(1);
+    expect(aMailbox.messages[0]?.from).toBe(world.workerBId);
+    expect(aMailbox.messages[0]?.type).toBe('response');
+    expect(aMailbox.messages[0]?.body).toBe('yes I am here');
+    expect(aMailbox.messages[0]?.reply_to).toBe(originalMessageId);
+  });
+
+  it('PRY-028 AC-2: reply_to with a message_id that is not in the caller cell hard-fails with -32602 invalid input', async () => {
+    const initB = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'smoke-b', version: '0.1' },
+      },
+    });
+    const sessionB = initB.sessionId as string;
+    await sendNotification(world.baseUrl, world.jwtB, 'notifications/initialized', sessionB);
+
+    // B has never received a message; any UUIDv7 we pass is not in B's cell.
+    const fakeMessageId = '01900000-0000-7000-8000-deadbeefdead';
+    const replyRpc = await rpc(
+      world.baseUrl,
+      world.jwtB,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'reply_to',
+          arguments: {
+            message_id: fakeMessageId,
+            type: 'response',
+            body: 'whatever',
+          },
+        },
+      },
+      sessionB,
+    );
+
+    // The MCP SDK marshals tool errors as a JSON-RPC error envelope on the
+    // top-level response. Per F-S2 invariant the wire message is the literal
+    // 'invalid input' and the subCode stays opaque.
+    const body = replyRpc.body as { error?: { code: number; message: string } };
+    expect(body.error?.code).toBe(-32602);
+    expect(body.error?.message).toMatch(/invalid input/);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
