@@ -48,9 +48,13 @@ export interface ListAgentsDeps {
 }
 
 export function createListAgentsHandler(deps: ListAgentsDeps) {
-  return async function listAgents(rawInput: unknown, ctx: RequestContext): Promise<AgentListView> {
-    // Step 1: Parse + validate input via zod
-    const input = ListAgentsInputSchema.parse(rawInput);
+  return async function listAgents(
+    input: ListAgentsInput,
+    ctx: RequestContext,
+  ): Promise<AgentListView> {
+    // Step 1: Input is already parsed by the catalog wrapper (matches the
+    // convention of all 6 other tools — schema parse happens at the catalog
+    // boundary).
 
     // Step 2: Decode cursor if present
     const cursor =

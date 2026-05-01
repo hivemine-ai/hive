@@ -69,6 +69,17 @@ function buildCtx(overrides: Partial<RequestContext> = {}): RequestContext {
   };
 }
 
+// Helper that mirrors the catalog wrapper: parse raw input via schema then
+// invoke the handler. Lets tests assert the handler against ergonomic raw
+// inputs while keeping the handler typed (post fix-up R1 from /review of #23).
+function invoke(
+  handler: ReturnType<typeof createListAgentsHandler>,
+  raw: unknown,
+  ctx: RequestContext,
+): ReturnType<typeof handler> {
+  return handler(ListAgentsInputSchema.parse(raw), ctx);
+}
+
 function buildAgent(id: UUIDv7, overrides: Partial<Agent> = {}): Agent {
   return {
     id,
@@ -194,7 +205,7 @@ describe('createListAgentsHandler', () => {
   describe('happy path — no filters', () => {
     it('returns empty agents list when repo returns nothing', async () => {
       const handler = createListAgentsHandler(buildDeps());
-      const result = await handler({}, buildCtx());
+      const result = await invoke(handler, {}, buildCtx());
       expect(result.agents).toHaveLength(0);
       expect(result.next_cursor).toBeNull();
     });
@@ -203,7 +214,7 @@ describe('createListAgentsHandler', () => {
       const agents = [buildAgent(AGENT_A_ID), buildAgent(AGENT_B_ID)];
       const { repo } = buildStubRepo({ agents, nextCursor: null });
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
-      const result = await handler({}, buildCtx());
+      const result = await invoke(handler, {}, buildCtx());
       expect(result.agents).toHaveLength(2);
     });
   });
@@ -214,7 +225,7 @@ describe('createListAgentsHandler', () => {
     it('passes type=worker to listAgents filter', async () => {
       const { repo, capturedFilter } = buildStubRepo();
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
-      await handler({ filter: { type: 'worker' } }, buildCtx());
+      await invoke(handler, { filter: { type: 'worker' } }, buildCtx());
       expect(capturedFilter).toHaveLength(1);
       expect(capturedFilter[0]?.type).toBe('worker');
     });
@@ -222,14 +233,14 @@ describe('createListAgentsHandler', () => {
     it('passes type=scout to listAgents filter', async () => {
       const { repo, capturedFilter } = buildStubRepo();
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
-      await handler({ filter: { type: 'scout' } }, buildCtx());
+      await invoke(handler, { filter: { type: 'scout' } }, buildCtx());
       expect(capturedFilter[0]?.type).toBe('scout');
     });
 
     it('does not pass type when omitted', async () => {
       const { repo, capturedFilter } = buildStubRepo();
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
-      await handler({}, buildCtx());
+      await invoke(handler, {}, buildCtx());
       expect(capturedFilter[0]?.type).toBeUndefined();
     });
   });
@@ -240,14 +251,14 @@ describe('createListAgentsHandler', () => {
     it('passes capability substring to listAgents filter', async () => {
       const { repo, capturedFilter } = buildStubRepo();
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
-      await handler({ filter: { capability: 'summarize' } }, buildCtx());
+      await invoke(handler, { filter: { capability: 'summarize' } }, buildCtx());
       expect(capturedFilter[0]?.capability).toBe('summarize');
     });
 
     it('does not pass capability when omitted', async () => {
       const { repo, capturedFilter } = buildStubRepo();
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
-      await handler({}, buildCtx());
+      await invoke(handler, {}, buildCtx());
       expect(capturedFilter[0]?.capability).toBeUndefined();
     });
   });
@@ -274,7 +285,7 @@ describe('createListAgentsHandler', () => {
       const handler = createListAgentsHandler(
         buildDeps({ participantsRepo: repoWithState, resolver: resolver }),
       );
-      await handler({ filter: { owner: 'admin@example.com' } }, buildCtx());
+      await invoke(handler, { filter: { owner: 'admin@example.com' } }, buildCtx());
       expect(capturedFilter[0]?.ownerId).toBe(OWNER_ID);
     });
 
@@ -286,7 +297,7 @@ describe('createListAgentsHandler', () => {
       const handler = createListAgentsHandler(
         buildDeps({ participantsRepo: repo, resolver: resolver }),
       );
-      const result = await handler({ filter: { owner: 'ghost@example.com' } }, buildCtx());
+      const result = await invoke(handler, { filter: { owner: 'ghost@example.com' } }, buildCtx());
       expect(result.agents).toHaveLength(0);
       expect(result.next_cursor).toBeNull();
     });
@@ -300,7 +311,7 @@ describe('createListAgentsHandler', () => {
         buildDeps({ participantsRepo: repo, resolver: resolver }),
       );
       await expect(
-        handler({ filter: { owner: '!!malformed!!' } }, buildCtx()),
+        invoke(handler, { filter: { owner: '!!malformed!!' } }, buildCtx()),
       ).rejects.toMatchObject({
         code: 'INVALID_INPUT',
         subCode: 'reference_unparseable',
@@ -326,7 +337,11 @@ describe('createListAgentsHandler', () => {
       const handler = createListAgentsHandler(
         buildDeps({ participantsRepo: repoWithState, resolver: resolver }),
       );
-      const result = await handler({ filter: { owner: 'agent-ref@example.com' } }, buildCtx());
+      const result = await invoke(
+        handler,
+        { filter: { owner: 'agent-ref@example.com' } },
+        buildCtx(),
+      );
       expect(result.agents).toHaveLength(0);
       expect(result.next_cursor).toBeNull();
       // listAgents should NOT have been called
@@ -342,7 +357,7 @@ describe('createListAgentsHandler', () => {
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
       const customHiveId = '01900000-0000-7000-8888-000000000001' as UUIDv7;
       const ctx = buildCtx({ identity: buildIdentity({ hiveId: customHiveId }) });
-      await handler({}, ctx);
+      await invoke(handler, {}, ctx);
       expect(capturedFilter[0]?.hiveId).toBe(customHiveId);
     });
   });
@@ -357,7 +372,7 @@ describe('createListAgentsHandler', () => {
       );
       // Input limit 100 would be valid per schema (max 100), but runtime maxPageSize=50 clamps it
       // We test by passing limit=50 (valid schema) and verifying limit propagated is 50
-      await handler({ pagination: { limit: 50 } }, buildCtx());
+      await invoke(handler, { pagination: { limit: 50 } }, buildCtx());
       expect(capturedFilter[0]?.pagination.limit).toBe(50);
     });
 
@@ -367,14 +382,14 @@ describe('createListAgentsHandler', () => {
       const handler = createListAgentsHandler(
         buildDeps({ participantsRepo: repo, maxPageSize: 30 }),
       );
-      await handler({ pagination: { limit: 50 } }, buildCtx());
+      await invoke(handler, { pagination: { limit: 50 } }, buildCtx());
       expect(capturedFilter[0]?.pagination.limit).toBe(30);
     });
 
     it('uses default limit 50 when pagination omitted, clamped by maxPageSize', async () => {
       const { repo, capturedFilter } = buildStubRepo();
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
-      await handler({}, buildCtx());
+      await invoke(handler, {}, buildCtx());
       expect(capturedFilter[0]?.pagination.limit).toBe(50);
     });
   });
@@ -403,7 +418,7 @@ describe('createListAgentsHandler', () => {
       const handler = createListAgentsHandler(
         buildDeps({ participantsRepo: repo, visibilityEngine }),
       );
-      const result = await handler({}, buildCtx());
+      const result = await invoke(handler, {}, buildCtx());
 
       // 2 visible agents (A and C), B filtered out
       expect(result.agents).toHaveLength(2);
@@ -429,7 +444,7 @@ describe('createListAgentsHandler', () => {
       const handler = createListAgentsHandler(
         buildDeps({ participantsRepo: repo, visibilityEngine }),
       );
-      const result = await handler({}, buildCtx());
+      const result = await invoke(handler, {}, buildCtx());
       expect(result.agents).toHaveLength(0);
       // next_cursor is from repo, not from filtered result
       expect(result.next_cursor).not.toBeNull();
@@ -448,7 +463,7 @@ describe('createListAgentsHandler', () => {
         nextCursor: null,
       });
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
-      const result = await handler({}, buildCtx());
+      const result = await invoke(handler, {}, buildCtx());
       const ids = result.agents.map((a) => a.id);
       expect(ids).toContain(AGENT_A_ID);
       expect(ids).not.toContain(AGENT_B_ID);
@@ -468,7 +483,7 @@ describe('createListAgentsHandler', () => {
       const { repo } = buildStubRepo({ agents, nextCursor: page1Cursor });
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
 
-      const page1 = await handler({ pagination: { limit: 2 } }, buildCtx());
+      const page1 = await invoke(handler, { pagination: { limit: 2 } }, buildCtx());
       expect(page1.next_cursor).not.toBeNull();
 
       // Verify next_cursor is decodable and encodes the correct cursor
@@ -482,7 +497,7 @@ describe('createListAgentsHandler', () => {
       const { repo } = buildStubRepo({ agents, nextCursor: null });
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
 
-      const page3 = await handler({ pagination: { limit: 2 } }, buildCtx());
+      const page3 = await invoke(handler, { pagination: { limit: 2 } }, buildCtx());
       expect(page3.next_cursor).toBeNull();
     });
 
@@ -496,7 +511,7 @@ describe('createListAgentsHandler', () => {
       const { repo, capturedFilter } = buildStubRepo();
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
 
-      await handler({ pagination: { cursor: opaqueCursor, limit: 10 } }, buildCtx());
+      await invoke(handler, { pagination: { cursor: opaqueCursor, limit: 10 } }, buildCtx());
       expect(capturedFilter[0]?.pagination.cursor).toBeDefined();
       expect(capturedFilter[0]?.pagination.cursor?.id).toBe(existingCursor.id);
       expect(capturedFilter[0]?.pagination.cursor?.createdAt.toISOString()).toBe(
@@ -508,7 +523,7 @@ describe('createListAgentsHandler', () => {
       const { repo } = buildStubRepo();
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
       await expect(
-        handler({ pagination: { cursor: 'invalid-cursor!!!' } }, buildCtx()),
+        invoke(handler, { pagination: { cursor: 'invalid-cursor!!!' } }, buildCtx()),
       ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'invalid_cursor' });
     });
   });
@@ -522,7 +537,7 @@ describe('createListAgentsHandler', () => {
         nextCursor: null,
       });
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
-      const result = await handler({}, buildCtx());
+      const result = await invoke(handler, {}, buildCtx());
       expect(result.agents).toHaveLength(1);
       const summary = result.agents[0];
       expect(summary).toBeDefined();
@@ -542,7 +557,7 @@ describe('createListAgentsHandler', () => {
       const suspendedAgent = buildAgent(AGENT_B_ID, { state: 'suspended' });
       const { repo } = buildStubRepo({ agents: [activeAgent, suspendedAgent], nextCursor: null });
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
-      const result = await handler({}, buildCtx());
+      const result = await invoke(handler, {}, buildCtx());
       const states = result.agents.map((a) => a.state);
       for (const s of states) {
         expect(['active', 'suspended']).toContain(s);

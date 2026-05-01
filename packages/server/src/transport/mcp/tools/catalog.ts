@@ -154,7 +154,7 @@ export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
       description:
         'Lists agents (workers and scouts) in the hive visible to the caller per the visibility matrix, with optional filters by type, owner, and capability, and keyset pagination.',
       inputSchema: ListAgentsInputSchema,
-      handler: async (input, ctx) => listAgents(input, ctx),
+      handler: async (input, ctx) => listAgents(ListAgentsInputSchema.parse(input), ctx),
     },
   ];
 }
