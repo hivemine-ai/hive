@@ -2,7 +2,7 @@
 
 The Hive MCP server exposes the Auth, Cell Store, Visibility, Audit, and Waggle subsystems behind a Model Context Protocol (MCP) Streamable HTTP transport. Client agents speak JSON-RPC over HTTP to call tools and receive push notifications via SSE.
 
-> **Status:** v0.1 ships Slice 0 (5 tools) plus `reply_to` and `list_agents` from Slice 2. The remaining tool (`get_agent_status`) lands via PRY-030.
+> **Status:** v0.1 ships the full 8-tool catalog — Slice 0 (5 tools) + `reply_to`, `list_agents`, and `get_agent_status` from Slice 2.
 
 ## Quick start
 
@@ -60,23 +60,24 @@ A missing or invalid Bearer returns HTTP 401 with a JSON-RPC error body:
 
 ### Tools
 
-The server registers 7 tools in v0.1 (5 from Slice 0 + `reply_to` + `list_agents` from Slice 2):
+The server registers 8 tools in v0.1 (5 from Slice 0 + `reply_to`, `list_agents`, `get_agent_status` from Slice 2):
 
-| Tool                    | Purpose                                                                                                                                                                               |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `get_agent_config`      | Returns the calling participant's identity, hive, colony, and capabilities.                                                                                                           |
-| `send_message`          | Sends a message from the caller to a recipient (UUID v7, email, agent reference, or `self`).                                                                                          |
-| `reply_to`              | Sends a reply to the original sender of a message in the caller's cell. Recipient is derived from the referenced message; the wire `reply_to` field is propagated to the new message. |
-| `list_agents`           | Lists agents (workers and scouts) in the hive visible to the caller per the visibility matrix, with optional filters by `type` / `owner` / `capability` and keyset pagination.        |
-| `read_mailbox`          | Reads messages from the caller's cell, with optional state / type / sender filters and keyset pagination.                                                                             |
-| `mark_read`             | Marks a batch of message ids as read. Returns `marked` + `ignored` arrays for idempotent client logic.                                                                                |
-| `check_unread_messages` | Returns the count of delivered (unread) messages and the distinct senders.                                                                                                            |
+| Tool                    | Purpose                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_agent_config`      | Returns the calling participant's identity, hive, colony, and capabilities.                                                                                                                                                                                                                                                                                    |
+| `send_message`          | Sends a message from the caller to a recipient (UUID v7, email, agent reference, or `self`).                                                                                                                                                                                                                                                                   |
+| `reply_to`              | Sends a reply to the original sender of a message in the caller's cell. Recipient is derived from the referenced message; the wire `reply_to` field is propagated to the new message.                                                                                                                                                                          |
+| `list_agents`           | Lists agents (workers and scouts) in the hive visible to the caller per the visibility matrix, with optional filters by `type` / `owner` / `capability` and keyset pagination.                                                                                                                                                                                 |
+| `get_agent_status`      | Returns the presence (`online` / `offline`) and `last_connected_at` of an agent visible to the caller. Online resolves to `max(sessions)`; offline reads the persisted `agents.last_connected_at` (`null` if never connected). Visibility-denied collapses to `RECIPIENT_UNREACHABLE` for uniform privacy (indistinguishable from a non-existent participant). |
+| `read_mailbox`          | Reads messages from the caller's cell, with optional state / type / sender filters and keyset pagination.                                                                                                                                                                                                                                                      |
+| `mark_read`             | Marks a batch of message ids as read. Returns `marked` + `ignored` arrays for idempotent client logic.                                                                                                                                                                                                                                                         |
+| `check_unread_messages` | Returns the count of delivered (unread) messages and the distinct senders.                                                                                                                                                                                                                                                                                     |
 
 Tool inputs are validated against a JSON Schema (derived from zod). Refer to `tools/list` from any MCP client to inspect the live schemas. Tool results are returned as `structuredContent` (preferred) plus a JSON-stringified `text` content fallback.
 
 #### Recipient reference formats
 
-Tools that accept a recipient (`send_message`) or a sender filter (`read_mailbox.filter.from`) parse the value against four formats, in order:
+Tools that accept a recipient (`send_message`, `get_agent_status`) or a sender filter (`read_mailbox.filter.from`) parse the value against four formats, in order:
 
 | Format           | Example                        | Resolves to                                                                                                                                   |
 | ---------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -227,7 +228,7 @@ The server also reads the env vars defined by the Auth, Cell Store, Visibility, 
 | `-32004`      | Recipient not reachable. Cell closed, recipient missing, or visibility denied (the wire never distinguishes these reasons — privacy uniformity). |
 | `-32602`      | Invalid params. Zod validation failed, or domain-side `INVALID_INPUT`.                                                                           |
 | `-32603`      | Internal error. Something unexpected happened — check the server logs.                                                                           |
-| `-32601`      | Method not found. The tool name is not in the catalog (e.g. trying to call `get_agent_status` while still in Slice 2 work).                      |
+| `-32601`      | Method not found. The tool name is not in the catalog (the catalog ships 8 tools in v0.1; unknown names fall here).                              |
 
 The semantic `subCode` (e.g. `cell_closed_or_missing`, `visibility_denied`) is **never** sent to the client — it lives in the structured logs only.
 

@@ -1,7 +1,7 @@
 // Tool catalog for the MCP transport. Slice 0 (PRY-006) declared 5 tools;
 // Slice 2 adds the 3 deferred tools one at a time. PRY-028 added `reply_to`
-// (6/8), PRY-029 adds `list_agents` (7/8). The remaining 1
-// (`get_agent_status`) lands in PRY-030.
+// (6/8), PRY-029 added `list_agents` (7/8), PRY-030 closes the v0.1 OSS catalog
+// at 8/8 by adding `get_agent_status`.
 
 import type { z } from 'zod';
 
@@ -18,6 +18,12 @@ import {
   createGetAgentConfigHandler,
   type GetAgentConfigDeps,
 } from './get-agent-config.js';
+import {
+  GetAgentStatusInputSchema,
+  type GetAgentStatusOutput,
+  createGetAgentStatusHandler,
+  type GetAgentStatusDeps,
+} from './get-agent-status.js';
 import {
   ListAgentsInputSchema,
   createListAgentsHandler,
@@ -57,7 +63,8 @@ export type ToolName =
   | 'read_mailbox'
   | 'mark_read'
   | 'check_unread_messages'
-  | 'list_agents';
+  | 'list_agents'
+  | 'get_agent_status';
 
 export interface ToolDefinition {
   name: ToolName;
@@ -77,7 +84,8 @@ export interface ToolCatalogDeps
     ReadMailboxDeps,
     MarkReadDeps,
     CheckUnreadMessagesDeps,
-    ListAgentsDeps {}
+    ListAgentsDeps,
+    GetAgentStatusDeps {}
 
 /**
  * Output type union — convenience export for callers that want to type-narrow
@@ -90,7 +98,8 @@ export type ToolOutput =
   | ReadMailboxWireOutput
   | MarkReadOutput
   | CheckUnreadMessagesOutput
-  | AgentListView;
+  | AgentListView
+  | GetAgentStatusOutput;
 
 export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
   const getAgentConfig = createGetAgentConfigHandler(deps);
@@ -100,6 +109,7 @@ export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
   const markRead = createMarkReadHandler(deps);
   const checkUnreadMessages = createCheckUnreadMessagesHandler(deps);
   const listAgents = createListAgentsHandler(deps);
+  const getAgentStatus = createGetAgentStatusHandler(deps);
 
   return [
     {
@@ -155,6 +165,14 @@ export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
         'Lists agents (workers and scouts) in the hive visible to the caller per the visibility matrix, with optional filters by type, owner, and capability, and keyset pagination.',
       inputSchema: ListAgentsInputSchema,
       handler: async (input, ctx) => listAgents(ListAgentsInputSchema.parse(input), ctx),
+    },
+    {
+      name: 'get_agent_status',
+      title: 'Get agent status',
+      description:
+        'Returns the presence (online/offline) and last_connected_at of an agent visible to the caller. last_connected_at is derived from the live session set when online, and from the persisted agents.last_connected_at when offline (null if the agent never connected).',
+      inputSchema: GetAgentStatusInputSchema,
+      handler: async (input, ctx) => getAgentStatus(GetAgentStatusInputSchema.parse(input), ctx),
     },
   ];
 }

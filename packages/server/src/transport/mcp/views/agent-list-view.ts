@@ -78,12 +78,19 @@ function projectAgent(agent: Agent): AgentSummary {
     name: agent.name,
     type: agent.type,
     owner_id: agent.ownerId,
-    // Agent.state is 'active' | 'suspended' | 'revoked'; revoked agents are
-    // filtered pre-listado in the repo, but the type includes it. Cast is safe
-    // because the handler post-filters revoked before calling this adapter.
-    state: agent.state as 'active' | 'suspended',
+    // The handler post-filters `revoked` before calling this adapter, so the
+    // narrow is a defense-in-depth assert: a revoked agent reaching projection
+    // is a bug upstream, not a wire-shape question. Throwing here surfaces it
+    // loudly rather than silently relabelling state on the wire (PRY-030 N1
+    // resolution: replaces the prior `as 'active' | 'suspended'` escape hatch).
+    state: assertWireState(agent.state),
     capabilities: agent.capabilities,
   };
+}
+
+function assertWireState(state: Agent['state']): 'active' | 'suspended' {
+  if (state === 'active' || state === 'suspended') return state;
+  throw new CellError('INVALID_INPUT', { subCode: 'agent_revoked_in_projection' });
 }
 
 /**

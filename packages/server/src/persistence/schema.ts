@@ -53,6 +53,7 @@ export interface AgentsTable {
   state: 'active' | 'suspended' | 'revoked';
   created_at: Generated<IsoTimestamp>;
   revoked_at: IsoTimestamp | null;
+  last_connected_at: IsoTimestamp | null;
 }
 
 export interface CredentialsTable {

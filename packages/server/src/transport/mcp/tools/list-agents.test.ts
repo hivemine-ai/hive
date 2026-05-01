@@ -93,6 +93,7 @@ function buildAgent(id: UUIDv7, overrides: Partial<Agent> = {}): Agent {
     state: 'active',
     createdAt: FIXED_DATE,
     revokedAt: null,
+    lastConnectedAt: null,
     ...overrides,
   };
 }
@@ -121,6 +122,7 @@ function buildStubRepo(result: ListAgentsResult = { agents: [], nextCursor: null
       capturedFilter.push(filter);
       return Promise.resolve(result);
     },
+    updateAgentLastConnectedAt: vi.fn(),
   };
 
   return { repo, capturedFilter };

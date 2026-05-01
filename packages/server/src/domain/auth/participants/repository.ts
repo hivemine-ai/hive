@@ -9,6 +9,7 @@ import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
 
 import type { DbDialect } from '#persistence/db.js';
 import { intToBool, isoToDate, jsonParse } from '#persistence/type-mappers.js';
+import type { Logger } from '#observability/logger.js';
 import type {
   AgentsTable,
   Database,
@@ -106,6 +107,7 @@ function rowToAgent(row: Selectable<AgentsTable>): Agent {
     state: row.state,
     createdAt: isoToDate(row.created_at),
     revokedAt: row.revoked_at ? isoToDate(row.revoked_at) : null,
+    lastConnectedAt: row.last_connected_at ? isoToDate(row.last_connected_at) : null,
   };
 }
 
@@ -154,6 +156,14 @@ export interface ParticipantsReadRepo {
    * shape and for serializing `AuditCursor` to an opaque string.
    */
   listAgents(filter: ListAgentsFilter): Promise<ListAgentsResult>;
+  /**
+   * Stamps `agents.last_connected_at` with `timestamp` for the given agent. Invoked
+   * as a non-blocking side effect of `presenceRegistry.subscribe` for `worker` and
+   * `scout` participants — never for `hivekeeper`. Silent no-op (logger.warn) when
+   * `agentId` does not resolve to a row, so a deleted-agent race never aborts the
+   * subscribe path. Idempotent: repeat calls overwrite the value with the latest.
+   */
+  updateAgentLastConnectedAt(agentId: UUIDv7, timestamp: Date): Promise<void>;
 }
 
 export interface ParticipantsReadRepoOptions {
@@ -165,6 +175,12 @@ export interface ParticipantsReadRepoOptions {
    * the wire cap of 100 is the binding constraint in production).
    */
   listMaxPageSize?: number;
+  /**
+   * Logger consumed by `updateAgentLastConnectedAt` to warn when the targeted
+   * `agentId` does not resolve (deleted between subscribe and the async UPDATE).
+   * Optional — falls back to a noop logger so existing test callsites don't break.
+   */
+  logger?: Logger;
 }
 
 export function createParticipantsReadRepo(
@@ -173,6 +189,7 @@ export function createParticipantsReadRepo(
   opts: ParticipantsReadRepoOptions = {},
 ): ParticipantsReadRepo {
   const listMaxPageSize = opts.listMaxPageSize ?? 200;
+  const logger = opts.logger;
   // Dialect-aware substring index (1-based) of the first `@` in `email`.
   // INSTR is SQLite-only; STRPOS is Postgres-only — kept as `sql` fragments so
   // Kysely passes them through verbatim and the planner picks the right path.
@@ -336,6 +353,20 @@ export function createParticipantsReadRepo(
         };
       }
       return null;
+    },
+
+    async updateAgentLastConnectedAt(agentId, timestamp) {
+      const result = await db
+        .updateTable('agents')
+        .set({ last_connected_at: timestamp.toISOString() })
+        .where('id', '=', agentId)
+        .executeTakeFirst();
+      if (result.numUpdatedRows === 0n) {
+        logger?.warn(
+          { agentId },
+          'updateAgentLastConnectedAt_no_row — agent vanished between subscribe and async UPDATE',
+        );
+      }
     },
   };
 }

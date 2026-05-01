@@ -40,6 +40,7 @@ export interface Agent {
   state: ParticipantState;
   createdAt: Date;
   revokedAt: Date | null;
+  lastConnectedAt: Date | null;
 }
 
 /**

@@ -54,6 +54,7 @@ function rowToAgent(row: Selectable<AgentsTable>): Agent {
     state: row.state,
     createdAt: new Date(row.created_at),
     revokedAt: row.revoked_at ? new Date(row.revoked_at) : null,
+    lastConnectedAt: row.last_connected_at ? new Date(row.last_connected_at) : null,
   };
 }
 

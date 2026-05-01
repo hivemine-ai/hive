@@ -21,6 +21,7 @@
 
 import { v7 as uuidv7 } from 'uuid';
 
+import type { ParticipantsReadRepo } from '#domain/auth/participants/repository.js';
 import type { UUIDv7 } from '#domain/auth/types.js';
 import { warnSweepMisconfig } from '#observability/config-guard.js';
 import type { Logger } from '#observability/logger.js';
@@ -89,6 +90,15 @@ export interface PresenceRegistryConfig {
    * on logs). Composition root passes the application logger.
    */
   logger?: Logger;
+  /**
+   * Participants repository used to persist `agents.last_connected_at` as a
+   * non-blocking side effect of every successful `subscribe` for `worker` and
+   * `scout` callers (skipped for `hivekeeper`). The UPDATE is fire-and-forget;
+   * a failure is logged at `warn` and never aborts the subscribe (PRY-030).
+   * Optional — when undefined (eg. unit tests scaffolded without auth), the
+   * side effect is silently disabled.
+   */
+  participantsRepo?: Pick<ParticipantsReadRepo, 'updateAgentLastConnectedAt'>;
 }
 
 export interface PresenceRegistry {
@@ -314,6 +324,28 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
         // Swallow — subscribe MUST NOT fail because of a hook bug. If the
         // composition wired something that throws, we still return the
         // subscription; the client can use polling fallbacks.
+      }
+
+      // PRY-030 — persist `last_connected_at` as a non-blocking side effect for
+      // worker/scout callers. Hivekeepers are skipped (the column lives on the
+      // `agents` table; Hivekeepers don't have one). The UPDATE happens off the
+      // hot path (`Promise.resolve().then(...)`); a rejection is logged and
+      // swallowed so subscribe never fails because of persistence flakiness.
+      if (config.participantsRepo !== undefined && input.callerContext.kind !== 'hivekeeper') {
+        const repo = config.participantsRepo;
+        void Promise.resolve()
+          .then(() => repo.updateAgentLastConnectedAt(participantId, tNow))
+          .catch((err: unknown) => {
+            logger?.warn(
+              {
+                event: 'presence_last_connected_at_update_failed',
+                participantId,
+                subscriptionId,
+                err,
+              },
+              'last_connected_at update failed; subscribe already succeeded',
+            );
+          });
       }
 
       logger?.info(

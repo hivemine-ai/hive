@@ -60,11 +60,10 @@ describe('migrateToLatest', () => {
     const downResult = await migrateDown(db);
     expect(downResult.results?.[0]?.status).toBe('Success');
 
-    // `migrateDown` only rolls back the most recent migration. With PRY-027 in
-    // the catalog, the latest migration is `20260430120000_idempotency-key-scope-recipient`,
-    // whose DOWN drops + recreates `idempotency_keys` with the legacy
-    // `(sender_id, key)` PK. All tables remain present (the table is recreated
-    // by DOWN); only the schema of `idempotency_keys` is rolled back.
+    // `migrateDown` only rolls back the most recent migration. With PRY-030 in
+    // the catalog, the latest migration is `20260501120000_add-last-connected-at-to-agents`,
+    // whose DOWN drops the `last_connected_at` column from `agents`. All tables
+    // remain present; only that one column is removed.
     const tables = await sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'kysely_%'
       ORDER BY name
@@ -72,14 +71,13 @@ describe('migrateToLatest', () => {
     const remaining = tables.rows.map((r) => r.name).sort();
     expect(remaining).toEqual(EXPECTED_TABLES);
 
-    // Schema rollback assertion: the `recipient_id` column added by the latest
-    // migration is gone after DOWN.
-    const cols = await sql<{ name: string }>`
-      PRAGMA table_info(idempotency_keys)
+    // Schema rollback assertion: the `last_connected_at` column added by the
+    // latest migration is gone after DOWN.
+    const agentCols = await sql<{ name: string }>`
+      PRAGMA table_info(agents)
     `.execute(db);
-    const colNames = cols.rows.map((r) => r.name).sort();
-    expect(colNames).not.toContain('recipient_id');
-    expect(colNames).toEqual(['created_at', 'key', 'message_id', 'sender_id']);
+    const agentColNames = agentCols.rows.map((r) => r.name);
+    expect(agentColNames).not.toContain('last_connected_at');
   });
 
   it('inserts a default state row with CURRENT_TIMESTAMP working in SQLite', async () => {

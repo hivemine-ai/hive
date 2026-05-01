@@ -52,7 +52,7 @@ export interface McpTransportDeps {
 export interface McpTransport {
   /** Process-wide session store shared across all per-session McpServer instances. */
   sessionStore: SessionStore;
-  /** Tool catalog (7 tools: 5 from Slice 0 + reply_to from Slice 2 / PRY-028 + list_agents from Slice 2 / PRY-029). */
+  /** Tool catalog (8 tools: 5 from Slice 0 + reply_to/list_agents/get_agent_status from Slice 2 / PRY-028+PRY-029+PRY-030). */
   toolCatalog: ToolDefinition[];
   /** Build a new `McpServer` for a brand-new initialize request. */
   buildMcpServerForSession(): McpServer;
@@ -74,7 +74,7 @@ export interface McpTransport {
 
 const DEFAULT_SERVER_INFO = { name: 'hive', version: '0.1.0-dev' };
 const DEFAULT_INSTRUCTIONS =
-  'Hive v0.1 — agent messaging. Use get_agent_config to learn your identity, list_agents to discover others, send_message or reply_to to talk, check_unread_messages and read_mailbox to receive, mark_read to acknowledge.';
+  'Hive v0.1 — agent messaging. Use get_agent_config to learn your identity, list_agents to discover others, get_agent_status to check who is online, send_message or reply_to to talk, check_unread_messages and read_mailbox to receive, mark_read to acknowledge.';
 
 export function createMcpTransport(deps: McpTransportDeps): McpTransport {
   const sessionStore = createSessionStore();
@@ -94,6 +94,7 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
     reader: deps.reader,
     resolver,
     visibilityEngine: deps.visibilityEngine,
+    presenceRegistry: deps.presenceRegistry,
     maxPageSize: deps.listAgentsMaxPageSize,
   });
 
@@ -126,7 +127,7 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
     });
 
     // Use the low-level Server API directly. The high-level `registerTool`
-    // wraps this with parsed-args + zod-shape inference; for our 7 tools the
+    // wraps this with parsed-args + zod-shape inference; for our 8 tools the
     // shape inference is brittle (empty `z.object({})` schemas don't round-trip
     // cleanly), so we own the dispatch and validation.
     const lowLevelServer = mcpServer.server;
