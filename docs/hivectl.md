@@ -147,17 +147,78 @@ hivectl audit query [--category <c>...] [--decision <d>] [--actor-id <uuid>]
 
 Limit is capped at 500. Order is `occurred_at DESC, id DESC`.
 
+### `serve`
+
+```
+hivectl serve [--port N] [--host <addr>] [--log-level <level>] [--log-pretty]
+```
+
+Runs the Hive MCP server in the foreground (PRY-031). Blocks until SIGINT/SIGTERM. Logs to stdout/stderr (JSON by default; pretty only with `--log-pretty` or `HIVE_MCP_LOG_PRETTY=true`). Reuses the server `buildWire` directly — no daemonize, no PID file (delegate-to-OS supervision via `service install`).
+
+Bind-address precedence (highest wins): `--host` flag → `HIVE_MCP_HTTP_HOST` env → `<workingDir>/config.json`'s `httpHost` (set by `config network`) → default `127.0.0.1`.
+
+### `service`
+
+```
+hivectl service install [--user <name>] [--working-dir <path>] [--bind <local-only|bind-all>]
+hivectl service uninstall
+hivectl service start
+hivectl service stop
+hivectl service restart
+hivectl service status [--logs N]
+```
+
+Single CLI surface for the OS-supervised lifecycle. Per [ADR-019](https://github.com/hivemine-ai/hive-vault) alternative B.2 the OS supervisor (systemd / launchd) owns process supervision; the wrappers exist for UX uniformity:
+
+- `service install` writes the systemd unit (`/etc/systemd/system/hive.service`, requires root) or launchd plist (`~/Library/LaunchAgents/com.hivemine.hivectl.plist`, user-level) pointing at `process.execPath`. Linux installs create the dedicated `hive` system user and chown the working dir (closes [INC-2026-001](https://github.com/hivemine-ai/hive-vault) FLAG-002 — server no longer runs as root). The optional `--bind` flag delegates to `config network` before writing the unit.
+- `service uninstall` is idempotent: it stops the service first if active, removes the unit/plist, and reloads the supervisor.
+- `service start | stop | restart` are thin wrappers over `systemctl <verb> hive` (Linux) / `launchctl load -w · unload` (Mac). Fire-and-forget — no health-check post-action; use `service status` to verify.
+- `service status` parses the OS supervisor output and prints a uniform shape:
+
+  ```
+  Service:     hive
+  Installed:   yes (systemd | launchd)
+  State:       running | stopped | error | not-installed
+  PID:         12345        (only if running)
+  Uptime:      2h 14m       (only if running; "-" on Mac — launchctl does not expose start time)
+  Last log:    <last line>  (only if running)
+  ```
+
+  Exit code: `0` if `running`, `1` otherwise (script-friendly: `if hivectl service status > /dev/null; then echo OK; fi`). `--logs N` shows the last N journal/log lines instead of the single last-log line.
+
+Pre-flight checks: `service start | stop | restart | status` fail with a clear `service not installed. Run: hivectl service install` instead of the cryptic OS error when no unit/plist is present.
+
+Windows is not supported as a native service host (`UNSUPPORTED_PLATFORM`). Use Docker per [`deployment/README.md`](../deployment/README.md).
+
+### `config network`
+
+```
+hivectl config network <local-only | bind-all>
+```
+
+Toggles the persisted bind address consumed by `serve` boot. Writes `<workingDir>/config.json` with `httpHost: "127.0.0.1"` (`local-only`, default) or `"0.0.0.0"` (`bind-all`). On `bind-all` an explicit warning prints to stderr (closes FLAG-005):
+
+```
+WARNING: bind-all exposes the MCP server on all network interfaces.
+         Without TLS termination via a reverse proxy, JWTs travel in plaintext
+         (INC-2026-001 FLAG-005). See deployment/README.md § TLS termination.
+```
+
+The setting takes effect on the next `hivectl serve` boot — restart the service after toggling.
+
 ## Error codes
 
-| Exit | Constant            | Triggers                                                                                                           |
-| ---- | ------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| 0    | `EXIT_OK`           | success                                                                                                            |
-| 1    | `EXIT_USER_ERROR`   | malformed input (`AuthError.INVALID_INPUT`, `CliError.CONFIG_INVALID`), confirm declined                           |
-| 2    | `EXIT_INTERNAL`     | unhandled exception, DB error, fs error                                                                            |
-| 3    | `EXIT_NOT_FOUND`    | `AuthError.PARTICIPANT_NOT_FOUND`, `AuthError.PARTICIPANT_NOT_FOUND_FOR_ISSUE`, `CellError.CELL_NOT_FOUND`         |
-| 4    | `EXIT_PRECONDITION` | `HIVE_ALREADY_INITIALIZED`, `CREDENTIAL_ALREADY_REVOKED`, `INVALID_STATE_TRANSITION`, `LAST_ADMIN_INVARIANT`, etc. |
-| 5    | `EXIT_PERMISSION`   | `--operator-id` not an active admin (`OPERATOR_ID_NOT_ADMIN`), `INSUFFICIENT_PRIVILEGE`                            |
-| 130  | `EXIT_INTERRUPTED`  | SIGINT / SIGTERM cancelled the operation                                                                           |
+| Exit | Constant            | Triggers                                                                                                                                                                         |
+| ---- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | `EXIT_OK`           | success                                                                                                                                                                          |
+| 1    | `EXIT_USER_ERROR`   | malformed input (`AuthError.INVALID_INPUT`, `CliError.CONFIG_INVALID`), confirm declined                                                                                         |
+| 2    | `EXIT_INTERNAL`     | unhandled exception, DB error, fs error                                                                                                                                          |
+| 3    | `EXIT_NOT_FOUND`    | `AuthError.PARTICIPANT_NOT_FOUND`, `AuthError.PARTICIPANT_NOT_FOUND_FOR_ISSUE`, `CellError.CELL_NOT_FOUND`                                                                       |
+| 4    | `EXIT_PRECONDITION` | `HIVE_ALREADY_INITIALIZED`, `CREDENTIAL_ALREADY_REVOKED`, `INVALID_STATE_TRANSITION`, `LAST_ADMIN_INVARIANT`, `ROOT_REQUIRED`, `WORKING_DIR_PERMISSION`, `SERVICE_NOT_INSTALLED` |
+| 5    | `EXIT_PERMISSION`   | `--operator-id` not an active admin (`OPERATOR_ID_NOT_ADMIN`), `INSUFFICIENT_PRIVILEGE`                                                                                          |
+| 130  | `EXIT_INTERRUPTED`  | SIGINT / SIGTERM cancelled the operation                                                                                                                                         |
+
+`UNSUPPORTED_PLATFORM` (Windows or other non-Linux/Mac) maps to `EXIT_USER_ERROR` (1).
 
 ## Configuration
 

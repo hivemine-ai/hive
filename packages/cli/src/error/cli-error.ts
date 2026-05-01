@@ -8,7 +8,11 @@ export type CliErrorCode =
   | 'OPERATOR_ID_NOT_ADMIN'
   | 'CONFIRMATION_DECLINED'
   | 'INTERRUPTED'
-  | 'CONFIG_INVALID';
+  | 'CONFIG_INVALID'
+  | 'UNSUPPORTED_PLATFORM'
+  | 'ROOT_REQUIRED'
+  | 'WORKING_DIR_PERMISSION'
+  | 'SERVICE_NOT_INSTALLED';
 
 export interface CliErrorOptions {
   subCode?: string;

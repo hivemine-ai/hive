@@ -16,6 +16,11 @@
 import { buildWire, createLogger } from '@hive/server';
 import type { LoggerOptions, Wire, WireConfig } from '@hive/server';
 
+import { getDefaultConfigPath } from '../platform/detect.js';
+
+import { readConfigFile, resolveHttpHost } from './config/loader.js';
+import type { PersistedConfig } from './config/loader.js';
+
 export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
 export interface ServeCommandOpts {
@@ -44,10 +49,19 @@ const VALID_LOG_LEVELS: ReadonlySet<LogLevel> = new Set([
 export function resolveServeOverrides(
   opts: ServeCommandOpts,
   env: NodeJS.ProcessEnv,
+  configFile: PersistedConfig | null = null,
 ): { wire: WireConfig; logger: LoggerOptions } {
   const wire: WireConfig = {};
   if (opts.port !== undefined) wire.httpPort = opts.port;
-  if (opts.host !== undefined) wire.httpHost = opts.host;
+  // httpHost precedence (PRY-032): flag > env > config file > default 127.0.0.1.
+  // We always set `wire.httpHost` here so the server's resolveWireConfigFromEnv
+  // default ('0.0.0.0') is never reached from the CLI path — closes
+  // INC-2026-001 FLAG-005 (LAN bind by default without operator opt-in).
+  wire.httpHost = resolveHttpHost({
+    flag: opts.host,
+    env: env['HIVE_MCP_HTTP_HOST'],
+    configFile,
+  });
 
   const logger: LoggerOptions = {};
   const levelFlag = opts.logLevel;
@@ -104,6 +118,10 @@ export interface RunServeDeps {
   createLoggerFn?: typeof createLogger;
   /** Test seam: invoked once the wire has been built and successfully started. */
   onWireStarted?: (wire: Wire) => void;
+  /** Override the persisted config path. Defaults to `getDefaultConfigPath()`. */
+  configPath?: string;
+  /** Test seam: replace the config-file reader. */
+  readConfigFileFn?: (path: string) => PersistedConfig | null;
 }
 
 /**
@@ -120,9 +138,37 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
   const proc: SignalsProcess = deps.proc ?? (process as unknown as SignalsProcess);
   const buildWireFn = deps.buildWireFn ?? buildWire;
   const createLoggerFn = deps.createLoggerFn ?? createLogger;
+  const readCfg = deps.readConfigFileFn ?? readConfigFile;
 
-  const { wire: wireOverrides, logger: loggerOpts } = resolveServeOverrides(opts, env);
+  let configFile: PersistedConfig | null = null;
+  let configReadError: Error | null = null;
+  let resolvedConfigPath: string | null = null;
+  try {
+    resolvedConfigPath = deps.configPath ?? getDefaultConfigPath();
+    configFile = readCfg(resolvedConfigPath);
+  } catch (err) {
+    // Best-effort: capture the error and surface it via the logger once it
+    // exists (the read happens before logger creation because the persisted
+    // `httpHost` may need to flow into the wire override). Falling back to
+    // the env / default chain means the operator's config drift is silently
+    // ignored unless we log here.
+    configFile = null;
+    configReadError = err instanceof Error ? err : new Error(String(err));
+  }
+
+  const { wire: wireOverrides, logger: loggerOpts } = resolveServeOverrides(opts, env, configFile);
   const logger = createLoggerFn(loggerOpts);
+
+  if (configReadError !== null) {
+    logger.warn(
+      {
+        event: 'config_file_read_failed',
+        configPath: resolvedConfigPath,
+        err: configReadError.message,
+      },
+      'config file unreadable; falling back to env/default for httpHost',
+    );
+  }
 
   let wire: Awaited<ReturnType<typeof buildWireFn>>;
   try {

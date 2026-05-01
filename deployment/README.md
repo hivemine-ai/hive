@@ -16,6 +16,42 @@ This directory ships:
 - `.env.example` — copy to `.env` to override defaults.
 - `.dockerignore` — keeps the build context lean.
 
+## Standalone install (no Docker, native systemd / launchd)
+
+For operators who prefer running Hive directly under the host's process supervisor — bare metal, VMs, or a single-tenant box — `hivectl service install` writes the systemd unit (Linux) or launchd plist (Mac) and the `service` group manages the lifecycle uniformly across both OSes:
+
+```bash
+# 1. Build hivectl from source (until PRY-033 ships SEA + npm publish).
+git clone https://github.com/hivemine-ai/hive
+cd hive
+pnpm install && pnpm build
+alias hivectl='node $PWD/packages/cli/dist/main.js'
+
+# 2. Bootstrap the Hive (creates schema + signing key + admin Hivekeeper).
+hivectl init --admin-email you@example.com --output-credential admin.jwt
+
+# 3. Install the OS service (Linux requires sudo — the unit lives in /etc/systemd/system/).
+sudo hivectl service install --bind local-only       # Linux
+hivectl service install --bind local-only            # Mac
+# → "Service installed. Run: sudo systemctl enable hive && sudo systemctl start hive"
+
+# 4. Start + verify.
+hivectl service start         # delegates to systemctl/launchctl
+hivectl service status        # uniform output across OSes; exit 0 if running
+curl -i http://127.0.0.1:8443/healthz   # → 200 OK
+
+# 5. To expose on the LAN, opt in explicitly (warning to stderr citing FLAG-005).
+hivectl config network bind-all
+hivectl service restart
+# → Front with TLS-terminating reverse proxy before exposing publicly. See § TLS termination.
+```
+
+Linux installs run the server under a dedicated `hive` system user (created at install time via `useradd -r -s /bin/false`). The working directory is `/var/lib/hive` (override with `--working-dir`); the server's data, signing keys, and config live there. Mac installs run as the calling user (launchd user-level agents); the working directory is `~/Library/Application Support/Hive` and logs go to `~/Library/Logs/Hive/{hive.log,hive.err}`.
+
+`hivectl service uninstall` is idempotent and stops the service first if active. It does NOT remove the working directory (data is preserved across reinstalls) — drop it manually with `rm -rf /var/lib/hive` if you want a clean slate.
+
+> Manual smoke test of the lifecycle: there are no automated E2E tests for `service install` / `start` / etc. (CI runners can't reliably simulate `systemctl`). To exercise manually: `hivectl service install` → `hivectl service start` → `hivectl service status` (must report `State: running`) → `hivectl service stop` → `hivectl service uninstall`.
+
 ## Quick start (SQLite-in-container, default)
 
 The default compose flow runs only the server, against a SQLite database in

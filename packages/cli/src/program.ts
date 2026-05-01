@@ -12,6 +12,7 @@ import { runAuditQuery } from './commands/audit/query.js';
 import { runCreateAgent } from './commands/agent/create.js';
 import { runListAgents } from './commands/agent/list.js';
 import { runRevokeAgent } from './commands/agent/revoke.js';
+import { registerConfigGroup } from './commands/config/index.js';
 import { runIssueCredential } from './commands/credential/issue.js';
 import { runListCredentials } from './commands/credential/list.js';
 import { runRevokeCredential } from './commands/credential/revoke.js';
@@ -21,6 +22,7 @@ import { runCreateHivekeeper } from './commands/hivekeeper/create.js';
 import { runInit } from './commands/init.js';
 import { performMigrate } from './commands/migrate.js';
 import { parseLogLevel, runServe } from './commands/serve.js';
+import { registerServiceGroup } from './commands/service/index.js';
 import { mapErrorToExit } from './error/handler.js';
 import { asOptionalNumber, asOptionalString, asString, asStringArray } from './input/coerce.js';
 import { parseUuidV7 } from './input/parse-uuid.js';
@@ -506,6 +508,24 @@ export function buildProgram(): BuildProgramResult {
         (value, mode) => formatOutputList(value, { mode, schema: auditEntrySchema }),
       );
     });
+
+  // ── service (lifecycle of the OS-supervised hive service) ──────────────
+  // Pre-Fase 2 decision (PRY-032): the group ships with 6 verbs:
+  //   install / uninstall / start / stop / restart / status
+  // The hooks bridge `setExitCode` so failures bubble up through main.ts.
+  const lifecycleHooks = {
+    setExitCode: (code: number) => {
+      if (stateRef.current === null) {
+        stateRef.current = makeState(program.opts<RootCliOpts>());
+      }
+      stateRef.current.exitCode = code;
+    },
+  };
+  registerServiceGroup(program, lifecycleHooks);
+
+  // ── config (persistent operator-tweakable settings) ────────────────────
+  // Currently a single child: `config network <local-only | bind-all>`.
+  registerConfigGroup(program, lifecycleHooks);
 
   return {
     program,
