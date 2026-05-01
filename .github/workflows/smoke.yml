@@ -74,7 +74,10 @@ jobs:
           set -euo pipefail
           # nohup + disown keeps the process alive after this step ends. PID
           # is written to a file so the cleanup step can SIGTERM it.
-          nohup node packages/server/dist/main.js > "${{ runner.temp }}/server.log" 2>&1 &
+          # `hivectl serve` (PRY-031) is the canonical foreground entry point —
+          # the legacy `packages/server/dist/main.js` still works but emits a
+          # deprecation warning.
+          nohup node packages/cli/dist/main.js serve > "${{ runner.temp }}/server.log" 2>&1 &
           echo $! > "${{ runner.temp }}/server.pid"
           echo "Server started — pid=$(cat "${{ runner.temp }}/server.pid")"
 

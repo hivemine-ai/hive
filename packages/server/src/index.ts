@@ -87,3 +87,8 @@ export { stubVisibilityEngine } from './composition/stubs.js';
 // CLI wire — public surface for hivectl per the hivectl + Admin Operations tech spec.
 export { startCli, stopCli, resolveCliConfigFromEnv } from './composition/wire.js';
 export type { CliRuntime, CliWireConfig, CliResolvedConfig } from './composition/wire.js';
+
+// Server wire — public surface for `hivectl serve` per the hivectl + Admin
+// Operations tech spec § "serve + service group" (PRY-031).
+export { buildWire, resolveWireConfigFromEnv } from './composition/wire.js';
+export type { Wire, WireConfig, WireDeps } from './composition/wire.js';
