@@ -69,10 +69,10 @@ export function createGetAgentStatusHandler(deps: GetAgentStatusDeps) {
     const presence = deps.presenceRegistry.getPresence(targetId);
     const participantState = await deps.participantsRepo.getParticipantState(targetId);
 
-    // Step 4: resolve effective presence. Per producto Tool 7 — `online` iff
-    // the registry sees a live session AND the DB state is `active`. A
-    // suspended/revoked agent that still holds an open session reports as
-    // `offline` (state internal — never crosses the wire).
+    // Step 4: resolve effective presence. Per the product spec Tool 7 —
+    // `online` iff the registry sees a live session AND the DB state is
+    // `active`. A suspended/revoked agent that still holds an open session
+    // reports as `offline` (state internal — never crosses the wire).
     const isStateActive = participantState !== null && participantState.state === 'active';
     const effectiveOnline = presence.online && isStateActive;
 
