@@ -21,6 +21,16 @@ if (!original.includes(needle)) {
   process.exit(1);
 }
 
-const patched = original.replace(needle, replacement);
+// `replaceAll` is defensive — esbuild's CJS output emits a single top-level
+// `import_meta` per bundle today, but the contract with esbuild's internal
+// naming scheme is undocumented. Patching every occurrence keeps the script
+// correct if a future bundler version emits more than one. The post-replace
+// equality check then asserts the patch took effect (catches accidental
+// no-ops if the needle ever drifts).
+const patched = original.replaceAll(needle, replacement);
+if (patched === original) {
+  console.error(`[sea:patch] no replacement applied in ${bundlePath}`);
+  process.exit(1);
+}
 writeFileSync(bundlePath, patched);
 console.log(`[sea:patch] patched ${bundlePath}: import_meta.url initialized`);
