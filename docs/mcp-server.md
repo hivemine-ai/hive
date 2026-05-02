@@ -2,7 +2,7 @@
 
 The Hive MCP server exposes the Auth, Cell Store, Visibility, Audit, and Waggle subsystems behind a Model Context Protocol (MCP) Streamable HTTP transport. Client agents speak JSON-RPC over HTTP to call tools and receive push notifications via SSE.
 
-> **Status:** v0.1 ships the full 8-tool catalog — Slice 0 (5 tools) + `reply_to`, `list_agents`, and `get_agent_status` from Slice 2.
+> **Status:** v0.1 ships the full 8-tool catalog.
 
 ## Quick start
 
@@ -64,7 +64,7 @@ A missing or invalid Bearer returns HTTP 401 with a JSON-RPC error body:
 
 ### Tools
 
-The server registers 8 tools in v0.1 (5 from Slice 0 + `reply_to`, `list_agents`, `get_agent_status` from Slice 2):
+The server exposes 8 tools in v0.1:
 
 | Tool                    | Purpose                                                                                                                                                                                                                                                                                                                                                        |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

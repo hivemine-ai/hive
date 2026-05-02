@@ -82,7 +82,7 @@ User-facing component documentation lives in [`docs/`](./docs/README.md). Each p
 
 - [`@hive/server`](./packages/server/README.md) — auth + persistence + domain logic.
 - [`@hive/cli`](./packages/cli/README.md) — `hivectl` admin CLI.
-- [`@hive/client`](./packages/client/README.md) — reusable client library (lands in PRY-006).
+- [`@hive/client`](./packages/client/README.md) — reusable client library.
 - [`@hive/shared`](./packages/shared/README.md) — cross-package types.
 
 Architecture decisions, tech specs, and product specs live in the [vault](https://github.com/hivemine-ai/hive-vault), not in this repo.
