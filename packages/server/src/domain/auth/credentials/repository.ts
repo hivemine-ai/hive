@@ -58,6 +58,13 @@ export interface CredentialsReadRepo {
    *   - `participantId` is unknown to the Hive (caller maps the same way; the
    *     resolver layer typically fails earlier when looking up the participant
    *     by friendly reference).
+   *
+   * The returned `CredentialRow.isRevoked` is always `false` here — the
+   * `WHERE c.revoked_at IS NULL` filter excludes any row that could yield
+   * `true`. The field is present in the row shape because `CredentialRow` is
+   * a shared projection used by other read paths (e.g. future `credential
+   * list` refactor) where the value varies. Callers wanting `isRevoked`
+   * semantically should not consult it via this function.
    */
   findActiveCredentialByParticipant(
     hiveId: UUIDv7,
