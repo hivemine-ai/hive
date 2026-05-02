@@ -161,18 +161,31 @@ describe('createLogger — SEA detection (INC-2026-004)', () => {
   });
 
   it('forces JSON output (no pretty transport) when running inside a SEA binary', () => {
-    const writeSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
     const log = createLogger({ level: 'info', pretty: true });
+    log.info('sea-test-line');
 
-    expect(typeof log.info).toBe('function');
-    expect(log.level).toBe('info');
-
-    const warnCalls = writeSpy.mock.calls
+    const warnCalls = stderrSpy.mock.calls
       .map((call) => String(call[0]))
       .filter((line) => line.includes('[hivectl] pretty logs are not available'));
     expect(warnCalls).toHaveLength(1);
     expect(warnCalls[0]).toContain('| npx pino-pretty');
+
+    // The log line travels to stdout synchronously (no transport branch =
+    // direct sonic-boom). A pino-pretty transport would route through a
+    // worker_thread and never hit this stdout spy in the same tick — and
+    // would also crash inside vitest the same way it crashes in the SEA.
+    const jsonLines = stdoutSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('"sea-test-line"'));
+    expect(jsonLines).toHaveLength(1);
+    const firstLine = jsonLines[0];
+    if (firstLine === undefined) throw new Error('expected at least one JSON line');
+    const parsed = JSON.parse(firstLine) as Record<string, unknown>;
+    expect(parsed['msg']).toBe('sea-test-line');
+    expect(parsed['level']).toBe(30);
   });
 
   it('emits the SEA warn at most once per process even on repeated createLogger calls', () => {
