@@ -119,7 +119,7 @@ For Hive specifically: anything a sender writes in `send_message` body lands in 
 - No rate limiting on `send_message` per sender / recipient pair.
 - No "trust level" classification — every `active` participant is treated equivalently at the visibility / push layer.
 
-For self-hosted v0.1 deployments where the Hivekeeper controls who registers, the trust assumption is reasonable. For multi-tenant or public deployments (Hivemine SaaS Fase 2 territory), an additional content-filtering layer before the channel inject is on the roadmap.
+Hive v0.1 is designed for self-hosted deployments where the Hivekeeper controls who registers — the trust assumption is reasonable in that context. Public-facing or untrusted-tenant deployments would need an additional content-filtering layer before the channel inject; that is out of scope for v0.1.
 
 If you need to disable Channels mid-incident, restart Claude Code without the `--dangerously-load-development-channels` flag — the agent reverts to polling Envelope 1 immediately. Hive itself keeps emitting both envelopes; the client opt-in is the gate.
 
@@ -174,7 +174,7 @@ If `notifications/claude/channel` arrives at the client but no `<channel>` tag r
 
 ## See also
 
-- [MCP Server](mcp-server.md) — endpoint catalog, the 5 tools, the Waggle wire format (Envelope 1 + Envelope 2 details).
+- [MCP Server](mcp-server.md) — endpoint catalog, the 8-tool surface, the Waggle wire format (Envelope 1 + Envelope 2 details).
 - [Auth + Identity](auth.md) — JWT lifecycle, signing keys, `hivectl init` bootstrap.
 - ADR-011 (dual-emit decision) and the operational runbook for the smoke test live in the [vault](https://github.com/hivemine-ai/hive-vault) under `02 - Arquitectura/ADRs/` and `06 - Iniciativas/Programas/PRG-001 — Hive OSS Fase 1/runbook-channels-smoke-e2e.md`.
 - [Claude Code Channels reference](https://code.claude.com/docs/en/channels-reference) — Anthropic's upstream documentation for the feature.

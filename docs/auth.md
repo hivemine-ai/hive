@@ -56,7 +56,7 @@ The Hive enforces invariant **"at least one active admin Hivekeeper exists at al
 - Browser flows (OAuth, OpenID Connect)
 - Refresh tokens
 - Multi-Hive credentials (`iss` / `aud` always pin to a single Hive)
-- Multi-tenant key segregation (deferred to Hivemine SaaS in Phase 2)
+- Multi-tenant key segregation (Hive v0.1 is single-tenant by design — one Hive per deployment, one signing key set per Hive)
 
 ## Error codes
 
