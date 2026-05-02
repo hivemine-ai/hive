@@ -11,6 +11,7 @@
 import { ALL_AUDIT_EVENT_CATEGORIES } from '@hive/server';
 import type { AuditDecisionDb, AuditEventCategoryDb, CliRuntime, UUIDv7 } from '@hive/server';
 
+import { buildOperatorActor } from '#audit/operator-actor.js';
 import { CliError } from '#error/cli-error.js';
 import { parseUuidV7 } from '#input/parse-uuid.js';
 import type { GlobalCliOpts } from '#types.js';
@@ -72,6 +73,14 @@ export async function runAuditQuery(
   runtime: CliRuntime,
   opts: AuditQueryOpts,
 ): Promise<{ entries: AuditEntry[] }> {
+  // Validate `--operator-id` even though `audit query` does not emit an audit event of its own —
+  // per ADR-020, the global flag accepts UUID v7 OR Hivekeeper email and must reject malformed
+  // inputs / non-admins uniformly across the 7 subcommands that consume it. Without this call,
+  // `hivectl audit query --operator-id ghost@example.com` would silently succeed while every
+  // other subcommand exits with EXIT_PERMISSION (5) — surprising asymmetry caught in PRY-039
+  // code review (S1). The returned actor is intentionally discarded.
+  await buildOperatorActor(opts.globals, runtime);
+
   const limit = clampLimit(opts.limit ?? 50);
 
   let q = runtime.db
