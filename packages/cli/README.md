@@ -34,11 +34,13 @@ What `hivectl` does **not** cover (deferred to Slice 1+):
 node packages/cli/dist/main.js init --admin-email you@example.com --output-credential admin.jwt
 # → admin.jwt (perms 0600) holds the bootstrap credential
 
-# Common operator workflow (with shell alias)
+# Common operator workflow (with shell alias).
+# `--operator-id` accepts a Hivekeeper email or UUID v7 — email is the friendly
+# default for human operators; UUID is preserved for scripts (per ADR-020).
 hivectl hivekeeper create --email teammate@example.com --emit-credential \
-  --operator-id <admin-uuid> --output-credential teammate.jwt
+  --operator-id you@example.com --output-credential teammate.jwt
 hivectl agent create --owner you@example.com --name worker-a --type worker \
-  --emit-credential --operator-id <admin-uuid>
+  --emit-credential --operator-id you@example.com
 hivectl agent list --owner you@example.com
 hivectl credential rotate <jti> --yes
 hivectl audit query --limit 20

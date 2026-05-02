@@ -24,36 +24,45 @@ hivectl init --admin-email you@example.com --output-credential admin.jwt
 hivectl hivekeeper create \
   --email teammate@example.com --emit-credential \
   --output-credential teammate.jwt \
-  --operator-id <admin-uuid>
+  --operator-id you@example.com
 
 # 3. Register an agent under your account, with a credential.
 hivectl agent create \
   --owner you@example.com --name worker-a --type worker \
   --emit-credential --output-credential worker-a.jwt \
-  --operator-id <admin-uuid>
+  --operator-id you@example.com
 
 # 4. List agents owned by you.
 hivectl agent list --owner you@example.com
 
 # 5. Rotate a credential (issues new + revokes old).
 hivectl credential rotate <jti> --yes \
-  --operator-id <admin-uuid> \
+  --operator-id you@example.com \
   --output-credential worker-a-rotated.jwt
 
 # 6. Inspect the audit log.
-hivectl audit query --limit 20 --operator-id <admin-uuid>
+hivectl audit query --limit 20 --operator-id you@example.com
 
 # 7. Revoke an agent (cascade-closes its Cell).
-hivectl agent revoke <agent-id> --yes --operator-id <admin-uuid>
+hivectl agent revoke <agent-id> --yes --operator-id you@example.com
 ```
+
+`--operator-id` accepts either a Hivekeeper email or a UUID v7 — the email path resolves via DB lookup. UUID is preserved for scripts and tooling.
 
 ## Concepts
 
 ### `--operator-id` is **attribution**, not authorization
 
-The CLI does not authenticate the operator — shell access to the host is the trust anchor. `--operator-id <uuid>` lets the operator declare which Hivekeeper they are acting as, so the audit log records `actorKind: 'hivekeeper'` + `actorId: <uuid>`. If the flag is absent, the audit log records `actorKind: 'system'` + `actorId: null` — both are accurate descriptions of what happened.
+The CLI does not authenticate the operator — shell access to the host is the trust anchor. `--operator-id <email-or-uuid>` lets the operator declare which Hivekeeper they are acting as, so the audit log records `actorKind: 'hivekeeper'` + `actorId: <uuid>`. If the flag is absent, the audit log records `actorKind: 'system'` + `actorId: null` — both are accurate descriptions of what happened.
 
-The flag is validated only as a sanity check: the UUID must resolve to an **active admin** Hivekeeper. If it does not, the CLI exits with `EXIT_PERMISSION (5)`. An attacker with shell access can omit the flag to get `actorKind: 'system'`; the audit log reflects that reality.
+Two input forms are accepted (per ADR-020):
+
+- **Hivekeeper email** (`me@example.com`) — resolved via DB lookup against the `hivekeepers` table. Best for human operators who remember their own email.
+- **UUID v7** (`019de8c4-b3c3-7279-a2ee-09424384da11`) — passed through directly. Best for scripts and tooling that already have the canonical id at hand.
+
+The flag is validated only as a sanity check: the resolved UUID must point to an **active admin** Hivekeeper. If it does not, the CLI exits with `EXIT_PERMISSION (5)`. An attacker with shell access can omit the flag to get `actorKind: 'system'`; the audit log reflects that reality.
+
+Reference syntax accepted across other CLI flags is documented in [ADR-020](https://github.com/hivemine-ai/hive-vault) — agent references (`<name>@<owner-local>.<hive>`) and the `<participant-ref>:latest` alias for `credential rotate/revoke` ship in PRYs 040–042 of the same cascade.
 
 ### Output modes
 
