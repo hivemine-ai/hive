@@ -45,6 +45,7 @@ function makeRepo(overrides?: Partial<MockRepo>): MockRepo {
     findHivekeeperByEmailLocalPart: vi.fn().mockResolvedValue(null),
     findAgentById: vi.fn().mockResolvedValue(null),
     findAgentByName: vi.fn().mockResolvedValue(null),
+    findAgentByNameIncludingRevoked: vi.fn().mockResolvedValue(null),
     findById: vi.fn().mockResolvedValue(null),
     getParticipantState: vi.fn().mockResolvedValue(null),
     listAgents: vi.fn().mockResolvedValue({ agents: [], nextCursor: null }),
@@ -170,6 +171,7 @@ describe('resolveParticipantReference — happy paths', () => {
     const repo = makeRepo({
       findHivekeeperByEmailLocalPart: vi.fn().mockResolvedValue(hivekeeper),
       findAgentByName: vi.fn().mockResolvedValue(agent),
+      findAgentByNameIncludingRevoked: vi.fn().mockResolvedValue(agent),
     });
     const resolver = createReferenceResolver({ participantsRepo: repo });
     const identity = makeIdentity({ hiveId, hiveName });
@@ -220,6 +222,7 @@ describe('resolveParticipantReference — happy paths', () => {
     const repo = makeRepo({
       findHivekeeperByEmailLocalPart: vi.fn().mockResolvedValue(hivekeeper),
       findAgentByName: vi.fn().mockResolvedValue(agent),
+      findAgentByNameIncludingRevoked: vi.fn().mockResolvedValue(agent),
     });
     const resolver = createReferenceResolver({ participantsRepo: repo });
     const identity = makeIdentity({ hiveId, hiveName });
@@ -362,6 +365,7 @@ describe('resolveParticipantReference — error paths', () => {
     const repo = makeRepo({
       findHivekeeperByEmailLocalPart: vi.fn().mockResolvedValue(hivekeeper),
       findAgentByName: vi.fn().mockResolvedValue(null),
+      findAgentByNameIncludingRevoked: vi.fn().mockResolvedValue(null),
     });
     const resolver = createReferenceResolver({ participantsRepo: repo });
     const identity = makeIdentity({ hiveId, hiveName });

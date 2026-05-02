@@ -2,7 +2,7 @@ import { type Mock, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { CliRuntime, Hivekeeper } from '@hive/server';
 
-import { CliError } from '../error/cli-error.js';
+import { CliError } from '#error/cli-error.js';
 import type { GlobalCliOpts } from '../types.js';
 
 import { buildOperatorActor } from './operator-actor.js';

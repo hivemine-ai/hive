@@ -11,7 +11,7 @@
 
 import { createDb, migrateDown, migrateToLatest } from '@hive/server';
 
-import { CliError } from '../error/cli-error.js';
+import { CliError } from '#error/cli-error.js';
 import type { GlobalCliOpts } from '../types.js';
 
 export type MigrateAction = 'up' | 'down' | 'status';

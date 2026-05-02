@@ -8,7 +8,7 @@
 import os from 'node:os';
 import path from 'node:path';
 
-import { CliError } from '../error/cli-error.js';
+import { CliError } from '#error/cli-error.js';
 
 export type SupportedPlatform = 'linux' | 'darwin';
 

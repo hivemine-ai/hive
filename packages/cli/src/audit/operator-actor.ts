@@ -9,7 +9,7 @@
 import { isAuthError } from '@hive/server';
 import type { CliRuntime, UUIDv7 } from '@hive/server';
 
-import { CliError } from '../error/cli-error.js';
+import { CliError } from '#error/cli-error.js';
 import { resolveOperatorId } from '../input/parse-reference.js';
 import type { GlobalCliOpts, OperatorActor } from '../types.js';
 

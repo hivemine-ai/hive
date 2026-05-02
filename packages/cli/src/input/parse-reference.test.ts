@@ -3,7 +3,7 @@ import { type Mock, describe, expect, it, vi } from 'vitest';
 import { AuthError } from '@hive/server';
 import type { Agent, CliRuntime, CredentialRow, Hivekeeper } from '@hive/server';
 
-import { CliError } from '../error/cli-error.js';
+import { CliError } from '#error/cli-error.js';
 
 import {
   parseParticipantReference,
@@ -29,6 +29,7 @@ interface MockRuntime {
     findHivekeeperByEmail: Mock;
     findHivekeeperByEmailLocalPart: Mock;
     findAgentByName: Mock;
+    findAgentByNameIncludingRevoked: Mock;
   };
   credentialsRepo: {
     findActiveCredentialByParticipant: Mock;
@@ -39,24 +40,33 @@ function makeRuntime(overrides?: {
   findHivekeeperByEmail?: Mock;
   findHivekeeperByEmailLocalPart?: Mock;
   findAgentByName?: Mock;
+  findAgentByNameIncludingRevoked?: Mock;
   findActiveCredentialByParticipant?: Mock;
 }): {
   runtime: CliRuntime;
   findHivekeeperByEmail: Mock;
   findHivekeeperByEmailLocalPart: Mock;
   findAgentByName: Mock;
+  findAgentByNameIncludingRevoked: Mock;
   findActiveCredentialByParticipant: Mock;
 } {
   const findHivekeeperByEmail = overrides?.findHivekeeperByEmail ?? vi.fn().mockResolvedValue(null);
   const findHivekeeperByEmailLocalPart =
     overrides?.findHivekeeperByEmailLocalPart ?? vi.fn().mockResolvedValue(null);
   const findAgentByName = overrides?.findAgentByName ?? vi.fn().mockResolvedValue(null);
+  const findAgentByNameIncludingRevoked =
+    overrides?.findAgentByNameIncludingRevoked ?? vi.fn().mockResolvedValue(null);
   const findActiveCredentialByParticipant =
     overrides?.findActiveCredentialByParticipant ?? vi.fn().mockResolvedValue(null);
   const runtime: MockRuntime = {
     hiveStableIdentifier: HIVE_ID,
     hiveName: HIVE_NAME,
-    participantsRepo: { findHivekeeperByEmail, findHivekeeperByEmailLocalPart, findAgentByName },
+    participantsRepo: {
+      findHivekeeperByEmail,
+      findHivekeeperByEmailLocalPart,
+      findAgentByName,
+      findAgentByNameIncludingRevoked,
+    },
     credentialsRepo: { findActiveCredentialByParticipant },
   };
   return {
@@ -64,6 +74,7 @@ function makeRuntime(overrides?: {
     findHivekeeperByEmail,
     findHivekeeperByEmailLocalPart,
     findAgentByName,
+    findAgentByNameIncludingRevoked,
     findActiveCredentialByParticipant,
   };
 }
@@ -599,9 +610,17 @@ describe('resolveAuditParticipantReference', () => {
   });
 
   it('agent reference resolves via owner local-part + agent name lookup', async () => {
+    // PRY-045: audit flow uses findAgentByNameIncludingRevoked (NOT findAgentByName)
+    // so audit query keeps working for revoked subjects. Mock the variant the
+    // audit flow actually invokes.
     const findHivekeeperByEmailLocalPart = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
-    const findAgentByName = vi.fn().mockResolvedValue(makeAgent(AGENT_UUID, OWNER_UUID));
-    const { runtime } = makeRuntime({ findHivekeeperByEmailLocalPart, findAgentByName });
+    const findAgentByNameIncludingRevoked = vi
+      .fn()
+      .mockResolvedValue(makeAgent(AGENT_UUID, OWNER_UUID));
+    const { runtime } = makeRuntime({
+      findHivekeeperByEmailLocalPart,
+      findAgentByNameIncludingRevoked,
+    });
 
     const id = await resolveAuditParticipantReference(
       `worker-a@admin.${HIVE_NAME}`,
@@ -611,7 +630,7 @@ describe('resolveAuditParticipantReference', () => {
 
     expect(id).toBe(AGENT_UUID);
     expect(findHivekeeperByEmailLocalPart).toHaveBeenCalledWith(HIVE_ID, 'admin');
-    expect(findAgentByName).toHaveBeenCalledWith(HIVE_ID, OWNER_UUID, 'worker-a');
+    expect(findAgentByNameIncludingRevoked).toHaveBeenCalledWith(HIVE_ID, OWNER_UUID, 'worker-a');
   });
 
   it('garbage input throws CliError(CONFIG_INVALID, actor_id_unparseable) for actor-id', async () => {
@@ -721,5 +740,81 @@ describe('resolveAuditParticipantReference', () => {
       expect(e.subCode).toBe('audit_subject_name_not_found');
       return true;
     });
+  });
+
+  it('PRY-045 — actor-id flow uses findAgentByNameIncludingRevoked, not findAgentByName', async () => {
+    const findHivekeeperByEmailLocalPart = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
+    const findAgentByName = vi.fn().mockResolvedValue(null); // would have failed pre-PRY-045
+    const findAgentByNameIncludingRevoked = vi
+      .fn()
+      .mockResolvedValue({ ...makeAgent(AGENT_UUID, OWNER_UUID), state: 'revoked' });
+    const { runtime } = makeRuntime({
+      findHivekeeperByEmailLocalPart,
+      findAgentByName,
+      findAgentByNameIncludingRevoked,
+    });
+
+    const id = await resolveAuditParticipantReference(
+      `worker-a@admin.${HIVE_NAME}`,
+      'actor-id',
+      runtime,
+    );
+
+    expect(id).toBe(AGENT_UUID);
+    expect(findAgentByName).not.toHaveBeenCalled();
+    expect(findAgentByNameIncludingRevoked).toHaveBeenCalledWith(HIVE_ID, OWNER_UUID, 'worker-a');
+  });
+
+  it('PRY-045 — subject-id flow uses findAgentByNameIncludingRevoked, not findAgentByName', async () => {
+    const findHivekeeperByEmailLocalPart = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
+    const findAgentByName = vi.fn().mockResolvedValue(null);
+    const findAgentByNameIncludingRevoked = vi
+      .fn()
+      .mockResolvedValue({ ...makeAgent(AGENT_UUID, OWNER_UUID), state: 'revoked' });
+    const { runtime } = makeRuntime({
+      findHivekeeperByEmailLocalPart,
+      findAgentByName,
+      findAgentByNameIncludingRevoked,
+    });
+
+    const id = await resolveAuditParticipantReference(
+      `worker-a@admin.${HIVE_NAME}`,
+      'subject-id',
+      runtime,
+    );
+
+    expect(id).toBe(AGENT_UUID);
+    expect(findAgentByName).not.toHaveBeenCalled();
+    expect(findAgentByNameIncludingRevoked).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PRY-045 regression — credential flow STILL uses findAgentByName (filters revoked)
+// ---------------------------------------------------------------------------
+
+describe('resolveCredentialRef regression for PRY-045', () => {
+  it('credential flow keeps using findAgentByName (NOT IncludingRevoked) — revoked agents reject', async () => {
+    const findHivekeeperByEmailLocalPart = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
+    const findAgentByName = vi.fn().mockResolvedValue(null); // simulates filtered-out revoked agent
+    const findAgentByNameIncludingRevoked = vi
+      .fn()
+      .mockResolvedValue({ ...makeAgent(AGENT_UUID, OWNER_UUID), state: 'revoked' });
+    const { runtime } = makeRuntime({
+      findHivekeeperByEmailLocalPart,
+      findAgentByName,
+      findAgentByNameIncludingRevoked,
+    });
+
+    await expect(
+      resolveCredentialRef(`worker-a@admin.${HIVE_NAME}:latest`, runtime),
+    ).rejects.toSatisfy((err: unknown) => {
+      const e = err as AuthError;
+      expect(e.code).toBe('PARTICIPANT_NOT_FOUND');
+      expect(e.subCode).toBe('credential_agent_not_found');
+      return true;
+    });
+    expect(findAgentByName).toHaveBeenCalled();
+    expect(findAgentByNameIncludingRevoked).not.toHaveBeenCalled();
   });
 });

@@ -10,7 +10,7 @@ import {
 } from './detect.js';
 import type { PlatformLike } from './detect.js';
 
-import { CliError } from '../error/cli-error.js';
+import { CliError } from '#error/cli-error.js';
 
 const linuxStub: PlatformLike = {
   platform: 'linux',

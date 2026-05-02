@@ -25,7 +25,7 @@ import { runRotateCredential } from './commands/credential/rotate.js';
 import { runListKeepers } from './commands/hive/list-keepers.js';
 import { runCreateHivekeeper } from './commands/hivekeeper/create.js';
 import { runInit } from './commands/init.js';
-import { mapErrorToExit } from './error/handler.js';
+import { mapErrorToExit } from '#error/handler.js';
 import { EXIT_NOT_FOUND, EXIT_OK, EXIT_PRECONDITION, EXIT_USER_ERROR } from './error/exit-codes.js';
 import { formatOutput } from './output/format.js';
 import { initSchema } from './output/schemas.js';

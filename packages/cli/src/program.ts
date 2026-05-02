@@ -23,7 +23,7 @@ import { runInit } from './commands/init.js';
 import { performMigrate } from './commands/migrate.js';
 import { parseLogLevel, runServe } from './commands/serve.js';
 import { registerServiceGroup } from './commands/service/index.js';
-import { mapErrorToExit } from './error/handler.js';
+import { mapErrorToExit } from '#error/handler.js';
 import { asOptionalNumber, asOptionalString, asString, asStringArray } from './input/coerce.js';
 import { formatOutput, formatOutputList, resolveOutputMode } from './output/format.js';
 import {

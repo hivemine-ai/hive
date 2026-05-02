@@ -105,6 +105,52 @@ describe('participants read repository', () => {
     expect(worker?.id).toBe(world.workerAgentId);
   });
 
+  it('findAgentByName excludes revoked agents (default lookup contract)', async () => {
+    const writeRepo = createParticipantsWriteRepo(world.db);
+    await writeRepo.revokeAgent(world.workerAgentId, SYSTEM_CALLER);
+    const readRepo = createParticipantsReadRepo(world.db);
+    const result = await readRepo.findAgentByName(
+      world.hiveId,
+      world.adminHivekeeperId,
+      'worker-1',
+    );
+    expect(result).toBeNull();
+  });
+
+  it('findAgentByNameIncludingRevoked returns the agent for an active row', async () => {
+    const repo = createParticipantsReadRepo(world.db);
+    const worker = await repo.findAgentByNameIncludingRevoked(
+      world.hiveId,
+      world.adminHivekeeperId,
+      'worker-1',
+    );
+    expect(worker?.id).toBe(world.workerAgentId);
+    expect(worker?.state).toBe('active');
+  });
+
+  it('findAgentByNameIncludingRevoked returns the agent even when revoked (audit-log lookup contract — PRY-045)', async () => {
+    const writeRepo = createParticipantsWriteRepo(world.db);
+    await writeRepo.revokeAgent(world.workerAgentId, SYSTEM_CALLER);
+    const readRepo = createParticipantsReadRepo(world.db);
+    const result = await readRepo.findAgentByNameIncludingRevoked(
+      world.hiveId,
+      world.adminHivekeeperId,
+      'worker-1',
+    );
+    expect(result?.id).toBe(world.workerAgentId);
+    expect(result?.state).toBe('revoked');
+  });
+
+  it('findAgentByNameIncludingRevoked returns null when no row matches', async () => {
+    const repo = createParticipantsReadRepo(world.db);
+    const result = await repo.findAgentByNameIncludingRevoked(
+      world.hiveId,
+      world.adminHivekeeperId,
+      'no-such-name',
+    );
+    expect(result).toBeNull();
+  });
+
   it('findById is polymorphic — returns Hivekeeper variant', async () => {
     const repo = createParticipantsReadRepo(world.db);
     const result = await repo.findById(world.adminHivekeeperId);
