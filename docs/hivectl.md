@@ -83,6 +83,8 @@ hivectl init --admin-email <email> [--admin-display-name <name>]
 
 Bootstrap a fresh Hive: runs migrations, generates a signing key, creates the first Hivekeeper (admin) + their Cell, issues the first credential. Idempotent fail-fast on re-init (returns `EXIT_PRECONDITION`).
 
+`init` auto-creates the parent directories of `--db` (when SQLite — Postgres is skipped), `--keys-dir`, and `--output-credential` if they do not exist, so `hivectl init` can run from any writable cwd without `mkdir -p var/db var/keys` first. Other subcommands (`migrate`, `serve`, etc.) keep the fail-fast behaviour on missing paths.
+
 ### `migrate`
 
 ```
