@@ -19,7 +19,7 @@ export { requireAdminCaller } from './caller-context.js';
 export type { CallerContext } from './caller-context.js';
 
 export { parseReference } from './references/parser.js';
-export type { ParsedReference } from './references/parser.js';
+export type { ParsedParticipantReference, ParsedReference } from './references/parser.js';
 
 export {
   generateKeypair,
@@ -66,6 +66,9 @@ export type { Rotator, RotatorDeps, RotateCredentialInput } from './credentials/
 
 export { createRevoker } from './credentials/revoker.js';
 export type { Revoker, RevokerDeps, RevokeCredentialInput } from './credentials/revoker.js';
+
+export { createCredentialsReadRepo } from './credentials/repository.js';
+export type { CredentialRow, CredentialsReadRepo } from './credentials/repository.js';
 
 export { createParticipantsWriteRepo } from './participants/repository.write.js';
 export type {

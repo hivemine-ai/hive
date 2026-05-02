@@ -35,8 +35,10 @@ hivectl agent create \
 # 4. List agents owned by you.
 hivectl agent list --owner you@example.com
 
-# 5. Rotate a credential (issues new + revokes old).
-hivectl credential rotate <jti> --yes \
+# 5. Rotate a credential (issues new + revokes old). Accepts a UUID v7 JTI
+#    or `<participant-ref>:latest` to target the participant's currently-
+#    active credential without an intermediate `credential list`.
+hivectl credential rotate worker-a@you.cotalker:latest --yes \
   --operator-id you@example.com \
   --output-credential worker-a-rotated.jwt
 
@@ -63,7 +65,7 @@ Two input forms are accepted (per ADR-020):
 
 The flag is validated only as a sanity check: the resolved UUID must point to an **active admin** Hivekeeper. If it does not, the CLI exits with `EXIT_PERMISSION (5)`. An attacker with shell access can omit the flag to get `actorKind: 'system'`; the audit log reflects that reality.
 
-Reference syntax accepted across other CLI flags is documented in [ADR-020](https://github.com/hivemine-ai/hive-vault) — agent references (`<name>@<owner-local>.<hive>`) are accepted by `agent revoke <agent-ref>` (PRY-040, see § Subcommand reference). The `<participant-ref>:latest` alias for `credential rotate/revoke` and friendly references on `audit query --actor-id` / `--subject-id` ship in PRYs 041–042 of the same cascade.
+Reference syntax accepted across other CLI flags is documented in [ADR-020](https://github.com/hivemine-ai/hive-vault) — agent references (`<name>@<owner-local>.<hive>`) are accepted by `agent revoke <agent-ref>` (PRY-040, see § Subcommand reference). The `<participant-ref>:latest` alias is accepted by `credential rotate <jti-or-active-ref>` and `credential revoke <jti-or-active-ref>` (PRY-041 — collapses the `credential list → copy JTI → rotate` flow into a single command). Friendly references on `audit query --actor-id` / `--subject-id` ship in PRY-042 of the same cascade.
 
 ### Output modes
 
@@ -155,11 +157,19 @@ hivectl agent revoke <agent-ref> --yes
 ```
 hivectl credential issue   --participant-id <email-or-uuid> [--ttl <duration>]
                            [--reason <text>] [--output-credential <path>]
-hivectl credential rotate  <jti> [--ttl <duration>] [--yes]
+hivectl credential rotate  <jti-or-active-ref> [--ttl <duration>] [--yes]
                            [--output-credential <path>]
-hivectl credential revoke  <jti> [--reason <text>] [--yes]
+hivectl credential revoke  <jti-or-active-ref> [--reason <text>] [--yes]
 hivectl credential list    <participant-ref> [--limit N]
 ```
+
+`<jti-or-active-ref>` (per ADR-020 / PRY-041) accepts:
+
+- **UUID v7 JTI** — passed through directly. Best for scripts and tooling that already have the canonical id at hand.
+- **`<participant-ref>:latest`** — alias resolving to the participant's currently-active credential (`revoked_at IS NULL` AND `expires_at > now()`, most-recent by `issued_at`). The inner `<participant-ref>` may be a UUID, a hivekeeper email (`me@example.com:latest`), or an agent reference (`worker-a@you.cotalker:latest`). Resolves the participant first, then looks up the active credential. Errors:
+  - Inner participant not found → `EXIT_NOT_FOUND (3)` with subcode `credential_owner_not_found` / `credential_agent_not_found`.
+  - Participant exists but has no active credential → `EXIT_NOT_FOUND (3)` with subcode `no_active_credential` (issue a new one with `credential issue`).
+  - Reference unparseable → `EXIT_USER_ERROR (1)` with subcode `jti_or_ref_unparseable`.
 
 `list` returns metadata only (jti / kid / dates / isRevoked). The raw JWT is **never** returned by `list`.
 

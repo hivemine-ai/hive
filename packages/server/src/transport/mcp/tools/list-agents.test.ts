@@ -141,6 +141,9 @@ function buildStubResolver(resolveResult: UUIDv7 | Error = OWNER_ID): ReferenceR
       if (resolveResult instanceof Error) return Promise.reject(resolveResult);
       return Promise.resolve(resolveResult);
     }),
+    resolveCredentialActiveReference: vi
+      .fn()
+      .mockRejectedValue(new Error('not used by list_agents')),
   };
 }
 

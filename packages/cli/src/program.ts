@@ -421,8 +421,12 @@ export function buildProgram(): BuildProgramResult {
       );
     });
   credential
-    .command('rotate <jti>')
-    .description('Rotate a credential — issues new + revokes the old. Requires --yes.')
+    .command('rotate <jti-or-active-ref>')
+    .description(
+      'Rotate a credential — issues new + revokes the old. Requires --yes. ' +
+        'Accepts a UUID v7 JTI or `<participant-ref>:latest` (per ADR-020) to target ' +
+        'the participant’s currently-active credential.',
+    )
     .option('--ttl <duration>', 'TTL for the new credential')
     .option('--output-credential <path>', 'write the new JWT to this file (perms 0600)')
     .action(async (jti: string, cmdOpts: Record<string, unknown>) => {
@@ -442,8 +446,12 @@ export function buildProgram(): BuildProgramResult {
       );
     });
   credential
-    .command('revoke <jti>')
-    .description('Revoke a credential. Requires --yes.')
+    .command('revoke <jti-or-active-ref>')
+    .description(
+      'Revoke a credential. Requires --yes. Accepts a UUID v7 JTI or ' +
+        '`<participant-ref>:latest` (per ADR-020) to target the participant’s ' +
+        'currently-active credential.',
+    )
     .option('--reason <text>', 'free-form audit reason')
     .action(async (jti: string, cmdOpts: Record<string, unknown>) => {
       const s = state();

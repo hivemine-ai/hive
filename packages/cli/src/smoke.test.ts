@@ -487,6 +487,95 @@ describe('PRY-007 H21 — hivectl Slice 0 smoke E2E (SQLite)', () => {
     }
   });
 
+  it('PRY-041 — credential rotate accepts <participant-ref>:latest end-to-end', async () => {
+    // Initialise a hive whose name is suitable for friendly references
+    // (lowercase, single token), same as the PRY-040 smoke. Bootstrap admin
+    // gets a credential as part of `runInit`; we'll rotate it via the alias.
+    const initResult = await runInit({
+      globals: makeGlobals(),
+      adminEmail: 'leo@example.com',
+      adminDisplayName: 'Leo',
+      hiveName: 'cotalker',
+      db: `sqlite:${dbPath}`,
+      keysDir,
+      ttl: '365d',
+      outputCredential: undefined,
+    });
+    const adminId = initResult.adminId;
+    const adminCredentialJti = initResult.credentialJti;
+
+    const runtime = await startCli({ logger: SILENT_LOGGER });
+    try {
+      // Rotate via friendly form `<email>:latest`. Should:
+      //  1. Find the admin's currently-active credential (the one runInit
+      //     emitted at bootstrap).
+      //  2. Issue a new credential.
+      //  3. Revoke the old one (now revoked_at is set).
+      const rotated = await runRotateCredential(runtime, {
+        globals: makeGlobals('leo@example.com'),
+        jti: 'leo@example.com:latest',
+        ttl: undefined,
+        outputCredential: undefined,
+      });
+      expect(rotated.oldJti).toBe(adminCredentialJti);
+      expect(rotated.newJti).not.toBe(adminCredentialJti);
+
+      // Verify via `credential list` that the old JTI is now revoked and the
+      // new JTI is the only active one.
+      const listed = await runListCredentials(runtime, {
+        globals: makeGlobals('leo@example.com'),
+        participantRef: 'leo@example.com',
+        limit: 10,
+      });
+      const newCred = listed.credentials.find((c) => c.jti === rotated.newJti);
+      const oldCred = listed.credentials.find((c) => c.jti === adminCredentialJti);
+      expect(newCred?.isRevoked).toBe(false);
+      expect(oldCred?.isRevoked).toBe(true);
+
+      // A second rotate via `:latest` resolves the *new* JTI (most-recent active).
+      const rotatedTwice = await runRotateCredential(runtime, {
+        globals: makeGlobals('leo@example.com'),
+        jti: 'leo@example.com:latest',
+        ttl: undefined,
+        outputCredential: undefined,
+      });
+      expect(rotatedTwice.oldJti).toBe(rotated.newJti);
+
+      // Once the admin's only active credential has been revoked manually, the
+      // alias surfaces `no_active_credential` with EXIT_NOT_FOUND. We use
+      // `revoke <jti>` (UUID path) on the current active to get into that
+      // state, then attempt `:latest`.
+      await runRevokeCredential(runtime, {
+        globals: makeGlobals('leo@example.com'),
+        jti: rotatedTwice.newJti,
+        reason: 'smoke cleanup',
+      });
+      try {
+        await runRotateCredential(runtime, {
+          globals: makeGlobals('leo@example.com'),
+          jti: 'leo@example.com:latest',
+          ttl: undefined,
+          outputCredential: undefined,
+        });
+        expect.fail('should have thrown — admin has no active credential');
+      } catch (err) {
+        const mapped = mapErrorToExit(err);
+        expect(mapped.code).toBe(EXIT_NOT_FOUND);
+      }
+
+      // adminId still resolvable via DB to confirm the participant was never
+      // touched (only the credentials).
+      const adminRow = await runtime.db
+        .selectFrom('hivekeepers')
+        .select('state')
+        .where('id', '=', adminId)
+        .executeTakeFirst();
+      expect(adminRow?.state).toBe('active');
+    } finally {
+      await stopCli(runtime);
+    }
+  });
+
   it('AC-12: --output json roundtrip is parseable for init + agent create', async () => {
     // Init returns InitCommandResult; serialize and re-parse.
     const result = await runInit({

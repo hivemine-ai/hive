@@ -149,4 +149,73 @@ describe('parseReference', () => {
   it('returns null for whitespace-only string', () => {
     expect(parseReference('   ', 'test-hive')).toBeNull();
   });
+
+  // --- credential-active alias (`<participant-ref>:latest`, ADR-020 Q3=3B) ---
+
+  it('returns credential-active wrapping uuid for `<uuid>:latest`', () => {
+    const id = uuidv7();
+    const result = parseReference(`${id}:latest`, 'test-hive');
+    expect(result).toEqual<ParsedReference>({
+      kind: 'credential-active',
+      participant: { kind: 'uuid', id },
+    });
+  });
+
+  it('returns credential-active wrapping hivekeeper-email for `<email>:latest`', () => {
+    const result = parseReference('admin@example.com:latest', 'cotalker');
+    expect(result).toEqual<ParsedReference>({
+      kind: 'credential-active',
+      participant: { kind: 'hivekeeper-email', email: 'admin@example.com' },
+    });
+  });
+
+  it('returns credential-active wrapping agent-reference for `<agent>@<owner-local>.<hive>:latest`', () => {
+    const result = parseReference('worker-a@admin.test-hive:latest', 'test-hive');
+    expect(result).toEqual<ParsedReference>({
+      kind: 'credential-active',
+      participant: {
+        kind: 'agent-reference',
+        agentName: 'worker-a',
+        ownerLocal: 'admin',
+      },
+    });
+  });
+
+  it('returns null for bare `:latest` (no prefix)', () => {
+    expect(parseReference(':latest', 'test-hive')).toBeNull();
+  });
+
+  it('parses `<email>:` (trailing colon, no `latest`) as a lenient hivekeeper-email — resolver layer rejects via kind_not_allowed', () => {
+    // 'admin@example.com:' is not :latest-suffixed, so step 0 skips. count('@')
+    // == 1, EMAIL_RE is lenient (`^[^@\s]+@[^@\s]+$`) — the trailing ':' has
+    // neither '@' nor whitespace, so the entire string passes as a
+    // hivekeeper-email at the parser layer. The resolver/handler is responsible
+    // for rejecting an unsupported kind for the `<jti-or-active-ref>` positional
+    // (`CliError(kind_not_allowed)` per ADR-020 § Decision step 4). The parser
+    // is intentionally lenient and stops at syntactic disambiguation.
+    const result = parseReference('admin@example.com:', 'test-hive');
+    expect(result).toEqual<ParsedReference>({
+      kind: 'hivekeeper-email',
+      email: 'admin@example.com:',
+    });
+  });
+
+  it('returns null for `:latest:latest` (double suffix — inner parses to credential-active, not allowed)', () => {
+    // Outer step 0 strips the trailing ':latest'; the prefix ':latest' has step 0
+    // strip its own trailing ':latest' → empty prefix → null. So inner is null →
+    // outer returns null too.
+    const id = uuidv7();
+    expect(parseReference(`${id}:latest:latest`, 'test-hive')).toBeNull();
+  });
+
+  it('returns null for `self:latest` (self is not in ParsedParticipantReference)', () => {
+    // Inner parses to {kind: 'self'} which is not allowed in the wrapper.
+    expect(parseReference('self:latest', 'test-hive')).toBeNull();
+  });
+
+  it('trims surrounding whitespace before parsing the `:latest` alias', () => {
+    const id = uuidv7();
+    const result = parseReference(`  ${id}:latest  `, 'test-hive');
+    expect(result?.kind).toBe('credential-active');
+  });
 });

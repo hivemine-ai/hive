@@ -1,5 +1,9 @@
-// `hivectl credential rotate <jti> [--ttl <duration>] [--yes]
+// `hivectl credential rotate <jti-or-active-ref> [--ttl <duration>] [--yes]
 //   [--output-credential <path>]`
+//
+// `<jti-or-active-ref>` accepts either a UUID v7 JTI (canonical) or a
+// `<participant-ref>:latest` alias resolving to that participant's currently-
+// active credential — per ADR-020 Q3=3B + PRY-041 of the cascade.
 
 import { writeFileSync } from 'node:fs';
 
@@ -7,7 +11,7 @@ import type { CliRuntime, IssuedCredential, UUIDv7 } from '@hive/server';
 
 import { CliError } from '#error/cli-error.js';
 import { parseDuration } from '#input/parse-duration.js';
-import { parseUuidV7 } from '#input/parse-uuid.js';
+import { resolveCredentialRef } from '#input/parse-reference.js';
 import { buildOperatorActor } from '#audit/operator-actor.js';
 import type { GlobalCliOpts } from '#types.js';
 
@@ -37,7 +41,7 @@ export async function runRotateCredential(
       message: 'credential rotate revokes the current jti; pass --yes to confirm',
     });
   }
-  const oldJti = parseUuidV7(opts.jti, 'jti');
+  const oldJti = await resolveCredentialRef(opts.jti, runtime);
   const actor = await buildOperatorActor(opts.globals, runtime);
   const ttlMs = opts.ttl !== undefined ? parseDuration(opts.ttl) : undefined;
 

@@ -45,6 +45,9 @@ function buildStubResolver(): ReferenceResolver {
     resolveParticipantReference(_input, _callerContext) {
       return Promise.resolve(RESOLVED_RECIPIENT_ID);
     },
+    resolveCredentialActiveReference(_input, _callerContext) {
+      return Promise.reject(new Error('not used by send_message'));
+    },
   };
 }
 

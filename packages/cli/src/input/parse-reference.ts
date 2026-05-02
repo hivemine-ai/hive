@@ -10,12 +10,18 @@
 // ADR-007).
 //
 // `--owner` / `--participant-id` / `<participant-ref>` (resolveParticipantReference):
-// UUID OR Hivekeeper email today. Credential-active alias will be wired in
-// PRY-041 of the cascade.
+// UUID OR Hivekeeper email today. Credential-active alias is rejected here —
+// see `resolveCredentialRef` for the `<participant-ref>:latest` flow.
 //
 // `<agent-ref>` positional in `agent revoke` (resolveAgentReference, PRY-040):
 // UUID OR agent-reference syntax (`<name>@<owner-local>.<hive>`). Email and
 // 'self' / 'credential-active' kinds are not applicable.
+//
+// `<jti-or-active-ref>` positional in `credential rotate` / `credential revoke`
+// (resolveCredentialRef, PRY-041): UUID directly (treated as a JTI without DB
+// lookup, preserving idempotent semantics) OR `<participant-ref>:latest`
+// (resolves the inner participant + the active credential JTI via the new
+// credentialsRepo).
 
 import { AuthError, parseReference, type ParsedReference } from '@hive/server';
 import type { CliRuntime, UUIDv7 } from '@hive/server';
@@ -170,10 +176,114 @@ export async function resolveAgentReference(input: string, runtime: CliRuntime):
     return agent.id;
   }
 
-  // 'hivekeeper-email' or 'self' — not applicable to <agent-ref> (agents are
-  // not addressable by email; self has no CLI shell analog).
+  // 'hivekeeper-email', 'self', or 'credential-active' — not applicable to
+  // <agent-ref> (agents are not addressable by email; self has no CLI shell
+  // analog; credential-active is the wrong target type for revoke).
   throw new CliError('CONFIG_INVALID', {
     subCode: 'kind_not_allowed',
     message: `<agent-ref> requires UUID v7 or agent reference '<name>@<owner-local>.${ctx.hiveName}', got '${parsed.kind}'`,
   });
+}
+
+/**
+ * Resolve a `<jti-or-active-ref>` input to a canonical credential JTI. Accepted
+ * forms (per ADR-020 § Decision step 4 + PRY-041):
+ *   - UUID v7 (passes through without DB lookup; preserves the pre-PRY-041
+ *     idempotent semantics of `revoker.revokeCredential` for unknown JTIs and
+ *     defers existence checks to the domain layer where the credential row
+ *     itself is read).
+ *   - `<participant-ref>:latest` (kind `credential-active`). The inner
+ *     `<participant-ref>` may be a UUID, hivekeeper email, or agent reference.
+ *     Resolves the participant first, then looks up the active credential via
+ *     `credentialsRepo.findActiveCredentialByParticipant`.
+ *
+ * Other parser kinds ('self', bare 'hivekeeper-email' without `:latest`, bare
+ * 'agent-reference' without `:latest') are rejected with
+ * `CliError(CONFIG_INVALID, kind_not_allowed)` — the credential rotate/revoke
+ * positional only accepts a JTI or the explicit `:latest` alias.
+ *
+ * Resolution failures:
+ *   - Inner participant resolves but has no active credential → `AuthError(
+ *     PARTICIPANT_NOT_FOUND, no_active_credential)` so handler.ts maps to
+ *     `EXIT_NOT_FOUND (3)` per ADR-020 § Decision step 4.
+ *   - Inner email/agent ref does not resolve → `AuthError(PARTICIPANT_NOT_FOUND,
+ *     <participant_owner_or_name>_not_found)` (same mapping path).
+ *   - Reference unparseable → `CliError(CONFIG_INVALID, jti_or_ref_unparseable)`
+ *     → `EXIT_USER_ERROR (1)`.
+ */
+export async function resolveCredentialRef(input: string, runtime: CliRuntime): Promise<UUIDv7> {
+  const ctx = getCliCallerContext(runtime);
+  const parsed = parseReference(input, ctx.hiveName);
+
+  if (parsed === null) {
+    throw new CliError('CONFIG_INVALID', {
+      subCode: 'jti_or_ref_unparseable',
+      message: `'${input}' is not a valid reference (expected UUID v7 JTI or '<participant-ref>:latest')`,
+    });
+  }
+
+  if (parsed.kind === 'uuid') return parsed.id;
+
+  if (parsed.kind === 'credential-active') {
+    const participantId = await resolveParsedParticipant(parsed.participant, runtime, ctx);
+    const credential = await runtime.credentialsRepo.findActiveCredentialByParticipant(
+      ctx.hiveId,
+      participantId,
+      new Date(),
+    );
+    if (credential === null) {
+      throw new AuthError('PARTICIPANT_NOT_FOUND', { subCode: 'no_active_credential' });
+    }
+    return credential.jti;
+  }
+
+  // 'self', 'hivekeeper-email' (without `:latest`), or 'agent-reference'
+  // (without `:latest`) — not applicable.
+  throw new CliError('CONFIG_INVALID', {
+    subCode: 'kind_not_allowed',
+    message: `<jti-or-active-ref> requires UUID v7 JTI or '<participant-ref>:latest', got '${parsed.kind}'`,
+  });
+}
+
+/**
+ * Internal helper: resolve a parsed participant reference (UUID / hivekeeper-email
+ * / agent-reference — i.e. the `ParsedParticipantReference` subset, except we
+ * allow `self` to be expressed by the inner shape too in case future wiring
+ * surfaces it; today the parser drops `self:latest` early so this branch is
+ * unreachable at runtime). Wraps the same lookup chain as
+ * `resolveAgentReference` but kept separate so error subCodes can be
+ * credential-flow-specific.
+ */
+async function resolveParsedParticipant(
+  parsed: Extract<ParsedReference, { kind: 'uuid' | 'hivekeeper-email' | 'agent-reference' }>,
+  runtime: CliRuntime,
+  ctx: ReturnType<typeof getCliCallerContext>,
+): Promise<UUIDv7> {
+  if (parsed.kind === 'uuid') return parsed.id;
+
+  if (parsed.kind === 'hivekeeper-email') {
+    const hk = await runtime.participantsRepo.findHivekeeperByEmail(ctx.hiveId, parsed.email);
+    if (hk === null) {
+      throw new AuthError('PARTICIPANT_NOT_FOUND', { subCode: 'credential_owner_not_found' });
+    }
+    return hk.id;
+  }
+
+  // parsed.kind === 'agent-reference'
+  const owner = await runtime.participantsRepo.findHivekeeperByEmailLocalPart(
+    ctx.hiveId,
+    parsed.ownerLocal,
+  );
+  if (owner === null) {
+    throw new AuthError('PARTICIPANT_NOT_FOUND', { subCode: 'credential_owner_not_found' });
+  }
+  const agent = await runtime.participantsRepo.findAgentByName(
+    ctx.hiveId,
+    owner.id,
+    parsed.agentName,
+  );
+  if (agent === null) {
+    throw new AuthError('PARTICIPANT_NOT_FOUND', { subCode: 'credential_agent_not_found' });
+  }
+  return agent.id;
 }

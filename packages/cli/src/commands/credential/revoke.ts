@@ -1,9 +1,13 @@
-// `hivectl credential revoke <jti> [--reason <text>] [--yes]`
+// `hivectl credential revoke <jti-or-active-ref> [--reason <text>] [--yes]`
+//
+// `<jti-or-active-ref>` accepts either a UUID v7 JTI (canonical) or a
+// `<participant-ref>:latest` alias resolving to that participant's currently-
+// active credential — per ADR-020 Q3=3B + PRY-041 of the cascade.
 
 import type { CliRuntime, UUIDv7 } from '@hive/server';
 
 import { CliError } from '#error/cli-error.js';
-import { parseUuidV7 } from '#input/parse-uuid.js';
+import { resolveCredentialRef } from '#input/parse-reference.js';
 import { buildOperatorActor } from '#audit/operator-actor.js';
 import type { GlobalCliOpts } from '#types.js';
 
@@ -27,7 +31,7 @@ export async function runRevokeCredential(
       message: 'credential revoke is destructive; pass --yes to confirm',
     });
   }
-  const jti = parseUuidV7(opts.jti, 'jti');
+  const jti = await resolveCredentialRef(opts.jti, runtime);
   const actor = await buildOperatorActor(opts.globals, runtime);
 
   const revokeInput: Parameters<typeof runtime.revoker.revokeCredential>[0] = { jti };
