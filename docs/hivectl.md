@@ -233,6 +233,18 @@ The setting takes effect on the next `hivectl serve` boot — restart the servic
 | `HIVE_CLI_DEFAULT_OUTPUT`                 | `auto` (table if TTY else json) | Override with `--output table                                     | json | yaml`. |
 | `HIVE_CLI_AUDIT_OPERATOR_NOTE_MAX_LENGTH` | `256`                           | Truncates `--operator-note` after this many chars.                |
 
+### Pretty logging in the SEA binary
+
+When `hivectl` runs as the SEA binary published under `@hivemine/hivectl-<os>-<arch>`, log output is **always JSON** to stderr — `pino-pretty` is bundled but cannot be loaded as a transport because pino spawns transports in worker threads that need an on-disk path to the transport module. `--log-pretty` and `HIVE_MCP_LOG_PRETTY=true` are silently downgraded to JSON inside the SEA; if either is set explicitly, a one-shot warning is emitted to stderr.
+
+To get human-readable output, pipe stderr through `pino-pretty` from any host that has Node + npx available:
+
+```bash
+hivectl serve 2>&1 | npx pino-pretty
+```
+
+The non-SEA build (`node packages/cli/dist/main.js`) keeps the auto-pretty-when-non-production behaviour and accepts `--log-pretty` / `HIVE_MCP_LOG_PRETTY=true` normally.
+
 ## See also
 
 - [`docs/auth.md`](./auth.md) — JWT semantics, signing keys, credential lifecycle.
