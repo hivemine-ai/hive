@@ -412,6 +412,11 @@ export interface CliRuntime {
   auditRecorder: AuditRecorder;
   signingKeys: Map<string, SigningKey>;
   hiveStableIdentifier: UUIDv7;
+  // Hive name — read from the same `hives` row as `hiveStableIdentifier`. Used by
+  // `parseReference(input, hiveName)` for agent-reference suffix disambiguation
+  // per ADR-015 + ADR-020 (single-Hive simplification — CLI cannot thread it via
+  // `IdentityContext` because there is no JWT).
+  hiveName: string;
   hiveColonyId: UUIDv7;
   logger: Logger;
   config: CliResolvedConfig;
@@ -496,6 +501,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     auditRecorder,
     signingKeys,
     hiveStableIdentifier: hiveRow.id,
+    hiveName: hiveRow.name,
     hiveColonyId: colonyRow.id,
     logger,
     config,

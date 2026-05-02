@@ -1,10 +1,16 @@
 // Build the actor metadata for an audit_log row from CLI globals.
 // Per the tech spec rationale: audit events emitted by hivectl default
 // to actorKind: 'system'.
+//
+// Per ADR-020: `--operator-id` accepts UUID v7 OR Hivekeeper email. The raw
+// input flows from globals; we resolve it here via `resolveOperatorId` (which
+// uses the shared parser + repo lookup) before the active-admin validation.
 
-import type { CliRuntime } from '@hive/server';
+import { isAuthError } from '@hive/server';
+import type { CliRuntime, UUIDv7 } from '@hive/server';
 
 import { CliError } from '../error/cli-error.js';
+import { resolveOperatorId } from '../input/parse-reference.js';
 import type { GlobalCliOpts, OperatorActor } from '../types.js';
 
 export const OPERATOR_NOTE_MAX_LENGTH = parseInt(
@@ -34,7 +40,8 @@ export async function buildOperatorActor(
   }
 
   if (opts.operatorId !== undefined) {
-    const operatorHk = await runtime.participantsRepo.findHivekeeperById(opts.operatorId);
+    const operatorUuid = await resolveOperatorIdSafely(opts.operatorId, runtime);
+    const operatorHk = await runtime.participantsRepo.findHivekeeperById(operatorUuid);
     if (!operatorHk) {
       throw new CliError('OPERATOR_ID_NOT_ADMIN', { subCode: 'not_found' });
     }
@@ -48,6 +55,24 @@ export async function buildOperatorActor(
   }
 
   return { actorId: null, actorKind: 'system', detail };
+}
+
+/**
+ * Resolve --operator-id input to a UUIDv7. Maps `AuthError(PARTICIPANT_NOT_FOUND)`
+ * thrown by the resolver (email shape that did not resolve) to the existing
+ * `OPERATOR_ID_NOT_ADMIN(not_found)` subCode so handler.ts produces the same
+ * EXIT_PERMISSION exit + message the operator is used to. Other CLI errors
+ * (malformed reference, kind not allowed) bubble unchanged.
+ */
+async function resolveOperatorIdSafely(input: string, runtime: CliRuntime): Promise<UUIDv7> {
+  try {
+    return await resolveOperatorId(input, runtime);
+  } catch (err) {
+    if (isAuthError(err) && err.code === 'PARTICIPANT_NOT_FOUND') {
+      throw new CliError('OPERATOR_ID_NOT_ADMIN', { subCode: 'not_found' });
+    }
+    throw err;
+  }
 }
 
 function truncate(input: string, max: number): string {

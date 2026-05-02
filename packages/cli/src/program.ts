@@ -25,7 +25,6 @@ import { parseLogLevel, runServe } from './commands/serve.js';
 import { registerServiceGroup } from './commands/service/index.js';
 import { mapErrorToExit } from './error/handler.js';
 import { asOptionalNumber, asOptionalString, asString, asStringArray } from './input/coerce.js';
-import { parseUuidV7 } from './input/parse-uuid.js';
 import { formatOutput, formatOutputList, resolveOutputMode } from './output/format.js';
 import {
   auditEntrySchema,
@@ -74,7 +73,9 @@ function makeState(rootOpts: RootCliOpts): RuntimeState {
     verbose,
   };
   if (rootOpts.operatorId !== undefined) {
-    globals.operatorId = parseUuidV7(rootOpts.operatorId, 'operator-id');
+    // Per ADR-020: store the raw input. `buildOperatorActor` resolves it
+    // (UUID v7 OR Hivekeeper email) once the runtime is up.
+    globals.operatorId = rootOpts.operatorId;
   }
   if (rootOpts.operatorNote !== undefined) globals.operatorNote = rootOpts.operatorNote;
   if (rootOpts.config !== undefined) globals.configFile = rootOpts.config;
@@ -121,7 +122,10 @@ export function buildProgram(): BuildProgramResult {
     .option('-o, --output <format>', 'output format: table | json | yaml', undefined)
     .option('-y, --yes', 'skip confirmation prompts (required for destructive ops)')
     .option('--no-color', 'disable ANSI colors in output')
-    .option('--operator-id <uuid>', 'attribute the audit event to this Hivekeeper UUIDv7')
+    .option(
+      '--operator-id <email-or-uuid>',
+      'attribute the audit event to this Hivekeeper (email or UUID v7)',
+    )
     .option('--operator-note <text>', 'free-form audit note (capped at 256 chars)')
     .option('--config <path>', 'optional .env file with overrides')
     .option('-v, --verbose', 'bump log level to debug');

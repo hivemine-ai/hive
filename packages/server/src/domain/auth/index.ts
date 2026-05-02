@@ -18,6 +18,9 @@ export type {
 export { requireAdminCaller } from './caller-context.js';
 export type { CallerContext } from './caller-context.js';
 
+export { parseReference } from './references/parser.js';
+export type { ParsedReference } from './references/parser.js';
+
 export {
   generateKeypair,
   deriveKid,
