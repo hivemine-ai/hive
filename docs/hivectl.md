@@ -43,8 +43,9 @@ hivectl credential rotate <jti> --yes \
 # 6. Inspect the audit log.
 hivectl audit query --limit 20 --operator-id you@example.com
 
-# 7. Revoke an agent (cascade-closes its Cell).
-hivectl agent revoke <agent-id> --yes --operator-id you@example.com
+# 7. Revoke an agent (cascade-closes its Cell). Accepts UUID v7 or
+#    agent reference (<name>@<owner-local>.<hive>).
+hivectl agent revoke worker-a@you.cotalker --yes --operator-id you@example.com
 ```
 
 `--operator-id` accepts either a Hivekeeper email or a UUID v7 — the email path resolves via DB lookup. UUID is preserved for scripts and tooling.
@@ -62,7 +63,7 @@ Two input forms are accepted (per ADR-020):
 
 The flag is validated only as a sanity check: the resolved UUID must point to an **active admin** Hivekeeper. If it does not, the CLI exits with `EXIT_PERMISSION (5)`. An attacker with shell access can omit the flag to get `actorKind: 'system'`; the audit log reflects that reality.
 
-Reference syntax accepted across other CLI flags is documented in [ADR-020](https://github.com/hivemine-ai/hive-vault) — agent references (`<name>@<owner-local>.<hive>`) and the `<participant-ref>:latest` alias for `credential rotate/revoke` ship in PRYs 040–042 of the same cascade.
+Reference syntax accepted across other CLI flags is documented in [ADR-020](https://github.com/hivemine-ai/hive-vault) — agent references (`<name>@<owner-local>.<hive>`) are accepted by `agent revoke <agent-ref>` (PRY-040, see § Subcommand reference). The `<participant-ref>:latest` alias for `credential rotate/revoke` and friendly references on `audit query --actor-id` / `--subject-id` ship in PRYs 041–042 of the same cascade.
 
 ### Output modes
 
@@ -139,10 +140,15 @@ hivectl agent create --owner <email-or-uuid> --name <name> --type worker|scout
                      [--output-credential <path>]
 hivectl agent list   [--owner <email-or-uuid>] [--type worker|scout]
                      [--state active|suspended|revoked] [--limit N] [--cursor <c>]
-hivectl agent revoke <agent-id> --yes
+hivectl agent revoke <agent-ref> --yes
 ```
 
 `create` cascades to a new Cell (cross-domain hook). `revoke` cascades to closing the Agent's Cell.
+
+`<agent-ref>` accepts two input forms (per [ADR-020](https://github.com/hivemine-ai/hive-vault)):
+
+- **Agent reference** — `<name>@<owner-local>.<hive>` (e.g. `worker-a@you.cotalker`). Resolves the owner Hivekeeper by email local-part, then the agent by name under that owner. Best for human operators who just ran `agent create` and remember the name + their own email.
+- **UUID v7** — passed through directly (preserves the existing idempotent semantics: revoking an unknown UUID still exits `0`, since opaque ids may correspond to entities the script knows are already revoked). Best for scripts and tooling.
 
 ### `credential`
 

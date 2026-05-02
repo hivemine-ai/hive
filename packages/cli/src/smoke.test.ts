@@ -419,6 +419,74 @@ describe('PRY-007 H21 — hivectl Slice 0 smoke E2E (SQLite)', () => {
     }
   });
 
+  it('PRY-040 — agent revoke accepts agent reference syntax end-to-end', async () => {
+    // Initialise a hive whose name is suitable for the agent-reference suffix
+    // (lowercase, single token — agent-references are `<name>@<owner-local>.<hive>`).
+    await runInit({
+      globals: makeGlobals(),
+      adminEmail: 'leo@example.com',
+      adminDisplayName: 'Leo',
+      hiveName: 'cotalker',
+      db: `sqlite:${dbPath}`,
+      keysDir,
+      ttl: '365d',
+      outputCredential: undefined,
+    });
+    const runtime = await startCli({ logger: SILENT_LOGGER });
+    try {
+      // Create an agent owned by the bootstrap admin.
+      const created = await runCreateAgent(runtime, {
+        globals: makeGlobals('leo@example.com'),
+        owner: 'leo@example.com',
+        name: 'worker-friendly',
+        type: 'worker',
+        capabilities: [],
+        instructions: 'Test worker for friendly-form revoke',
+        emitCredential: false,
+        credentialTtl: undefined,
+        outputCredential: undefined,
+      });
+      expect(created.agentId).toMatch(/^[0-9a-f-]{36}$/);
+
+      // Revoke via friendly reference — `<name>@<owner-local>.<hive>`.
+      const revoked = await runRevokeAgent(runtime, {
+        globals: makeGlobals('leo@example.com'),
+        agentRef: 'worker-friendly@leo.cotalker',
+      });
+      expect(revoked.revokedAgentId).toBe(created.agentId);
+
+      // Cell cascade-closes (matches the UUID path semantics).
+      const closedCells = await runtime.db
+        .selectFrom('cells')
+        .select(['owner_id', 'state'])
+        .where('owner_id', '=', created.agentId)
+        .execute();
+      expect(closedCells).toHaveLength(1);
+      expect(closedCells[0]?.state).toBe('closed');
+
+      // A non-existing friendly reference exits EXIT_NOT_FOUND
+      // (PARTICIPANT_NOT_FOUND, agent_name_not_found). AuthError is sourced
+      // from `@hive/server` (workspace package, single module identity), so
+      // `mapErrorToExit` recognises it correctly across the dual-module dance
+      // that the `#alias/*` imports field produces in vitest. The malformed-
+      // input path also throws but its CliError suffers from dual-loading
+      // (dist via alias vs src via relative); covered exhaustively by
+      // `input/parse-reference.test.ts` unit tests instead.
+      try {
+        await runRevokeAgent(runtime, {
+          globals: makeGlobals('leo@example.com'),
+          agentRef: 'ghost@leo.cotalker',
+        });
+        expect.fail('should have thrown');
+      } catch (err) {
+        const mapped = mapErrorToExit(err);
+        expect(mapped.code).toBe(EXIT_NOT_FOUND);
+      }
+    } finally {
+      await stopCli(runtime);
+    }
+  });
+
   it('AC-12: --output json roundtrip is parseable for init + agent create', async () => {
     // Init returns InitCommandResult; serialize and re-parse.
     const result = await runInit({

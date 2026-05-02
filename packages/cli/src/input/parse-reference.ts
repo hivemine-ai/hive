@@ -10,8 +10,12 @@
 // ADR-007).
 //
 // `--owner` / `--participant-id` / `<participant-ref>` (resolveParticipantReference):
-// UUID OR Hivekeeper email today. Agent-reference and credential-active alias
-// will be wired in PRY-040 / PRY-041 / PRY-042 of the cascade.
+// UUID OR Hivekeeper email today. Credential-active alias will be wired in
+// PRY-041 of the cascade.
+//
+// `<agent-ref>` positional in `agent revoke` (resolveAgentReference, PRY-040):
+// UUID OR agent-reference syntax (`<name>@<owner-local>.<hive>`). Email and
+// 'self' / 'credential-active' kinds are not applicable.
 
 import { AuthError, parseReference, type ParsedReference } from '@hive/server';
 import type { CliRuntime, UUIDv7 } from '@hive/server';
@@ -114,5 +118,62 @@ export async function resolveOperatorId(input: string, runtime: CliRuntime): Pro
   throw new CliError('OPERATOR_ID_INVALID', {
     subCode: 'kind_not_allowed',
     message: `--operator-id requires UUID v7 or hivekeeper email, got '${parsed.kind}'`,
+  });
+}
+
+/**
+ * Resolve an agent reference input to a canonical agent UUIDv7. Accepted forms:
+ *   - UUID v7 (passes through without DB lookup; preserves the pre-PRY-040
+ *     idempotent semantics of `repo.revokeAgent` for unknown UUIDs).
+ *   - Agent reference `<name>@<owner-local>.<hiveName>` (per ADR-015 syntax,
+ *     PRY-024 wire-side). Resolves owner via `findHivekeeperByEmailLocalPart`,
+ *     then agent via `findAgentByName(hiveId, ownerId, name)`.
+ *
+ * Other parser kinds ('hivekeeper-email', 'self') are rejected with
+ * `CliError(CONFIG_INVALID, kind_not_allowed)` because the agent revoke
+ * positional only accepts an Agent identifier.
+ *
+ * Resolution failures (owner local-part not found, or agent name not found
+ * under that owner) raise `AuthError(PARTICIPANT_NOT_FOUND)` so the existing
+ * handler.ts mapping produces `EXIT_NOT_FOUND (3)` per ADR-020 § Decision
+ * step 4.
+ */
+export async function resolveAgentReference(input: string, runtime: CliRuntime): Promise<UUIDv7> {
+  const ctx = getCliCallerContext(runtime);
+  const parsed = parseReference(input, ctx.hiveName);
+
+  if (parsed === null) {
+    throw new CliError('CONFIG_INVALID', {
+      subCode: 'agent_ref_unparseable',
+      message: `'${input}' is not a valid reference (expected UUID v7 or agent reference '<name>@<owner-local>.${ctx.hiveName}')`,
+    });
+  }
+
+  if (parsed.kind === 'uuid') return parsed.id;
+
+  if (parsed.kind === 'agent-reference') {
+    const owner = await runtime.participantsRepo.findHivekeeperByEmailLocalPart(
+      ctx.hiveId,
+      parsed.ownerLocal,
+    );
+    if (owner === null) {
+      throw new AuthError('PARTICIPANT_NOT_FOUND', { subCode: 'agent_owner_not_found' });
+    }
+    const agent = await runtime.participantsRepo.findAgentByName(
+      ctx.hiveId,
+      owner.id,
+      parsed.agentName,
+    );
+    if (agent === null) {
+      throw new AuthError('PARTICIPANT_NOT_FOUND', { subCode: 'agent_name_not_found' });
+    }
+    return agent.id;
+  }
+
+  // 'hivekeeper-email' or 'self' — not applicable to <agent-ref> (agents are
+  // not addressable by email; self has no CLI shell analog).
+  throw new CliError('CONFIG_INVALID', {
+    subCode: 'kind_not_allowed',
+    message: `<agent-ref> requires UUID v7 or agent reference '<name>@<owner-local>.${ctx.hiveName}', got '${parsed.kind}'`,
   });
 }
