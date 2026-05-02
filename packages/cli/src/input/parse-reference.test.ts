@@ -1,13 +1,14 @@
 import { type Mock, describe, expect, it, vi } from 'vitest';
 
 import { AuthError } from '@hive/server';
-import type { Agent, CliRuntime, Hivekeeper } from '@hive/server';
+import type { Agent, CliRuntime, CredentialRow, Hivekeeper } from '@hive/server';
 
 import { CliError } from '../error/cli-error.js';
 
 import {
   parseParticipantReference,
   resolveAgentReference,
+  resolveCredentialRef,
   resolveOperatorId,
   resolveParticipantReference,
 } from './parse-reference.js';
@@ -15,6 +16,7 @@ import {
 const VALID_UUID = '019d57a0-d6e0-7b3a-8d4f-cb2c4e72d100';
 const AGENT_UUID = '019d57a0-d6e0-7b3a-8d4f-cb2c4e72d201';
 const OWNER_UUID = '019d57a0-d6e0-7b3a-8d4f-cb2c4e72d300';
+const CREDENTIAL_JTI = '019d57a0-d6e0-7b3a-8d4f-cb2c4e72d401';
 const HIVE_ID = '019de8c4-b3c3-7279-a2ee-09424384da11';
 const COLONY_ID = '019de8c4-b3c3-7279-a2ee-09424384da12';
 const HIVE_NAME = 'cotalker';
@@ -27,32 +29,55 @@ interface MockRuntime {
     findHivekeeperByEmailLocalPart: Mock;
     findAgentByName: Mock;
   };
+  credentialsRepo: {
+    findActiveCredentialByParticipant: Mock;
+  };
 }
 
 function makeRuntime(overrides?: {
   findHivekeeperByEmail?: Mock;
   findHivekeeperByEmailLocalPart?: Mock;
   findAgentByName?: Mock;
+  findActiveCredentialByParticipant?: Mock;
 }): {
   runtime: CliRuntime;
   findHivekeeperByEmail: Mock;
   findHivekeeperByEmailLocalPart: Mock;
   findAgentByName: Mock;
+  findActiveCredentialByParticipant: Mock;
 } {
   const findHivekeeperByEmail = overrides?.findHivekeeperByEmail ?? vi.fn().mockResolvedValue(null);
   const findHivekeeperByEmailLocalPart =
     overrides?.findHivekeeperByEmailLocalPart ?? vi.fn().mockResolvedValue(null);
   const findAgentByName = overrides?.findAgentByName ?? vi.fn().mockResolvedValue(null);
+  const findActiveCredentialByParticipant =
+    overrides?.findActiveCredentialByParticipant ?? vi.fn().mockResolvedValue(null);
   const runtime: MockRuntime = {
     hiveStableIdentifier: HIVE_ID,
     hiveName: HIVE_NAME,
     participantsRepo: { findHivekeeperByEmail, findHivekeeperByEmailLocalPart, findAgentByName },
+    credentialsRepo: { findActiveCredentialByParticipant },
   };
   return {
     runtime: runtime as unknown as CliRuntime,
     findHivekeeperByEmail,
     findHivekeeperByEmailLocalPart,
     findAgentByName,
+    findActiveCredentialByParticipant,
+  };
+}
+
+function makeCredential(jti: string): CredentialRow {
+  return {
+    jti,
+    participantId: OWNER_UUID,
+    participantKind: 'hivekeeper',
+    kid: 'kid-001',
+    issuedAt: new Date(),
+    notBefore: new Date(),
+    expiresAt: new Date(Date.now() + 60_000),
+    isRevoked: false,
+    revokedAt: null,
   };
 }
 
@@ -348,5 +373,193 @@ describe('resolveAgentReference', () => {
     );
     expect(findHivekeeperByEmailLocalPart).toHaveBeenCalledWith(HIVE_ID, 'admin');
     expect(findAgentByName).toHaveBeenCalledWith(HIVE_ID, OWNER_UUID, 'ghost');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveCredentialRef — PRY-041 (`<jti-or-active-ref>` positional)
+// ---------------------------------------------------------------------------
+
+describe('resolveCredentialRef', () => {
+  it('returns UUID directly without DB lookup (treated as a JTI)', async () => {
+    const { runtime, findActiveCredentialByParticipant } = makeRuntime();
+    const result = await resolveCredentialRef(VALID_UUID, runtime);
+    expect(result).toBe(VALID_UUID);
+    expect(findActiveCredentialByParticipant).not.toHaveBeenCalled();
+  });
+
+  it('lowercases UUID input on the JTI path', async () => {
+    const { runtime } = makeRuntime();
+    const result = await resolveCredentialRef(VALID_UUID.toUpperCase(), runtime);
+    expect(result).toBe(VALID_UUID);
+  });
+
+  it('resolves `<email>:latest` to the active credential JTI', async () => {
+    const findHivekeeperByEmail = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
+    const findActiveCredentialByParticipant = vi
+      .fn()
+      .mockResolvedValue(makeCredential(CREDENTIAL_JTI));
+    const { runtime } = makeRuntime({
+      findHivekeeperByEmail,
+      findActiveCredentialByParticipant,
+    });
+
+    const result = await resolveCredentialRef('admin@example.com:latest', runtime);
+
+    expect(result).toBe(CREDENTIAL_JTI);
+    expect(findHivekeeperByEmail).toHaveBeenCalledWith(HIVE_ID, 'admin@example.com');
+    expect(findActiveCredentialByParticipant).toHaveBeenCalledWith(
+      HIVE_ID,
+      OWNER_UUID,
+      expect.any(Date),
+    );
+  });
+
+  it('resolves `<uuid>:latest` to the active credential JTI without resolving the participant', async () => {
+    const findActiveCredentialByParticipant = vi
+      .fn()
+      .mockResolvedValue(makeCredential(CREDENTIAL_JTI));
+    const { runtime, findHivekeeperByEmail } = makeRuntime({
+      findActiveCredentialByParticipant,
+    });
+
+    const result = await resolveCredentialRef(`${OWNER_UUID}:latest`, runtime);
+
+    expect(result).toBe(CREDENTIAL_JTI);
+    expect(findHivekeeperByEmail).not.toHaveBeenCalled();
+    expect(findActiveCredentialByParticipant).toHaveBeenCalledWith(
+      HIVE_ID,
+      OWNER_UUID,
+      expect.any(Date),
+    );
+  });
+
+  it('resolves `<agent>@<owner-local>.<hive>:latest` via owner local-part + agent name + active credential', async () => {
+    const findHivekeeperByEmailLocalPart = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
+    const findAgentByName = vi
+      .fn()
+      .mockResolvedValue(makeAgent(AGENT_UUID, OWNER_UUID, 'worker-a'));
+    const findActiveCredentialByParticipant = vi
+      .fn()
+      .mockResolvedValue(makeCredential(CREDENTIAL_JTI));
+    const { runtime } = makeRuntime({
+      findHivekeeperByEmailLocalPart,
+      findAgentByName,
+      findActiveCredentialByParticipant,
+    });
+
+    const result = await resolveCredentialRef(`worker-a@admin.${HIVE_NAME}:latest`, runtime);
+
+    expect(result).toBe(CREDENTIAL_JTI);
+    expect(findHivekeeperByEmailLocalPart).toHaveBeenCalledWith(HIVE_ID, 'admin');
+    expect(findAgentByName).toHaveBeenCalledWith(HIVE_ID, OWNER_UUID, 'worker-a');
+    expect(findActiveCredentialByParticipant).toHaveBeenCalledWith(
+      HIVE_ID,
+      AGENT_UUID,
+      expect.any(Date),
+    );
+  });
+
+  it('garbage input throws CliError(CONFIG_INVALID, jti_or_ref_unparseable)', async () => {
+    const { runtime } = makeRuntime();
+    await expect(resolveCredentialRef('garbage', runtime)).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(CliError);
+      const e = err as CliError;
+      expect(e.code).toBe('CONFIG_INVALID');
+      expect(e.subCode).toBe('jti_or_ref_unparseable');
+      return true;
+    });
+  });
+
+  it('bare email (no `:latest`) throws CliError(CONFIG_INVALID, kind_not_allowed)', async () => {
+    const { runtime } = makeRuntime();
+    await expect(resolveCredentialRef('admin@example.com', runtime)).rejects.toSatisfy(
+      (err: unknown) => {
+        expect(err).toBeInstanceOf(CliError);
+        const e = err as CliError;
+        expect(e.code).toBe('CONFIG_INVALID');
+        expect(e.subCode).toBe('kind_not_allowed');
+        return true;
+      },
+    );
+  });
+
+  it('"self" alias throws CliError(CONFIG_INVALID, kind_not_allowed)', async () => {
+    const { runtime } = makeRuntime();
+    await expect(resolveCredentialRef('self', runtime)).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(CliError);
+      const e = err as CliError;
+      expect(e.code).toBe('CONFIG_INVALID');
+      expect(e.subCode).toBe('kind_not_allowed');
+      return true;
+    });
+  });
+
+  it('"self:latest" rejected by parser layer → CliError(CONFIG_INVALID, jti_or_ref_unparseable)', async () => {
+    const { runtime } = makeRuntime();
+    await expect(resolveCredentialRef('self:latest', runtime)).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(CliError);
+      const e = err as CliError;
+      expect(e.code).toBe('CONFIG_INVALID');
+      expect(e.subCode).toBe('jti_or_ref_unparseable');
+      return true;
+    });
+  });
+
+  it('email-not-found throws AuthError(PARTICIPANT_NOT_FOUND, credential_owner_not_found) before credential lookup', async () => {
+    const findHivekeeperByEmail = vi.fn().mockResolvedValue(null);
+    const { runtime, findActiveCredentialByParticipant } = makeRuntime({
+      findHivekeeperByEmail,
+    });
+
+    await expect(resolveCredentialRef('ghost@example.com:latest', runtime)).rejects.toSatisfy(
+      (err: unknown) => {
+        expect(err).toBeInstanceOf(AuthError);
+        const e = err as AuthError;
+        expect(e.code).toBe('PARTICIPANT_NOT_FOUND');
+        expect(e.subCode).toBe('credential_owner_not_found');
+        return true;
+      },
+    );
+    expect(findActiveCredentialByParticipant).not.toHaveBeenCalled();
+  });
+
+  it('agent-name-not-found throws AuthError(PARTICIPANT_NOT_FOUND, credential_agent_not_found) before credential lookup', async () => {
+    const findHivekeeperByEmailLocalPart = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
+    const findAgentByName = vi.fn().mockResolvedValue(null);
+    const { runtime, findActiveCredentialByParticipant } = makeRuntime({
+      findHivekeeperByEmailLocalPart,
+      findAgentByName,
+    });
+
+    await expect(
+      resolveCredentialRef(`ghost@admin.${HIVE_NAME}:latest`, runtime),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(AuthError);
+      const e = err as AuthError;
+      expect(e.code).toBe('PARTICIPANT_NOT_FOUND');
+      expect(e.subCode).toBe('credential_agent_not_found');
+      return true;
+    });
+    expect(findActiveCredentialByParticipant).not.toHaveBeenCalled();
+  });
+
+  it('participant resolves but no active credential throws AuthError(PARTICIPANT_NOT_FOUND, no_active_credential)', async () => {
+    const findHivekeeperByEmail = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
+    const findActiveCredentialByParticipant = vi.fn().mockResolvedValue(null);
+    const { runtime } = makeRuntime({
+      findHivekeeperByEmail,
+      findActiveCredentialByParticipant,
+    });
+
+    await expect(resolveCredentialRef('admin@example.com:latest', runtime)).rejects.toSatisfy(
+      (err: unknown) => {
+        expect(err).toBeInstanceOf(AuthError);
+        const e = err as AuthError;
+        expect(e.code).toBe('PARTICIPANT_NOT_FOUND');
+        expect(e.subCode).toBe('no_active_credential');
+        return true;
+      },
+    );
   });
 });

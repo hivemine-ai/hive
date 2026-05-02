@@ -21,16 +21,34 @@ const EMAIL_LOCAL_PART_RE = /^[A-Za-z0-9._-]+$/;
 // Downstream domain validates the actual address.
 const EMAIL_RE = /^[^@\s]+@[^@\s]+$/;
 
+// Suffix that aliases "the participant's currently-active credential" — appended
+// to a participant reference (UUID / email / agent-reference) per ADR-020 Q3=3B.
+const CREDENTIAL_ACTIVE_SUFFIX = ':latest';
+
 export type ParsedReference =
   | { kind: 'uuid'; id: UUIDv7 }
   | { kind: 'self' }
+  | { kind: 'hivekeeper-email'; email: string }
+  | { kind: 'agent-reference'; agentName: string; ownerLocal: string }
+  | { kind: 'credential-active'; participant: ParsedParticipantReference };
+
+/**
+ * Subset of `ParsedReference` that can appear nested inside a `:latest` alias.
+ * Excludes `'credential-active'` itself (no `:latest:latest` recursion) and
+ * `'self'` (CLI-only operations on credentials never run from a JWT identity
+ * in v0.1 OSS, so `self:latest` has no defined semantics; we keep the option
+ * open for future MCP wire integration by widening this type).
+ */
+export type ParsedParticipantReference =
+  | { kind: 'uuid'; id: UUIDv7 }
   | { kind: 'hivekeeper-email'; email: string }
   | { kind: 'agent-reference'; agentName: string; ownerLocal: string };
 
 /**
  * Parses a human-readable participant reference into a structured form,
  * disambiguating Hivekeeper emails from agent references via the caller's
- * `hiveName` suffix (per ADR-015 — single-`@` canonical syntax).
+ * `hiveName` suffix (per ADR-015 — single-`@` canonical syntax) and the
+ * `:latest` alias for credential lookups (per ADR-020 Q3=3B).
  *
  * Grammar:
  *   (a) UUID v7 canonical                            → matched case-insensitively, lowercased.
@@ -39,8 +57,15 @@ export type ParsedReference =
  *                                                    → kind: 'agent-reference'.
  *   (d) `<local>@<domain>`                           → kind: 'hivekeeper-email' (single `@`, no
  *                                                       suffix match OR ownerLocal candidate empty).
+ *   (e) `<participant-ref>:latest`                   → kind: 'credential-active' (recursive —
+ *                                                       inner participant must parse to UUID,
+ *                                                       hivekeeper-email, or agent-reference).
  *
- * Algorithm (8 steps — verbatim from ADR-015):
+ * Algorithm (8 steps for participant kinds — verbatim from ADR-015 — plus the
+ * `:latest` pre-check from ADR-020):
+ *   0. if input endsWith ':latest' → recursively parse the prefix; wrap in
+ *      'credential-active' if inner is one of {uuid, hivekeeper-email,
+ *      agent-reference}; null otherwise.
  *   1. UUID v7 → 'uuid'.
  *   2. literal 'self' → 'self'.
  *   3. count('@') != 1 → null.
@@ -57,6 +82,25 @@ export type ParsedReference =
 export function parseReference(input: string, hiveName: string): ParsedReference | null {
   const s = input.trim();
   if (s.length === 0) return null;
+
+  // Step 0: ':latest' alias — recurse on the prefix. Only one ':latest' suffix
+  // is honoured at a time; `<X>:latest:latest` parses the prefix `<X>:latest`
+  // recursively, which yields a 'credential-active' (not in
+  // ParsedParticipantReference) and is therefore rejected.
+  if (s.endsWith(CREDENTIAL_ACTIVE_SUFFIX)) {
+    const prefix = s.slice(0, s.length - CREDENTIAL_ACTIVE_SUFFIX.length);
+    if (prefix.length === 0) return null;
+    const inner = parseReference(prefix, hiveName);
+    if (inner === null) return null;
+    if (
+      inner.kind === 'uuid' ||
+      inner.kind === 'hivekeeper-email' ||
+      inner.kind === 'agent-reference'
+    ) {
+      return { kind: 'credential-active', participant: inner };
+    }
+    return null;
+  }
 
   // Step 1: UUID v7
   if (UUID_V7_RE.test(s)) {

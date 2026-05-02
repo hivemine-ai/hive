@@ -24,6 +24,7 @@
 import type { Kysely } from 'kysely';
 
 import {
+  createCredentialsReadRepo,
   createIssuer,
   createParticipantsReadRepo,
   createParticipantsWriteRepo,
@@ -35,6 +36,7 @@ import {
 } from '#domain/auth/index.js';
 import type {
   Blocklist,
+  CredentialsReadRepo,
   Issuer,
   ParticipantsReadRepo,
   ParticipantsWriteRepo,
@@ -404,6 +406,11 @@ export interface CliRuntime {
   db: Kysely<Database>;
   participantsRepo: ParticipantsReadRepo;
   participantsWriteRepo: ParticipantsWriteRepo;
+  // Read-only credentials lookups. Today consumed by `resolveCredentialRef`
+  // (PRY-041) for the `<participant-ref>:latest` alias in `credential rotate`
+  // and `credential revoke`. Future read-only credential surfaces (e.g.
+  // `credential list` projection refactor) can land here.
+  credentialsRepo: CredentialsReadRepo;
   cellsRepo: CellsRepo;
   blocklist: Blocklist;
   issuer: Issuer;
@@ -462,6 +469,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   }
 
   const participantsRepo = createParticipantsReadRepo(db, dbConfig.dialect);
+  const credentialsRepo = createCredentialsReadRepo(db);
   const cellsRepo = createCellsRepo(db);
   const cellsHook = createCellsHookAdapter(cellsRepo);
   const participantsWriteRepo = createParticipantsWriteRepo(db, { cellsHook });
@@ -493,6 +501,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     db,
     participantsRepo,
     participantsWriteRepo,
+    credentialsRepo,
     cellsRepo,
     blocklist,
     issuer,
