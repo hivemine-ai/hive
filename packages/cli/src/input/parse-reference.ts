@@ -306,11 +306,11 @@ export async function resolveAuditParticipantReference(
 }
 
 /**
- * Internal helper: resolve a parsed participant reference (UUID / hivekeeper-email
- * / agent-reference — i.e. the `ParsedParticipantReference` subset, except we
- * allow `self` to be expressed by the inner shape too in case future wiring
- * surfaces it; today the parser drops `self:latest` early so this branch is
- * unreachable at runtime). Wraps the same lookup chain as
+ * Internal helper: resolve a parsed participant reference to a canonical
+ * UUIDv7. The type parameter (`Extract<ParsedReference, { kind: 'uuid' |
+ * 'hivekeeper-email' | 'agent-reference' }>`) excludes `self` and
+ * `credential-active` at the type level — callers that accept those kinds are
+ * responsible for handling them upstream. Wraps the same lookup chain as
  * `resolveAgentReference` but kept separate so error subCodes can be
  * call-site-specific.
  *
