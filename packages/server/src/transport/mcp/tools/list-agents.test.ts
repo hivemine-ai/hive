@@ -116,6 +116,7 @@ function buildStubRepo(result: ListAgentsResult = { agents: [], nextCursor: null
     findHivekeeperByEmailLocalPart: vi.fn(),
     findAgentById: vi.fn(),
     findAgentByName: vi.fn(),
+    findAgentByNameIncludingRevoked: vi.fn(),
     findById: vi.fn(),
     getParticipantState: vi.fn(),
     listAgents(filter: ListAgentsFilter) {

@@ -33,7 +33,7 @@ import { AuthError, parseReference, type ParsedReference } from '@hive/server';
 import type { CliRuntime, UUIDv7 } from '@hive/server';
 
 import { getCliCallerContext } from '../composition/caller-context.js';
-import { CliError } from '../error/cli-error.js';
+import { CliError } from '#error/cli-error.js';
 
 export type { ParsedReference };
 
@@ -353,11 +353,15 @@ async function resolveParsedParticipant(
         flow === 'credential' ? 'credential_owner_not_found' : `${subCodePrefix}_owner_not_found`,
     });
   }
-  const agent = await runtime.participantsRepo.findAgentByName(
-    ctx.hiveId,
-    owner.id,
-    parsed.agentName,
-  );
+  // The audit-log resolver path (PRY-045) MUST resolve agents whose state is
+  // `revoked` so `audit query --actor-id`/`--subject-id` keeps working after
+  // the agent was revoked. Other flows keep using the default lookup which
+  // rejects revoked agents at resolution time.
+  const findAgent =
+    flow === 'actor-id' || flow === 'subject-id'
+      ? runtime.participantsRepo.findAgentByNameIncludingRevoked.bind(runtime.participantsRepo)
+      : runtime.participantsRepo.findAgentByName.bind(runtime.participantsRepo);
+  const agent = await findAgent(ctx.hiveId, owner.id, parsed.agentName);
   if (agent === null) {
     throw new AuthError('PARTICIPANT_NOT_FOUND', {
       subCode:

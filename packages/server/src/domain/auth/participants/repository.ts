@@ -140,6 +140,20 @@ export interface ParticipantsReadRepo {
   findAgentById(id: UUIDv7): Promise<Agent | null>;
   findAgentByName(hiveId: UUIDv7, ownerId: UUIDv7, name: string): Promise<Agent | null>;
   /**
+   * Identical to {@link findAgentByName} but does NOT filter out revoked agents.
+   * Used by the audit-log resolver path (`resolveAuditParticipantReference`,
+   * PRY-042+045) so `hivectl audit query --subject-id <agent-ref>` resolves
+   * even after the agent was revoked — the audit_log is historic and must
+   * remain queryable by subjects whose live state is `revoked`. Default
+   * lookups (visibility, send/receive, agent revoke) keep using
+   * `findAgentByName` so they reject revoked agents at resolution time.
+   */
+  findAgentByNameIncludingRevoked(
+    hiveId: UUIDv7,
+    ownerId: UUIDv7,
+    name: string,
+  ): Promise<Agent | null>;
+  /**
    * Polymorphic lookup used by the verifier (step 5). Issues two queries in
    * parallel. Accepts an optional `executor` so callers inside an open Kysely
    * transaction can reuse the TX connection — required for SQLite single-
@@ -252,6 +266,17 @@ export function createParticipantsReadRepo(
         .where('owner_id', '=', ownerId)
         .where('name', '=', name)
         .where('state', '!=', 'revoked')
+        .executeTakeFirst();
+      return row ? rowToAgent(row) : null;
+    },
+
+    async findAgentByNameIncludingRevoked(hiveId, ownerId, name) {
+      const row = await db
+        .selectFrom('agents')
+        .selectAll()
+        .where('hive_id', '=', hiveId)
+        .where('owner_id', '=', ownerId)
+        .where('name', '=', name)
         .executeTakeFirst();
       return row ? rowToAgent(row) : null;
     },

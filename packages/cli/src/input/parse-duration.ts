@@ -1,7 +1,7 @@
 // Parse duration strings like "30d", "12h", "365d", "5m" → milliseconds.
 // Supported suffixes: ms, s, m, h, d. No suffix = ms. Negative or zero = throw.
 
-import { CliError } from '../error/cli-error.js';
+import { CliError } from '#error/cli-error.js';
 
 const PATTERN = /^(\d+)(ms|s|m|h|d)?$/;
 

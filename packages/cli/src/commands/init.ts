@@ -19,7 +19,7 @@ import path from 'node:path';
 
 import { performInit } from '../init.js';
 import type { InitResult } from '../init.js';
-import { CliError } from '../error/cli-error.js';
+import { CliError } from '#error/cli-error.js';
 import { parseDuration } from '../input/parse-duration.js';
 import type { GlobalCliOpts } from '../types.js';
 
