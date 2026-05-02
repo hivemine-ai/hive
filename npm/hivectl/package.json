@@ -1,0 +1,35 @@
+{
+  "name": "@hivemine/hivectl",
+  "version": "0.0.0-dev",
+  "description": "Hive MCP server CLI — admin operations + serve + service installer.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/hivemine-ai/hive",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hivemine-ai/hive.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hivemine-ai/hive/issues"
+  },
+  "bin": {
+    "hivectl": "bin/hivectl"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/",
+    "install.js",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "@hivemine/hivectl-linux-x64": "0.0.0-dev",
+    "@hivemine/hivectl-linux-arm64": "0.0.0-dev",
+    "@hivemine/hivectl-darwin-x64": "0.0.0-dev",
+    "@hivemine/hivectl-darwin-arm64": "0.0.0-dev"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  }
+}

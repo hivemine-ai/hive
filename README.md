@@ -33,6 +33,17 @@ docs/          # public documentation
 
 ## Quick start
 
+Once `v0.1.0` is published to npm, the supported install path is:
+
+```bash
+npm install -g @hivemine/hivectl                                    # self-contained binary; no Node runtime required at runtime
+hivectl init --admin-email you@example.com                          # one-time bootstrap
+hivectl serve                                                        # foreground MCP server
+# → Listening on http://127.0.0.1:8443/mcp
+```
+
+Until then (and for contributors hacking on the codebase), build from source:
+
 ```bash
 nvm use            # switches to the Node version pinned in .nvmrc
 pnpm install
@@ -42,14 +53,12 @@ pnpm test          # runs the suite (vitest)
 
 > v0.1 is under active development. The auth subsystem, Cell Store, Visibility / Audit, Waggle pipeline, and MCP transport are functional (Slice 0). The full `hivectl` admin surface and Docker-based deployment land in PRYs 007–008.
 
-### Run the MCP server
-
-> During pre-release, `hivectl` runs from the build output (no global `hivectl` binary on `PATH` until v0.1 publishes).
+### Run the MCP server (from source)
 
 ```bash
 node packages/cli/dist/main.js init --admin-email you@example.com   # one-time bootstrap
 node packages/cli/dist/main.js serve                                # foreground MCP server
-# → Listening on http://0.0.0.0:8443/mcp
+# → Listening on http://127.0.0.1:8443/mcp
 ```
 
 Endpoints exposed: `POST /mcp` (JSON-RPC + SSE), `GET /mcp` (server-initiated SSE), `DELETE /mcp` (session terminate), `GET /healthz`, `GET /readyz`, `GET /.well-known/jwks.json`. See [`docs/mcp-server.md`](./docs/mcp-server.md) for the full operator guide.
@@ -67,13 +76,14 @@ Tip: alias `hivectl='node packages/cli/dist/main.js'` in your shell during pre-r
 
 ### Distribution status (v0.1)
 
-Hive is **OSS by design** (Apache 2.0). During Fase 1 v0.1 development the project stays internal — no GHCR publication, no `npm publish`, repo private. Operators run Hive **from source** (`git clone` + `pnpm install` + `pnpm build` + `node packages/<x>/dist/main.js`). When v0.1 is battle-tested in internal deploys, a follow-up PRY adds `release.yml` (push to `ghcr.io/hivemine-ai/hive:vX.Y.Z`), `npm publish` for `@hive/cli`, and flips the repo to public — see vault entry for the trigger conditions.
+Hive is **OSS by design** (Apache 2.0). The release pipeline (build matrix + 5-package npm publish under `@hivemine`) ships as part of `v0.1.0`. Until that release is cut, the repo stays private and operators run Hive from source. The build artifact (`hivectl` SEA binary, ~108 MB) is fully self-contained — no Node runtime required at the install host once published. See `_meta/runbooks/release-publish.md` in the vault for the maintainer-facing release procedure.
 
-### Deploy paths (v0.1, build-from-source)
+### Deploy paths
 
-Per [ADR-008](https://github.com/hivemine-ai/hive-vault) the deploy story bifurcates into two topologies:
+Per ADR-008 the deploy story bifurcates into three topologies:
 
-- **Topology 1 — CLI + SQLite (default OSS adoption path).** `pnpm install && pnpm build` + `node packages/cli/dist/main.js init` → SQLite at `./var/db/hive.sqlite`. Zero infra. Process supervised by systemd / launchd / pm2. Documented in [`packages/cli/README.md`](./packages/cli/README.md) and [`docs/hivectl.md`](./docs/hivectl.md).
+- **Topology 1 — CLI + SQLite (default OSS adoption path).** `npm install -g @hivemine/hivectl` + `hivectl init` → SQLite at `/var/lib/hive/hive.sqlite` (Linux) or `~/Library/Application Support/Hive/hive.sqlite` (macOS). Zero infra. Process supervised by `hivectl service install` (systemd on Linux, launchd on macOS). Documented in [`packages/cli/README.md`](./packages/cli/README.md) and [`docs/hivectl.md`](./docs/hivectl.md).
+- **Topology 1b — CLI + SQLite from source** (contributors / pre-release operators). `pnpm install && pnpm build` + `node packages/cli/dist/main.js init`. Same surface as Topology 1, no install of the published binary.
 - **Topology 2 — Docker Compose (production opt-in).** `pnpm install && pnpm build && docker compose -f deployment/docker-compose.yml build && docker compose -f deployment/docker-compose.yml up -d`. Server runs containerized against SQLite-in-volume by default; activate `--profile postgres` to add the bundled Postgres service. Image built locally on the deploy host (no `docker pull` from a registry during Fase 1). Full operator guide in [`deployment/README.md`](./deployment/README.md).
 
 PostgreSQL support ships in v0.1.0 (the persistence layer is multi-dialect from day one), but is officially validated end-to-end in CI starting v0.1.1.
