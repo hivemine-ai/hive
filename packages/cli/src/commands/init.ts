@@ -14,6 +14,8 @@
 // don't exist yet — the wire would fail loading them.
 
 import { writeFileSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
 
 import { performInit } from '../init.js';
 import type { InitResult } from '../init.js';
@@ -56,6 +58,22 @@ export async function runInit(opts: InitCommandOpts): Promise<InitCommandResult>
       message: `'${opts.adminEmail}' is not a valid email`,
     });
   }
+
+  // Bootstrap UX (PRY-036): auto-create parent dirs of every path the
+  // bootstrap will write to. Without this, a first-run from an empty cwd
+  // (e.g. `hivectl init` straight after `npm install -g`) crashed with
+  // `internal error: Cannot open database because the directory does not
+  // exist`. mkdir is idempotent (recursive + EEXIST tolerated). Postgres
+  // URLs are skipped — that DB is managed externally.
+  const sqlitePath = extractSqlitePathFromUrl(opts.db);
+  if (sqlitePath !== null) {
+    await mkdir(path.dirname(sqlitePath), { recursive: true });
+  }
+  await mkdir(opts.keysDir, { recursive: true });
+  if (opts.outputCredential !== undefined && opts.outputCredential !== '') {
+    await mkdir(path.dirname(opts.outputCredential), { recursive: true });
+  }
+
   const ttlMs = opts.ttl !== undefined ? parseDuration(opts.ttl) : undefined;
 
   const initOpts: Parameters<typeof performInit>[0] = {
@@ -96,4 +114,13 @@ export async function runInit(opts: InitCommandOpts): Promise<InitCommandResult>
 
 function isPlausibleEmail(input: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input);
+}
+
+/**
+ * Returns the filesystem path of a `sqlite:` DB URL, or null if the URL is
+ * not SQLite (e.g. `postgres://...`). Used by `runInit` to know whether to
+ * pre-create the parent directory before opening the file.
+ */
+export function extractSqlitePathFromUrl(url: string): string | null {
+  return url.startsWith('sqlite:') ? url.slice('sqlite:'.length) : null;
 }
