@@ -15,7 +15,7 @@
 
 import { writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
-import * as path from 'node:path';
+import path from 'node:path';
 
 import { performInit } from '../init.js';
 import type { InitResult } from '../init.js';
