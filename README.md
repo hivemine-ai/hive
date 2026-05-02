@@ -53,7 +53,7 @@ For OS-supervised deployments (systemd on Linux, launchd on macOS) use `hivectl 
 ```bash
 hivectl hivekeeper create --email teammate@example.com --emit-credential
 hivectl agent create --owner you@example.com --name worker-a --type worker --emit-credential
-hivectl credential rotate <jti> --yes
+hivectl credential rotate worker-a@you.cotalker:latest --yes
 hivectl audit query --limit 20
 ```
 

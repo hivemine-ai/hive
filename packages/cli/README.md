@@ -42,7 +42,7 @@ hivectl hivekeeper create --email teammate@example.com --emit-credential \
 hivectl agent create --owner you@example.com --name worker-a --type worker \
   --emit-credential --operator-id you@example.com
 hivectl agent list --owner you@example.com
-hivectl credential rotate <jti> --yes
+hivectl credential rotate worker-a@you.cotalker:latest --yes
 hivectl audit query --limit 20
 
 # Postgres opt-in (production deploys)
