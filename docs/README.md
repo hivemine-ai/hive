@@ -7,17 +7,18 @@ This directory grows incrementally as PRYs close. Each component gets one user-f
 ## Components
 
 - **[Auth + Identity](auth.md)** — JWT-based authentication, Ed25519 signing keys, `hivectl init` bootstrap, credential lifecycle (issue / rotate / revoke), and the canonical error codes.
-- **[MCP Server](mcp-server.md)** — Running the Hive MCP server, environment variables, HTTP endpoints, the 5 Slice 0 tools, and how to talk to it as an MCP client.
-- **[Channels](channels.md)** — Reactive autonomy in Claude Code via the dual-emit push notification path. Operational gates, flag syntax, prompt-injection risk advisory, troubleshooting. Per ADR-011 (Slice 1).
-- **[hivectl](hivectl.md)** — Operator CLI: bootstrap a Hive, manage Hivekeepers / Agents / credentials, query the audit log. 12 subcommands across `init` / `migrate` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`.
+- **[MCP Server](mcp-server.md)** — Running the Hive MCP server, environment variables, HTTP endpoints, the full 8-tool catalog, and how to talk to it as an MCP client.
+- **[Channels](channels.md)** — Reactive autonomy in Claude Code via the dual-emit push notification path. Operational gates, flag syntax, prompt-injection risk advisory, troubleshooting. Per ADR-011.
+- **[hivectl](hivectl.md)** — Operator CLI: bootstrap a Hive, manage Hivekeepers / Agents / credentials, query the audit log, run the server, install OS-supervised service. 10 subcommand groups across `init` / `migrate` / `serve` / `service` / `config` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`.
 
 ## Operator guides
 
-(Full operator guide — install paths, backups, monitoring, upgrades — coming in [PRY-008 — Deployment](https://github.com/hivemine-ai/hive-vault).)
+- [`hivectl.md`](hivectl.md) — operator CLI reference (install, bootstrap, daily ops).
+- [`../deployment/README.md`](../deployment/README.md) — Docker Compose deployment (Postgres-backed Topology 2).
 
 ## API reference
 
-The MCP tool catalog (5 tools shipped in v0.1 Slice 0) is documented inline in [`mcp-server.md`](mcp-server.md). The remaining 3 tools (`reply_to`, `list_agents`, `get_agent_status`) land in Slice 1+.
+The full MCP tool catalog (8 tools — `get_agent_config`, `send_message`, `reply_to`, `read_mailbox`, `mark_read`, `check_unread_messages`, `list_agents`, `get_agent_status`) is documented inline in [`mcp-server.md`](mcp-server.md).
 
 ## Architecture & decisions
 

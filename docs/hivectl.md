@@ -4,7 +4,15 @@
 
 `hivectl` is the OSS admin surface of Hive v0.1. It wraps the same domain layer the MCP server consumes (via `wire.startCli()`), so every CLI command exercises the production code paths. A future admin web UI will reuse those same domain functions.
 
-> **Pre-release distribution note (Fase 1):** during v0.1 development the CLI is not published to npm. Build it from the repo (`pnpm install && pnpm build`) and invoke as `node packages/cli/dist/main.js <args>`. Recommended: alias `hivectl='node packages/cli/dist/main.js'` in your shell. The examples below assume the alias is set. When v0.1 publishes (post-internal-deploy validation) `pnpm install -g @hive/cli` will provide the global binary.
+## Installation
+
+```bash
+npm install -g @hivemine/hivectl
+```
+
+Self-contained SEA binary (~108 MB) — no Node runtime required at the install host. Per-platform packages cover `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`; the wrapper `@hivemine/hivectl` resolves to the right binary on install via npm `optionalDependencies` filtered by `os` / `cpu`.
+
+Contributors building from source: see [`packages/cli/README.md`](../packages/cli/README.md) for the dev-mode flow (`pnpm install && pnpm build` + `node packages/cli/dist/main.js <args>`).
 
 ## Quick start
 
