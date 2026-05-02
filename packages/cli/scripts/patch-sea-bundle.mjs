@@ -1,36 +1,41 @@
 // Post-bundle patch for SEA build.
 //
 // esbuild emits CJS bundles that replace `import.meta` with an empty object,
-// which breaks `createRequire(import.meta.url)` calls in dependencies (e.g.
-// `@hive/server`'s lazy `pg` resolver in `persistence/db.ts`). Patch the
-// generated bundle so `import_meta.url` is initialized to the bundle's own
-// file URL — sufficient for `createRequire` to resolve relative module
-// specifiers inside the SEA at runtime.
+// which breaks `createRequire(import.meta.url)` calls in source modules
+// (e.g. `@hive/server`'s lazy `pg` resolver in `persistence/db.ts`,
+// `observability/logger.ts`'s `node:sea` detector for INC-2026-004).
+// Patch the generated bundle so every `import_meta*.url` is initialized to
+// the bundle's own file URL — sufficient for `createRequire` to resolve
+// module specifiers inside the SEA at runtime.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const bundlePath = 'dist-sea/bundle.cjs';
 const original = readFileSync(bundlePath, 'utf8');
 
-const needle = 'var import_meta = {};';
-const replacement =
-  'var import_meta = { url: require("node:url").pathToFileURL(__filename).href };';
+// esbuild auto-suffixes the variable name when more than one source module
+// references `import.meta` (`import_meta`, `import_meta2`, `import_meta3`,
+// ...). The capture group lets the replacement preserve each suffix so the
+// downstream `import_metaN.url` access lands on the patched object.
+const pattern = /var (import_meta\d*) = \{\};/g;
+const matches = [...original.matchAll(pattern)];
 
-if (!original.includes(needle)) {
-  console.error(`[sea:patch] expected pattern not found in ${bundlePath}: ${needle}`);
+if (matches.length === 0) {
+  console.error(`[sea:patch] expected pattern not found in ${bundlePath}: ${pattern}`);
   process.exit(1);
 }
 
-// `replaceAll` is defensive — esbuild's CJS output emits a single top-level
-// `import_meta` per bundle today, but the contract with esbuild's internal
-// naming scheme is undocumented. Patching every occurrence keeps the script
-// correct if a future bundler version emits more than one. The post-replace
-// equality check then asserts the patch took effect (catches accidental
-// no-ops if the needle ever drifts).
-const patched = original.replaceAll(needle, replacement);
+const patched = original.replace(
+  pattern,
+  (_match, name) => `var ${name} = { url: require("node:url").pathToFileURL(__filename).href };`,
+);
+
 if (patched === original) {
   console.error(`[sea:patch] no replacement applied in ${bundlePath}`);
   process.exit(1);
 }
+
 writeFileSync(bundlePath, patched);
-console.log(`[sea:patch] patched ${bundlePath}: import_meta.url initialized`);
+console.log(
+  `[sea:patch] patched ${bundlePath}: ${matches.length} import_meta* occurrence(s) initialized`,
+);

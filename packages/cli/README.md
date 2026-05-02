@@ -99,6 +99,16 @@ ls -lh packages/cli/dist-sea/hivectl   # ~108 MB Mach-O 64-bit executable arm64
 
 `sea:build:linux` runs the same pipeline minus the `codesign` steps (Linux). The bundled `bundle.cjs` marks `better-sqlite3`, `pg`, `pg-native`, `fsevents` as external — at runtime, the SEA's `require` is overridden via an `esbuild` banner to `createRequire(__filename)` so externals resolve via standard Node module resolution from the binary's directory. Each published `@hivemine/hivectl-<os>-<arch>` package declares `better-sqlite3` as a `dependency` so npm materialises the prebuilt native binding next to the binary on install.
 
+### Logging in the SEA binary
+
+The SEA binary always emits **JSON logs** to stderr — `pino-pretty` is unavailable inside a Single Executable Application because pino's transports use `worker_threads` and require an on-disk path to the transport module, which is bundled (not extracted) in the SEA. If you need human-readable output, pipe stderr through `pino-pretty` from a Node-equipped host:
+
+```bash
+hivectl serve 2>&1 | npx pino-pretty
+```
+
+`--log-pretty` and `HIVE_MCP_LOG_PRETTY=true` are no-ops inside the SEA (a one-shot warning is emitted to stderr if explicitly requested). The non-SEA build (`node packages/cli/dist/main.js`) keeps the auto-pretty-when-non-production behaviour.
+
 ## Exit codes
 
 | Code  | Constant            | Meaning                                                              |

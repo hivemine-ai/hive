@@ -1,8 +1,10 @@
 import { Writable } from 'node:stream';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_REDACT_PATHS,
+  __resetSeaWarnForTests,
+  __setSeaDetectorForTests,
   createLogger,
   flushLogger,
   getRequestIdFromLogger,
@@ -143,6 +145,59 @@ describe('getRequestIdFromLogger', () => {
     const child = log.child({ requestId: 'abc' });
     const grandchild = child.child({ otherField: 'x' });
     expect(getRequestIdFromLogger(grandchild)).toBe('abc');
+  });
+});
+
+describe('createLogger — SEA detection (INC-2026-004)', () => {
+  beforeEach(() => {
+    __setSeaDetectorForTests(() => true);
+    __resetSeaWarnForTests();
+  });
+
+  afterEach(() => {
+    __setSeaDetectorForTests(undefined);
+    __resetSeaWarnForTests();
+    vi.restoreAllMocks();
+  });
+
+  it('forces JSON output (no pretty transport) when running inside a SEA binary', () => {
+    const writeSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const log = createLogger({ level: 'info', pretty: true });
+
+    expect(typeof log.info).toBe('function');
+    expect(log.level).toBe('info');
+
+    const warnCalls = writeSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('[hivectl] pretty logs are not available'));
+    expect(warnCalls).toHaveLength(1);
+    expect(warnCalls[0]).toContain('| npx pino-pretty');
+  });
+
+  it('emits the SEA warn at most once per process even on repeated createLogger calls', () => {
+    const writeSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    createLogger({ level: 'info', pretty: true });
+    createLogger({ level: 'info', pretty: true });
+    createLogger({ level: 'info', pretty: true });
+
+    const warnCalls = writeSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('[hivectl] pretty logs are not available'));
+    expect(warnCalls).toHaveLength(1);
+  });
+
+  it('does NOT emit the SEA warn when the operator did not request pretty mode', () => {
+    const writeSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    createLogger({ level: 'info', pretty: false });
+    createLogger({ level: 'info' });
+
+    const warnCalls = writeSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('[hivectl] pretty logs are not available'));
+    expect(warnCalls).toHaveLength(0);
   });
 });
 
