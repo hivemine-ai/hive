@@ -8,6 +8,7 @@ import { CliError } from '../error/cli-error.js';
 import {
   parseParticipantReference,
   resolveAgentReference,
+  resolveAuditParticipantReference,
   resolveCredentialRef,
   resolveOperatorId,
   resolveParticipantReference,
@@ -561,5 +562,164 @@ describe('resolveCredentialRef', () => {
         return true;
       },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveAuditParticipantReference — PRY-042 (`--actor-id` / `--subject-id`)
+// ---------------------------------------------------------------------------
+
+describe('resolveAuditParticipantReference', () => {
+  it('UUID v7 input passes through (no DB lookup; audit_log queried by id-equality)', async () => {
+    const { runtime, findHivekeeperByEmail, findHivekeeperByEmailLocalPart, findAgentByName } =
+      makeRuntime();
+    const id = await resolveAuditParticipantReference(VALID_UUID, 'actor-id', runtime);
+    expect(id).toBe(VALID_UUID);
+    expect(findHivekeeperByEmail).not.toHaveBeenCalled();
+    expect(findHivekeeperByEmailLocalPart).not.toHaveBeenCalled();
+    expect(findAgentByName).not.toHaveBeenCalled();
+  });
+
+  it('UUID v7 in uppercase is normalised to lowercase', async () => {
+    const { runtime } = makeRuntime();
+    const id = await resolveAuditParticipantReference(
+      VALID_UUID.toUpperCase(),
+      'subject-id',
+      runtime,
+    );
+    expect(id).toBe(VALID_UUID);
+  });
+
+  it('hivekeeper email resolves via findHivekeeperByEmail', async () => {
+    const findHivekeeperByEmail = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
+    const { runtime } = makeRuntime({ findHivekeeperByEmail });
+    const id = await resolveAuditParticipantReference('admin@example.com', 'actor-id', runtime);
+    expect(id).toBe(OWNER_UUID);
+    expect(findHivekeeperByEmail).toHaveBeenCalledWith(HIVE_ID, 'admin@example.com');
+  });
+
+  it('agent reference resolves via owner local-part + agent name lookup', async () => {
+    const findHivekeeperByEmailLocalPart = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
+    const findAgentByName = vi.fn().mockResolvedValue(makeAgent(AGENT_UUID, OWNER_UUID));
+    const { runtime } = makeRuntime({ findHivekeeperByEmailLocalPart, findAgentByName });
+
+    const id = await resolveAuditParticipantReference(
+      `worker-a@admin.${HIVE_NAME}`,
+      'subject-id',
+      runtime,
+    );
+
+    expect(id).toBe(AGENT_UUID);
+    expect(findHivekeeperByEmailLocalPart).toHaveBeenCalledWith(HIVE_ID, 'admin');
+    expect(findAgentByName).toHaveBeenCalledWith(HIVE_ID, OWNER_UUID, 'worker-a');
+  });
+
+  it('garbage input throws CliError(CONFIG_INVALID, actor_id_unparseable) for actor-id', async () => {
+    const { runtime } = makeRuntime();
+    await expect(
+      resolveAuditParticipantReference('garbage', 'actor-id', runtime),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(CliError);
+      const e = err as CliError;
+      expect(e.code).toBe('CONFIG_INVALID');
+      expect(e.subCode).toBe('actor_id_unparseable');
+      expect(e.message).toContain('--actor-id');
+      return true;
+    });
+  });
+
+  it('garbage input throws CliError(CONFIG_INVALID, subject_id_unparseable) for subject-id', async () => {
+    const { runtime } = makeRuntime();
+    await expect(
+      resolveAuditParticipantReference('garbage', 'subject-id', runtime),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(CliError);
+      const e = err as CliError;
+      expect(e.code).toBe('CONFIG_INVALID');
+      expect(e.subCode).toBe('subject_id_unparseable');
+      expect(e.message).toContain('--subject-id');
+      return true;
+    });
+  });
+
+  it('"self" alias throws CliError(CONFIG_INVALID, kind_not_allowed)', async () => {
+    const { runtime } = makeRuntime();
+    await expect(resolveAuditParticipantReference('self', 'actor-id', runtime)).rejects.toSatisfy(
+      (err: unknown) => {
+        expect(err).toBeInstanceOf(CliError);
+        const e = err as CliError;
+        expect(e.code).toBe('CONFIG_INVALID');
+        expect(e.subCode).toBe('kind_not_allowed');
+        return true;
+      },
+    );
+  });
+
+  it('credential-active alias (`<ref>:latest`) throws CliError(CONFIG_INVALID, kind_not_allowed)', async () => {
+    const { runtime } = makeRuntime();
+    // audit subjects/actors are participant ids, not credential JTIs.
+    await expect(
+      resolveAuditParticipantReference('admin@example.com:latest', 'subject-id', runtime),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(CliError);
+      const e = err as CliError;
+      expect(e.code).toBe('CONFIG_INVALID');
+      expect(e.subCode).toBe('kind_not_allowed');
+      return true;
+    });
+  });
+
+  it('email not found throws AuthError(PARTICIPANT_NOT_FOUND, audit_actor_email_not_found)', async () => {
+    const { runtime } = makeRuntime();
+    await expect(
+      resolveAuditParticipantReference('ghost@example.com', 'actor-id', runtime),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(AuthError);
+      const e = err as AuthError;
+      expect(e.code).toBe('PARTICIPANT_NOT_FOUND');
+      expect(e.subCode).toBe('audit_actor_email_not_found');
+      return true;
+    });
+  });
+
+  it('email not found via subject-id flag uses audit_subject_email_not_found subCode', async () => {
+    const { runtime } = makeRuntime();
+    await expect(
+      resolveAuditParticipantReference('ghost@example.com', 'subject-id', runtime),
+    ).rejects.toSatisfy((err: unknown) => {
+      const e = err as AuthError;
+      expect(e.subCode).toBe('audit_subject_email_not_found');
+      return true;
+    });
+  });
+
+  it('agent owner not found throws AuthError(PARTICIPANT_NOT_FOUND, audit_<flag>_owner_not_found)', async () => {
+    const { runtime, findAgentByName } = makeRuntime();
+    await expect(
+      resolveAuditParticipantReference(`worker-a@ghost.${HIVE_NAME}`, 'actor-id', runtime),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(AuthError);
+      const e = err as AuthError;
+      expect(e.code).toBe('PARTICIPANT_NOT_FOUND');
+      expect(e.subCode).toBe('audit_actor_owner_not_found');
+      return true;
+    });
+    expect(findAgentByName).not.toHaveBeenCalled();
+  });
+
+  it('agent name not found under owner throws AuthError(PARTICIPANT_NOT_FOUND, audit_<flag>_name_not_found)', async () => {
+    const findHivekeeperByEmailLocalPart = vi.fn().mockResolvedValue(makeHivekeeper(OWNER_UUID));
+    const findAgentByName = vi.fn().mockResolvedValue(null);
+    const { runtime } = makeRuntime({ findHivekeeperByEmailLocalPart, findAgentByName });
+
+    await expect(
+      resolveAuditParticipantReference(`ghost@admin.${HIVE_NAME}`, 'subject-id', runtime),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(AuthError);
+      const e = err as AuthError;
+      expect(e.code).toBe('PARTICIPANT_NOT_FOUND');
+      expect(e.subCode).toBe('audit_subject_name_not_found');
+      return true;
+    });
   });
 });

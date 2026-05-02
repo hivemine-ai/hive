@@ -1,19 +1,25 @@
-// `hivectl audit query [--category <c>...] [--decision <d>] [--actor-id <uuid>]
-//   [--subject-id <uuid>] [--from <iso>] [--until <iso>] [--limit N]
-//   [--cursor <cursor>]`
+// `hivectl audit query [--category <c>...] [--decision <d>]
+//   [--actor-id <email-or-agent-ref-or-uuid>]
+//   [--subject-id <email-or-agent-ref-or-uuid>] [--from <iso>] [--until <iso>]
+//   [--limit N] [--cursor <cursor>]`
 //
 // Per the tech spec rationale (cross-spec deltas not implemented here),
 // `auditQuery.queryAuditLog` requires a `CallerContext` that the CLI cannot
 // fully synthesize for `system` callers. Slice 0 falls back to direct SQL
 // against `audit_log`. Parameterized — no injection risk. No audit event of
 // its own (read-only).
+//
+// Per ADR-020 / PRY-042, both `--actor-id` and `--subject-id` accept friendly
+// references (Hivekeeper email or agent reference) in addition to the raw
+// UUID. The resolver runs **before** the SQL query so audit_log is always
+// queried by canonical id-equality — see `resolveAuditParticipantReference`.
 
 import { ALL_AUDIT_EVENT_CATEGORIES } from '@hive/server';
 import type { AuditDecisionDb, AuditEventCategoryDb, CliRuntime, UUIDv7 } from '@hive/server';
 
 import { buildOperatorActor } from '#audit/operator-actor.js';
 import { CliError } from '#error/cli-error.js';
-import { parseUuidV7 } from '#input/parse-uuid.js';
+import { resolveAuditParticipantReference } from '#input/parse-reference.js';
 import type { GlobalCliOpts } from '#types.js';
 
 const ALLOWED_DECISIONS: readonly AuditDecisionDb[] = ['allow', 'deny', 'success', 'failure'];
@@ -93,10 +99,12 @@ export async function runAuditQuery(
   }
   if (opts.decision !== undefined) q = q.where('decision', '=', validateDecision(opts.decision));
   if (opts.actorId !== undefined) {
-    q = q.where('actor_id', '=', parseUuidV7(opts.actorId, 'actor-id'));
+    const actorId = await resolveAuditParticipantReference(opts.actorId, 'actor-id', runtime);
+    q = q.where('actor_id', '=', actorId);
   }
   if (opts.subjectId !== undefined) {
-    q = q.where('subject_id', '=', parseUuidV7(opts.subjectId, 'subject-id'));
+    const subjectId = await resolveAuditParticipantReference(opts.subjectId, 'subject-id', runtime);
+    q = q.where('subject_id', '=', subjectId);
   }
   if (opts.from !== undefined) q = q.where('occurred_at', '>=', toIso(opts.from, 'from'));
   if (opts.until !== undefined) q = q.where('occurred_at', '<=', toIso(opts.until, 'until'));
