@@ -19,8 +19,7 @@ on:
   #     - 'v[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 env:
   NODE_VERSION: '22'
@@ -231,6 +230,8 @@ jobs:
     needs: [prepare, publish-wrapper]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -250,7 +251,10 @@ jobs:
           ls -la release-assets
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        # Pinned to commit SHA (release 2.6.2) per security review; mutable v2
+        # tag would let a compromised action exfiltrate the workflow's
+        # GITHUB_TOKEN (contents: write).
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: v${{ needs.prepare.outputs.version }}
           name: v${{ needs.prepare.outputs.version }}

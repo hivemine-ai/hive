@@ -83,7 +83,7 @@ The `bin` entry is `hivectl` (compiled to `dist/main.js` with shebang `#!/usr/bi
 
 ## Distribution status
 
-Hive v0.1 stays internal during Fase 1 — `npm publish` is gated on the close of the [INC-2026-001](https://github.com/hivemine-ai/hive-vault) sev-3 cluster's observation period (~2026-05-12). Until then, operators install by cloning the repo and running `pnpm install && pnpm build`. The release pipeline ([SEA build matrix + 5-package npm publish under `@hivemine`](../../.github/workflows/release.yml)) ships ready-to-run as part of `v0.1.0` per the maintainer-facing release runbook in the vault. Post-release the supported install becomes `npm install -g @hivemine/hivectl` (self-contained binary, no Node runtime required at the install host).
+Hive v0.1 stays internal during Phase 1 — `npm publish` is gated on the close of the [INC-2026-001](https://github.com/hivemine-ai/hive-vault) sev-3 cluster's observation period (~2026-05-12). Until then, operators install by cloning the repo and running `pnpm install && pnpm build`. The release pipeline ([SEA build matrix + 5-package npm publish under `@hivemine`](../../.github/workflows/release.yml)) ships ready-to-run as part of `v0.1.0` per the maintainer-facing release runbook in the vault. Post-release the supported install becomes `npm install -g @hivemine/hivectl` (self-contained binary, no Node runtime required at the install host).
 
 ## SEA build (release engineering)
 
