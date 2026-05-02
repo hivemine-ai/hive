@@ -10,7 +10,13 @@
 // loadAllKeypairs returns every PEM pair found on disk so the verifier can keep
 // validating tokens signed with retired keys (per "kid coexistence" decision).
 
-import { createHash, generateKeyPairSync, type KeyObject } from 'node:crypto';
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  type KeyObject,
+} from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -94,7 +100,6 @@ export async function loadKeypairFromDisk(
   opts: KeypairStoreOptions,
   kid: string,
 ): Promise<SigningKey> {
-  const { createPrivateKey, createPublicKey } = await import('node:crypto');
   const privatePem = await fs.readFile(privatePemPath(opts.keysDir, kid), 'utf8');
   const publicPem = await fs.readFile(publicPemPath(opts.keysDir, kid), 'utf8');
   const privateKey = createPrivateKey({ key: privatePem, format: 'pem' });
