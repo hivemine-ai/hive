@@ -22,6 +22,12 @@
 // lookup, preserving idempotent semantics) OR `<participant-ref>:latest`
 // (resolves the inner participant + the active credential JTI via the new
 // credentialsRepo).
+//
+// `--actor-id` / `--subject-id` flags in `audit query`
+// (resolveAuditParticipantReference, PRY-042): UUID OR Hivekeeper email OR
+// agent reference. Both flags accept the same 3 kinds — the only difference is
+// the field name baked into error subCodes / messages (so investigators can
+// distinguish which flag failed without re-reading the invocation).
 
 import { AuthError, parseReference, type ParsedReference } from '@hive/server';
 import type { CliRuntime, UUIDv7 } from '@hive/server';
@@ -246,25 +252,92 @@ export async function resolveCredentialRef(input: string, runtime: CliRuntime): 
 }
 
 /**
- * Internal helper: resolve a parsed participant reference (UUID / hivekeeper-email
- * / agent-reference — i.e. the `ParsedParticipantReference` subset, except we
- * allow `self` to be expressed by the inner shape too in case future wiring
- * surfaces it; today the parser drops `self:latest` early so this branch is
- * unreachable at runtime). Wraps the same lookup chain as
+ * Resolve `--actor-id` / `--subject-id` input for `audit query` (PRY-042) to a
+ * canonical participant UUIDv7. Both flags accept the same set of forms and
+ * share this helper — `fieldName` only parameterises the error subCodes /
+ * messages so failures identify which flag the operator typed wrong.
+ *
+ * Accepted forms:
+ *   - UUID v7 (passes through without DB lookup; the audit_log is queried by
+ *     id-equality, so an unknown UUID simply yields zero rows — same behavior
+ *     as pre-PRY-042).
+ *   - Hivekeeper email — resolved via `findHivekeeperByEmail`.
+ *   - Agent reference `<name>@<owner-local>.<hiveName>` (per ADR-015) —
+ *     resolved via `findHivekeeperByEmailLocalPart` + `findAgentByName`.
+ *
+ * Other parser kinds ('self', 'credential-active') are rejected with
+ * `CliError(CONFIG_INVALID, kind_not_allowed)`: 'self' has no CLI shell analog
+ * (no current participant context), and `<participant-ref>:latest` resolves to
+ * a credential JTI which is never an audit `actor_id` / `subject_id` — the
+ * audit_log records who/what was acted upon by participant id, not by
+ * credential.
+ *
+ * Resolution failures map to `AuthError(PARTICIPANT_NOT_FOUND, audit_<flag>_*)`
+ * so handler.ts produces `EXIT_NOT_FOUND (3)` per ADR-020 § Decision step 4.
+ */
+export async function resolveAuditParticipantReference(
+  input: string,
+  fieldName: 'actor-id' | 'subject-id',
+  runtime: CliRuntime,
+): Promise<UUIDv7> {
+  const ctx = getCliCallerContext(runtime);
+  const parsed = parseReference(input, ctx.hiveName);
+
+  if (parsed === null) {
+    throw new CliError('CONFIG_INVALID', {
+      subCode: `${fieldName === 'actor-id' ? 'actor_id' : 'subject_id'}_unparseable`,
+      message: `--${fieldName} '${input}' is not a valid reference (expected UUID v7, hivekeeper email, or agent reference '<name>@<owner-local>.${ctx.hiveName}')`,
+    });
+  }
+
+  if (
+    parsed.kind === 'uuid' ||
+    parsed.kind === 'hivekeeper-email' ||
+    parsed.kind === 'agent-reference'
+  ) {
+    return resolveParsedParticipant(parsed, runtime, ctx, fieldName);
+  }
+
+  // 'self' or 'credential-active' — not applicable to audit identifier flags.
+  throw new CliError('CONFIG_INVALID', {
+    subCode: 'kind_not_allowed',
+    message: `--${fieldName} requires UUID v7, hivekeeper email, or agent reference, got '${parsed.kind}'`,
+  });
+}
+
+/**
+ * Internal helper: resolve a parsed participant reference to a canonical
+ * UUIDv7. The type parameter (`Extract<ParsedReference, { kind: 'uuid' |
+ * 'hivekeeper-email' | 'agent-reference' }>`) excludes `self` and
+ * `credential-active` at the type level — callers that accept those kinds are
+ * responsible for handling them upstream. Wraps the same lookup chain as
  * `resolveAgentReference` but kept separate so error subCodes can be
- * credential-flow-specific.
+ * call-site-specific.
+ *
+ * `flow` discriminates the subCode prefix:
+ *   - `'credential'` (default; PRY-041): `credential_owner_not_found` /
+ *     `credential_agent_not_found`.
+ *   - `'actor-id'` / `'subject-id'` (PRY-042): `audit_<flow>_email_not_found` /
+ *     `audit_<flow>_owner_not_found` / `audit_<flow>_name_not_found`.
  */
 async function resolveParsedParticipant(
   parsed: Extract<ParsedReference, { kind: 'uuid' | 'hivekeeper-email' | 'agent-reference' }>,
   runtime: CliRuntime,
   ctx: ReturnType<typeof getCliCallerContext>,
+  flow: 'credential' | 'actor-id' | 'subject-id' = 'credential',
 ): Promise<UUIDv7> {
   if (parsed.kind === 'uuid') return parsed.id;
+
+  const subCodePrefix =
+    flow === 'credential' ? 'credential' : flow === 'actor-id' ? 'audit_actor' : 'audit_subject';
 
   if (parsed.kind === 'hivekeeper-email') {
     const hk = await runtime.participantsRepo.findHivekeeperByEmail(ctx.hiveId, parsed.email);
     if (hk === null) {
-      throw new AuthError('PARTICIPANT_NOT_FOUND', { subCode: 'credential_owner_not_found' });
+      throw new AuthError('PARTICIPANT_NOT_FOUND', {
+        subCode:
+          flow === 'credential' ? 'credential_owner_not_found' : `${subCodePrefix}_email_not_found`,
+      });
     }
     return hk.id;
   }
@@ -275,7 +348,10 @@ async function resolveParsedParticipant(
     parsed.ownerLocal,
   );
   if (owner === null) {
-    throw new AuthError('PARTICIPANT_NOT_FOUND', { subCode: 'credential_owner_not_found' });
+    throw new AuthError('PARTICIPANT_NOT_FOUND', {
+      subCode:
+        flow === 'credential' ? 'credential_owner_not_found' : `${subCodePrefix}_owner_not_found`,
+    });
   }
   const agent = await runtime.participantsRepo.findAgentByName(
     ctx.hiveId,
@@ -283,7 +359,10 @@ async function resolveParsedParticipant(
     parsed.agentName,
   );
   if (agent === null) {
-    throw new AuthError('PARTICIPANT_NOT_FOUND', { subCode: 'credential_agent_not_found' });
+    throw new AuthError('PARTICIPANT_NOT_FOUND', {
+      subCode:
+        flow === 'credential' ? 'credential_agent_not_found' : `${subCodePrefix}_name_not_found`,
+    });
   }
   return agent.id;
 }

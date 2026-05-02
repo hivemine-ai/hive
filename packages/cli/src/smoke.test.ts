@@ -576,6 +576,91 @@ describe('PRY-007 H21 — hivectl Slice 0 smoke E2E (SQLite)', () => {
     }
   });
 
+  it('PRY-042 — audit query --actor-id <email> resolves the same actor as --actor-id <uuid>', async () => {
+    const initResult = await runInit({
+      globals: makeGlobals(),
+      adminEmail: 'leo@example.com',
+      adminDisplayName: 'Leo',
+      hiveName: 'cotalker',
+      db: `sqlite:${dbPath}`,
+      keysDir,
+      ttl: '365d',
+      outputCredential: undefined,
+    });
+    const adminId = initResult.adminId;
+
+    const runtime = await startCli({ logger: SILENT_LOGGER });
+    try {
+      // Generate at least one admin-attributed audit entry by creating a second
+      // hivekeeper. `runInit` itself records bootstrap events but the actor
+      // there is `system`, not the admin — we need an event with the admin as
+      // actor for the friendly-id lookup to be observable.
+      await runCreateHivekeeper(runtime, {
+        globals: makeGlobals('leo@example.com'),
+        email: 'second@example.com',
+        displayName: 'Second',
+        admin: false,
+        emitCredential: false,
+        credentialTtl: undefined,
+        outputCredential: undefined,
+      });
+
+      // Query via the friendly form.
+      const viaEmail = await runAuditQuery(runtime, {
+        globals: makeGlobals('leo@example.com'),
+        categories: undefined,
+        decision: undefined,
+        actorId: 'leo@example.com',
+        subjectId: undefined,
+        from: undefined,
+        until: undefined,
+        limit: 50,
+      });
+
+      // Query via the canonical UUID form.
+      const viaUuid = await runAuditQuery(runtime, {
+        globals: makeGlobals('leo@example.com'),
+        categories: undefined,
+        decision: undefined,
+        actorId: adminId,
+        subjectId: undefined,
+        from: undefined,
+        until: undefined,
+        limit: 50,
+      });
+
+      // Both should return the same set of entries.
+      expect(viaEmail.entries.length).toBeGreaterThanOrEqual(1);
+      expect(viaEmail.entries.length).toBe(viaUuid.entries.length);
+      const emailIds = viaEmail.entries.map((e) => e.id).sort();
+      const uuidIds = viaUuid.entries.map((e) => e.id).sort();
+      expect(emailIds).toStrictEqual(uuidIds);
+      // Every returned entry must have actor_id === adminId.
+      for (const entry of viaEmail.entries) {
+        expect(entry.actorId).toBe(adminId);
+      }
+
+      // Friendly-id error path: unknown email surfaces EXIT_NOT_FOUND.
+      try {
+        await runAuditQuery(runtime, {
+          globals: makeGlobals('leo@example.com'),
+          categories: undefined,
+          decision: undefined,
+          actorId: 'ghost@example.com',
+          subjectId: undefined,
+          from: undefined,
+          until: undefined,
+          limit: 10,
+        });
+        expect.fail('expected unknown email to throw PARTICIPANT_NOT_FOUND');
+      } catch (err) {
+        expect(mapErrorToExit(err).code).toBe(EXIT_NOT_FOUND);
+      }
+    } finally {
+      await stopCli(runtime);
+    }
+  });
+
   it('AC-12: --output json roundtrip is parseable for init + agent create', async () => {
     // Init returns InitCommandResult; serialize and re-parse.
     const result = await runInit({

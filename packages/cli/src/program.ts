@@ -496,8 +496,14 @@ export function buildProgram(): BuildProgramResult {
     .description('Query the audit log.')
     .option('--category <category>', 'category to filter (repeatable)', appendValue, [] as string[])
     .option('--decision <decision>', "filter: 'success' | 'denied' | 'error'")
-    .option('--actor-id <uuid>', 'filter by actor UUIDv7')
-    .option('--subject-id <uuid>', 'filter by subject UUIDv7')
+    .option(
+      '--actor-id <email-or-agent-ref-or-uuid>',
+      'filter by actor (UUIDv7, hivekeeper email, or agent reference)',
+    )
+    .option(
+      '--subject-id <email-or-agent-ref-or-uuid>',
+      'filter by subject (UUIDv7, hivekeeper email, or agent reference)',
+    )
     .option('--from <iso>', 'lower bound on occurred_at (ISO 8601)')
     .option('--until <iso>', 'upper bound on occurred_at (ISO 8601)')
     .option('--limit <n>', 'maximum rows (capped at 500)', '50')

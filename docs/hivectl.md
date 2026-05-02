@@ -65,7 +65,7 @@ Two input forms are accepted (per ADR-020):
 
 The flag is validated only as a sanity check: the resolved UUID must point to an **active admin** Hivekeeper. If it does not, the CLI exits with `EXIT_PERMISSION (5)`. An attacker with shell access can omit the flag to get `actorKind: 'system'`; the audit log reflects that reality.
 
-Reference syntax accepted across other CLI flags is documented in [ADR-020](https://github.com/hivemine-ai/hive-vault) — agent references (`<name>@<owner-local>.<hive>`) are accepted by `agent revoke <agent-ref>` (PRY-040, see § Subcommand reference). The `<participant-ref>:latest` alias is accepted by `credential rotate <jti-or-active-ref>` and `credential revoke <jti-or-active-ref>` (PRY-041 — collapses the `credential list → copy JTI → rotate` flow into a single command). Friendly references on `audit query --actor-id` / `--subject-id` ship in PRY-042 of the same cascade.
+Reference syntax accepted across other CLI flags is documented in [ADR-020](https://github.com/hivemine-ai/hive-vault) — agent references (`<name>@<owner-local>.<hive>`) are accepted by `agent revoke <agent-ref>` (PRY-040). The `<participant-ref>:latest` alias is accepted by `credential rotate <jti-or-active-ref>` and `credential revoke <jti-or-active-ref>` (PRY-041 — collapses the `credential list → copy JTI → rotate` flow into a single command). `audit query --actor-id` and `--subject-id` accept Hivekeeper email or agent reference in addition to UUID (PRY-042). With PRY-042 closed, every CLI flag that consumes a participant identifier honours the friendly forms uniformly.
 
 ### Output modes
 
@@ -176,11 +176,28 @@ hivectl credential list    <participant-ref> [--limit N]
 ### `audit`
 
 ```
-hivectl audit query [--category <c>...] [--decision <d>] [--actor-id <uuid>]
-                    [--subject-id <uuid>] [--from <iso>] [--until <iso>] [--limit N]
+hivectl audit query [--category <c>...] [--decision <d>]
+                    [--actor-id <email-or-agent-ref-or-uuid>]
+                    [--subject-id <email-or-agent-ref-or-uuid>]
+                    [--from <iso>] [--until <iso>] [--limit N]
 ```
 
 Limit is capped at 500. Order is `occurred_at DESC, id DESC`.
+
+`--actor-id` and `--subject-id` accept any of (per [ADR-020](https://github.com/hivemine-ai/hive-vault) / PRY-042):
+
+- a UUIDv7 (canonical id, no DB lookup);
+- a Hivekeeper email (resolved to its participant id);
+- an agent reference `<name>@<owner-local>.<hive>` (resolved via owner local-part + agent name).
+
+The two flags share resolution logic — both reject `self` and the
+`<participant-ref>:latest` alias because audit log rows reference participants by
+id, not by the active-credential alias. Example:
+
+```bash
+hivectl audit query --actor-id you@example.com --limit 20
+hivectl audit query --subject-id worker-a@you.cotalker --category cell_close
+```
 
 ### `serve`
 
