@@ -378,8 +378,10 @@ export function buildProgram(): BuildProgramResult {
       );
     });
   agent
-    .command('revoke <agent-id>')
-    .description('Revoke an Agent (cascade-closes its Cell). Requires --yes.')
+    .command('revoke <agent-ref>')
+    .description(
+      'Revoke an Agent (cascade-closes its Cell). Accepts UUID v7 or agent reference (<name>@<owner-local>.<hive>). Requires --yes.',
+    )
     .action(async (agentRef: string) => {
       const s = state();
       await runHandler(

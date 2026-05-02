@@ -1,10 +1,14 @@
-// `hivectl agent revoke <agent-id> [--yes]` — revoke an agent and cascade-close
+// `hivectl agent revoke <agent-ref> [--yes]` — revoke an agent and cascade-close
 // its Cell via the cells hook (cross-domain TX, wired in PRY-002).
+//
+// Per ADR-020 PRY-040, the positional accepts UUID v7 OR agent-reference syntax
+// (`<name>@<owner-local>.<hive>`). Resolution flows through the shared parser
+// in `@hive/server` (`domain/auth/references/parser.ts`).
 
 import type { CliRuntime, UUIDv7 } from '@hive/server';
 
 import { CliError } from '#error/cli-error.js';
-import { parseUuidV7 } from '#input/parse-uuid.js';
+import { resolveAgentReference } from '#input/parse-reference.js';
 import { buildOperatorActor } from '#audit/operator-actor.js';
 import { toCallerContext } from '../hivekeeper/create.js';
 import type { GlobalCliOpts } from '#types.js';
@@ -28,7 +32,7 @@ export async function runRevokeAgent(
       message: 'agent revoke is destructive; pass --yes to confirm',
     });
   }
-  const agentId = parseUuidV7(opts.agentRef, 'agent-id');
+  const agentId = await resolveAgentReference(opts.agentRef, runtime);
   const actor = await buildOperatorActor(opts.globals, runtime);
   const caller = toCallerContext(actor);
 
