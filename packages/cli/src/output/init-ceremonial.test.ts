@@ -157,8 +157,8 @@ describe('init-ceremonial.printCredentialBox', () => {
     printCredentialBox(longToken, sink);
     const lines = sink.read().split('\n');
     // Frame stays at 65 + 2 walls + 2-space indent = 69 chars; the token
-    // row is wider because the token is not truncated. Spec § Casos
-    // límite técnicos accepts this until a real long-token case surfaces.
+    // row is wider because the token is not truncated. Spec "Technical
+    // edge cases" section accepts this until a real long-token case surfaces.
     expect(lines[2]!.length).toBe(69);
     expect(lines[3]!.length).toBeGreaterThan(69);
     expect(lines[3]).toContain(longToken);

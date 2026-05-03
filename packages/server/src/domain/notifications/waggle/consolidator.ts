@@ -1,8 +1,8 @@
 // Quiet-window consolidator — one window per Cell at a time. Per the tech spec
-// § "waggle/consolidator.ts" + "Casos límite técnicos: window-vencida-pre-flush":
-// the `windows.delete(cellId)` runs in the timer callback's `finally` AFTER
-// the flush completes, so events arriving during the flush see the window
-// still alive and absorb (no double-flush).
+// "waggle/consolidator.ts" section + the "window-expired-pre-flush" technical
+// edge case: the `windows.delete(cellId)` runs in the timer callback's
+// `finally` AFTER the flush completes, so events arriving during the flush
+// see the window still alive and absorb (no double-flush).
 
 import type { UUIDv7 } from '#domain/auth/types.js';
 

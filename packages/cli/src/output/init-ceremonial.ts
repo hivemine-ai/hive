@@ -1,5 +1,6 @@
-// Init ceremonial — used ONLY by `hivectl init` per
-// [[hivectl — Operator Experience]] § Caso 1 / § Ceremonial del init.
+// Init ceremonial — used ONLY by `hivectl init` per the
+// [[hivectl — Operator Experience]] product spec, "Use Case 1" and
+// "Init ceremony" sections.
 //
 // Bootstrap is the singular operation of an operator's lifetime against
 // a Hive: it happens exactly once per machine. The handoff treats it
@@ -12,9 +13,10 @@
 //   - `startStep(n, label)` returns a `StepHandle` that does NOT print
 //     anything yet; `complete(msg)` / `fail(msg)` write the row.
 //     Spinner during "in progress" is OUT-OF-SCOPE per the PRY
-//     (render-incremental + complete-final is sufficient — see § Fuera
-//     de alcance). Each step row is a single line so the output stays
-//     readable in non-TTY contexts (CI logs, piped to file).
+//     (render-incremental + complete-final is sufficient — see the
+//     PRY's "Out of scope" section). Each step row is a single line so
+//     the output stays readable in non-TTY contexts (CI logs, piped
+//     to file).
 //   - `printCredentialBox(token)` writes the warning + framed box.
 //     Caller decides whether to invoke this (skip when
 //     `--output-credential <file>` is set; the token belongs in the
@@ -88,11 +90,11 @@ export function startStep(
  * Print the warning line + framed credential box.
  *
  * Frame: ┌─────…─┐ over │<token>│ over └─────…─┘. Inner pad width is a
- * fixed 65 chars per the tech spec § Casos límite técnicos — sized to
- * the realistic JWT length for v0.1 (3 segments × ~50 chars each ≈ box
- * width). A token longer than 65 chars overflows the right-hand frame
- * intentionally; the spec accepts this until a real long-token case
- * surfaces (then amend the padding).
+ * fixed 65 chars per the tech spec "Technical edge cases" section —
+ * sized to the realistic JWT length for v0.1 (3 segments × ~50 chars
+ * each ≈ box width). A token longer than 65 chars overflows the
+ * right-hand frame intentionally; the spec accepts this until a real
+ * long-token case surfaces (then amend the padding).
  *
  * The warning is a single line above the box so screen-readers and
  * grep-on-the-output flows can find "save this token" without parsing
