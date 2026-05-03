@@ -294,3 +294,105 @@ describe('resolveDetailMaxBytes', () => {
     expect(() => resolveDetailMaxBytes()).toThrow(/positive integer/);
   });
 });
+
+describe('onAfterRecord post-commit hook (PRY-048 — snapshot writer wiring)', () => {
+  let world: World;
+
+  beforeEach(async () => {
+    resetAuditRecordFailureCounters();
+    world = await seedWorld();
+  });
+
+  afterEach(async () => {
+    await world.db.destroy();
+    resetAuditRecordFailureCounters();
+  });
+
+  it('fires after a successful recordEvent insert with the original event payload', async () => {
+    const onAfterRecord = vi.fn(() => Promise.resolve());
+    const recorder = createAuditRecorder({
+      auditRepo: world.repo,
+      logger: silentLogger(),
+      onAfterRecord,
+    });
+    const event = newDenialEvent(world);
+
+    await recorder.recordEvent(event);
+
+    expect(onAfterRecord).toHaveBeenCalledTimes(1);
+    expect(onAfterRecord).toHaveBeenCalledWith(event);
+  });
+
+  it('does NOT fire when recordEvent fails (post-commit semantics)', async () => {
+    const onAfterRecord = vi.fn(() => Promise.resolve());
+    const failingRepo: AuditRepo = {
+      insertAuditEvent: () => Promise.reject(new Error('simulated DB outage')),
+      insertAuditEventBatch: () => Promise.reject(new Error('simulated DB outage')),
+      findAuditEventById: () => Promise.resolve(null),
+      findRecentDenialsBySubject: () => Promise.resolve([]),
+      findAuditEventsByFilter: () => Promise.resolve([]),
+    };
+    const recorder = createAuditRecorder({
+      auditRepo: failingRepo,
+      logger: silentLogger(),
+      onAfterRecord,
+    });
+
+    await recorder.recordEvent(newDenialEvent(world));
+
+    expect(onAfterRecord).not.toHaveBeenCalled();
+  });
+
+  it('fires once per event after recordEventBatch succeeds', async () => {
+    const onAfterRecord = vi.fn(() => Promise.resolve());
+    const recorder = createAuditRecorder({
+      auditRepo: world.repo,
+      logger: silentLogger(),
+      onAfterRecord,
+    });
+    const events = [newDenialEvent(world), newDenialEvent(world), newDenialEvent(world)];
+
+    await recorder.recordEventBatch(events);
+
+    expect(onAfterRecord).toHaveBeenCalledTimes(3);
+    for (let i = 0; i < events.length; i++) {
+      expect(onAfterRecord).toHaveBeenNthCalledWith(i + 1, events[i]);
+    }
+  });
+
+  it('hook failure is logged but does NOT propagate to the caller', async () => {
+    const logger = silentLogger();
+    const recorder = createAuditRecorder({
+      auditRepo: world.repo,
+      logger,
+      onAfterRecord: () => {
+        throw new Error('snapshot write failed');
+      },
+    });
+
+    await expect(recorder.recordEvent(newDenialEvent(world))).resolves.toBeUndefined();
+
+    const warnCalls = (logger.warn as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    const matching = warnCalls.find(
+      (c) => (c[0] as Record<string, unknown>).event === 'audit_after_record_hook_failed',
+    );
+    expect(matching).toBeDefined();
+  });
+
+  it('async hook failure is logged but does NOT propagate', async () => {
+    const logger = silentLogger();
+    const recorder = createAuditRecorder({
+      auditRepo: world.repo,
+      logger,
+      onAfterRecord: () => Promise.reject(new Error('async snapshot fail')),
+    });
+
+    await expect(recorder.recordEvent(newDenialEvent(world))).resolves.toBeUndefined();
+
+    const warnCalls = (logger.warn as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    const matching = warnCalls.find(
+      (c) => (c[0] as Record<string, unknown>).event === 'audit_after_record_hook_failed',
+    );
+    expect(matching).toBeDefined();
+  });
+});

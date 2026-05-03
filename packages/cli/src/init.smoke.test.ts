@@ -399,3 +399,146 @@ describe('PRY-002 smoke E2E (SQLite file)', () => {
     }
   });
 });
+
+describe('PRY-048 status snapshot smoke ACs', () => {
+  let workDir: string;
+  let dbPath: string;
+  let keysDir: string;
+  let xdgState: string;
+  let snapshotFile: string;
+  let dbConfig: DbConfig;
+  let originalXdg: string | undefined;
+
+  beforeEach(async () => {
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hive-pry048-init-'));
+    dbPath = path.join(workDir, 'hive.sqlite');
+    keysDir = path.join(workDir, 'keys');
+    xdgState = path.join(workDir, 'state');
+    snapshotFile = path.join(xdgState, 'hive', 'status.json');
+    dbConfig = { dialect: 'sqlite', url: `sqlite:${dbPath}`, sqliteWal: false };
+
+    originalXdg = process.env['XDG_STATE_HOME'];
+    process.env['XDG_STATE_HOME'] = xdgState;
+  });
+
+  afterEach(async () => {
+    if (originalXdg === undefined) {
+      delete process.env['XDG_STATE_HOME'];
+    } else {
+      process.env['XDG_STATE_HOME'] = originalXdg;
+    }
+    await fs.rm(workDir, { recursive: true, force: true });
+  });
+
+  it('AC1: hivectl init writes a valid v:1 status snapshot at the XDG path', async () => {
+    const result = await performInit({
+      db: dbConfig,
+      adminEmail: 'admin@example.com',
+      keysDir,
+      hiveName: 'snapshot-init-smoke',
+    });
+
+    const raw = await fs.readFile(snapshotFile, 'utf8');
+    const snap = JSON.parse(raw) as {
+      v: number;
+      writtenAt: string;
+      heartbeatSeconds: number;
+      hive: { name: string; colonies: number; keepers: number; agents: number } | null;
+      server: unknown;
+      database: { driver: string; location: string };
+      lastAudit: { at: string; event: string; actor: string } | null;
+    };
+
+    expect(snap.v).toBe(1);
+    expect(snap.heartbeatSeconds).toBeGreaterThan(0);
+    expect(snap.hive).toEqual({
+      name: 'snapshot-init-smoke',
+      colonies: 1,
+      keepers: 1,
+      agents: 0,
+    });
+    // init runs OUTSIDE the server lifecycle → server: null reflects reality.
+    expect(snap.server).toBeNull();
+    expect(snap.database.driver).toBe('sqlite');
+    expect(snap.database.location).toBe(`sqlite:${dbPath}`);
+    // lastAudit is null on a fresh init — `performInit` does not emit audit
+    // events itself (admin keeper insert + initial credential issuance both
+    // bypass the auditRecorder, per the v0.1 design).
+    expect(snap.lastAudit).toBeNull();
+    expect(typeof snap.writtenAt).toBe('string');
+    expect(Date.parse(snap.writtenAt)).not.toBeNaN();
+
+    // Ownership + perms — admin row + keys lined up.
+    expect(result.adminHivekeeperId).toBeDefined();
+  });
+
+  it('AC4: a subsequent admin audit event refreshes lastAudit on the next snapshot write', async () => {
+    await performInit({
+      db: dbConfig,
+      adminEmail: 'admin@example.com',
+      keysDir,
+      hiveName: 'snapshot-audit-smoke',
+    });
+
+    // Read initial snapshot (lastAudit null).
+    const beforeRaw = await fs.readFile(snapshotFile, 'utf8');
+    const before = JSON.parse(beforeRaw) as {
+      lastAudit: unknown;
+      writtenAt: string;
+    };
+    expect(before.lastAudit).toBeNull();
+
+    // Simulate the audit chokepoint firing: the recorder writes a row +
+    // `onAfterRecord` hook fires + snapshot refreshes. We replicate this
+    // in-process by importing createAuditRecorder + createSnapshotWriter
+    // and wiring them as `wire.startCli` does.
+    const { createAuditRecorder, createAuditRepo, createSnapshotWriter, createLogger } =
+      await import('@hive/server');
+    const db = createDb(dbConfig);
+    try {
+      const hiveRow = await db.selectFrom('hives').select(['id']).executeTakeFirstOrThrow();
+      const logger = createLogger({ level: 'silent' });
+      const snapshotWriter = createSnapshotWriter({
+        db,
+        hiveId: hiveRow.id,
+        dbConfig,
+        logger,
+      });
+      const auditRepo = createAuditRepo(db);
+      const recorder = createAuditRecorder({
+        auditRepo,
+        logger,
+        onAfterRecord: () => snapshotWriter.writeRefresh(),
+      });
+
+      // Wait long enough for the writtenAt timestamp millisecond to advance.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      await recorder.recordEvent({
+        category: 'admin_credential_issue',
+        decision: 'allow',
+        actorId: null,
+        actorKind: 'system',
+        subjectId: null,
+        subjectKind: null,
+        reasonCode: 'credential.issued',
+        detail: null,
+        requestId: null,
+        hiveId: hiveRow.id,
+        occurredAt: new Date(),
+      });
+    } finally {
+      await db.destroy();
+    }
+
+    const afterRaw = await fs.readFile(snapshotFile, 'utf8');
+    const after = JSON.parse(afterRaw) as {
+      lastAudit: { at: string; event: string; actor: string } | null;
+      writtenAt: string;
+    };
+    expect(after.lastAudit).not.toBeNull();
+    expect(after.lastAudit?.event).toBe('credential.issued');
+    expect(after.lastAudit?.actor).toBe('system:system');
+    expect(Date.parse(after.writtenAt)).toBeGreaterThan(Date.parse(before.writtenAt));
+  });
+});

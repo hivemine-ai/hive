@@ -61,6 +61,11 @@ import type { Database } from '#persistence/schema.js';
 
 import { createCellsHookAdapter } from './cells-hook-adapter.js';
 import { createNotificationsForProduction } from './notifications-factory.js';
+import {
+  SNAPSHOT_HIVE_VERSION,
+  createSnapshotWriter,
+  type SnapshotWriter,
+} from './snapshot-writer.js';
 import { createVisibilityEngineForProduction } from './visibility-engine-factory.js';
 import { createMcpTransport } from '#transport/mcp/server.js';
 import { createHttpHost } from '#transport/mcp/http-host.js';
@@ -175,8 +180,24 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
   const cellsRepo = createCellsRepo(db);
   const cellEvents = createCellEvents();
 
-  // 4. Visibility Engine (audit recorder built inside the factory).
-  const visibilityEngine = createVisibilityEngineForProduction({ db, logger });
+  // 4. Snapshot writer (sidecar JSON for CLI cold start, per ADR-022). Built
+  //    BEFORE the visibility engine so the audit chokepoint can refresh the
+  //    snapshot per event.
+  const snapshotWriter = createSnapshotWriter({
+    db,
+    hiveId: hiveRow.id,
+    dbConfig,
+    logger,
+  });
+
+  // 5. Visibility Engine (audit recorder built inside the factory). The
+  //    `onAuditAfterRecord` hook fires post-commit and refreshes the snapshot
+  //    so the CLI cold start sees the latest `lastAudit` block.
+  const visibilityEngine = createVisibilityEngineForProduction({
+    db,
+    logger,
+    onAuditAfterRecord: () => snapshotWriter.writeRefresh(),
+  });
 
   // 5. Sender + Reader.
   const sender = createSender({
@@ -241,6 +262,17 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
         { event: 'wire_started', host: cfg.httpHost, port: httpHost.port(), mcpPath: cfg.mcpPath },
         'hive server listening',
       );
+      // Snapshot writer: capture server block (bind, pid, uptime, version) and
+      // emit the first sidecar JSON. The CLI cold start (Slice 2) reads this
+      // file zero-network. If the write fails, the writer logs a warn and the
+      // server keeps running — snapshot is best-effort UX, not load-bearing.
+      const port = httpHost.port();
+      await snapshotWriter.writeWithServer({
+        bind: `${cfg.httpHost}:${port ?? cfg.httpPort}`,
+        pid: process.pid,
+        uptimeStartedAt: new Date().toISOString(),
+        version: SNAPSHOT_HIVE_VERSION,
+      });
       // One-shot stdout consumer check after the first write went through. If
       // the deploy lacks a stdout consumer (no journald / docker logs driver /
       // sidecar), pino buffers and eventually drops. We surface the issue
@@ -261,6 +293,21 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
           'http host stop failed',
         );
       });
+      // Snapshot writer: clear the server block so the CLI cold start sees
+      // `server: null` after a graceful shutdown. Best-effort — failure logs
+      // a warn but does not block teardown. SIGKILL bypasses this and leaves
+      // a stale snapshot, which the CLI flags via `isStale` (per ADR-022).
+      try {
+        await snapshotWriter.writeWithoutServer();
+      } catch (err) {
+        logger.warn(
+          {
+            event: 'wire_snapshot_shutdown_failed',
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'snapshot writeWithoutServer failed during shutdown',
+        );
+      }
       // Stop the presence sweep timer BEFORE closing the DB — keeps the event
       // loop free of pending intervals during db teardown. Idempotent.
       try {
@@ -404,6 +451,14 @@ export function resolveCliConfigFromEnv(
 
 export interface CliRuntime {
   db: Kysely<Database>;
+  /**
+   * Status snapshot writer (sidecar JSON, per ADR-022). CLI handlers do not
+   * call this directly — `stopCli` invokes `writeRefresh` automatically so
+   * every command that runs against the runtime refreshes the snapshot at
+   * end-of-run. Exposed here for `init` and other bootstrap commands that
+   * bypass `stopCli` and need to persist the first snapshot manually.
+   */
+  snapshotWriter: SnapshotWriter;
   participantsRepo: ParticipantsReadRepo;
   participantsWriteRepo: ParticipantsWriteRepo;
   // Read-only credentials lookups. Today consumed by `resolveCredentialRef`
@@ -494,11 +549,23 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   });
   const revoker = createRevoker({ blocklist, db, logger });
 
+  const snapshotWriter = createSnapshotWriter({
+    db,
+    hiveId: hiveRow.id,
+    dbConfig,
+    logger,
+  });
+
   const auditRepo = createAuditRepo(db);
-  const auditRecorder = createAuditRecorder({ auditRepo, logger });
+  const auditRecorder = createAuditRecorder({
+    auditRepo,
+    logger,
+    onAfterRecord: () => snapshotWriter.writeRefresh(),
+  });
 
   return {
     db,
+    snapshotWriter,
     participantsRepo,
     participantsWriteRepo,
     credentialsRepo,
@@ -517,7 +584,23 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   };
 }
 
-/** Tear down the CLI runtime. Closes the DB. Idempotent on re-call. */
+/** Tear down the CLI runtime. Refreshes the status snapshot so any audit
+ *  events emitted during the command run (or any DB state changes — hive
+ *  counts, etc.) land in the sidecar JSON before the DB connection closes.
+ *  Best-effort — failure logs a warn and does not block teardown.
+ *  Closes the DB. Idempotent on re-call.
+ */
 export async function stopCli(runtime: CliRuntime): Promise<void> {
+  try {
+    await runtime.snapshotWriter.writeRefresh();
+  } catch (err) {
+    runtime.logger.warn(
+      {
+        event: 'cli_snapshot_refresh_failed',
+        err: err instanceof Error ? err.message : String(err),
+      },
+      'snapshot refresh failed during stopCli',
+    );
+  }
   await closeKyselyDb(runtime.db);
 }

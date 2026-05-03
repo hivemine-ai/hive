@@ -18,8 +18,10 @@ import {
   createCellsRepo,
   createDb,
   createIssuer,
+  createLogger,
   createParticipantsReadRepo,
   createParticipantsWriteRepo,
+  createSnapshotWriter,
   dateToIso,
   generateKeypair,
   jsonStringify,
@@ -31,6 +33,7 @@ import {
   type CallerContext,
   type DbConfig,
   type IssuedCredential,
+  type Logger,
   type SigningKey,
   type UUIDv7,
 } from '@hive/server';
@@ -51,6 +54,11 @@ export interface InitOptions {
   operatorNote?: string;
   /** For tests: inject a deterministic signing key. */
   signingKeyOverride?: SigningKey;
+  /**
+   * Optional logger for the bootstrap. Defaults to a silent pino instance.
+   * Used by the snapshot writer to surface write failures (best-effort UX).
+   */
+  logger?: Logger;
 }
 
 export interface InitResult {
@@ -168,6 +176,20 @@ export async function performInit(opts: InitOptions): Promise<InitResult> {
         participantId: adminHivekeeperId,
         ttl: ttlMs,
       });
+
+      // Step 8: write the initial status snapshot (per ADR-022). The CLI
+      // cold start (Slice 2) reads this file zero-network. `init` runs
+      // outside the server lifecycle, so `server: null` reflects reality
+      // (no MCP server running). Best-effort — write failures log but do
+      // not fail the bootstrap.
+      const snapshotLogger = opts.logger ?? createLogger({ level: 'silent' });
+      const snapshotWriter = createSnapshotWriter({
+        db,
+        hiveId,
+        dbConfig,
+        logger: snapshotLogger,
+      });
+      await snapshotWriter.writeWithoutServer();
 
       return {
         hiveId,
