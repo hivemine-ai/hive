@@ -12,8 +12,8 @@ import type { Logger } from '#observability/logger.js';
 import type { Database, JsonText } from '#persistence/schema.js';
 import { dateToIso, jsonStringify, validateJsonText } from '#persistence/type-mappers.js';
 import { AuthError } from '../errors.js';
-import type { SigningKey } from '../keys/keypair-store.js';
-import { createParticipantsReadRepo } from '../participants/repository.js';
+import type { SigningKey } from '#domain/auth/keys/keypair-store.js';
+import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
 import type { Duration, IssuedCredential, ParticipantKind, UUIDv7 } from '../types.js';
 
 import type { Blocklist } from './blocklist.js';

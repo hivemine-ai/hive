@@ -7,8 +7,8 @@ import type { UUIDv7 } from '#domain/auth/index.js';
 
 import type { RequestContext } from '../types.js';
 import type { ReferenceResolver } from '../reference-resolver.js';
-import { adaptAgentList, decodeCursor } from '../views/agent-list-view.js';
-import type { AgentListView } from '../views/agent-list-view.js';
+import { adaptAgentList, decodeCursor } from '#transport/mcp/views/agent-list-view.js';
+import type { AgentListView } from '#transport/mcp/views/agent-list-view.js';
 
 // Schema max cap is a compile-time literal that matches the default env var value.
 // The runtime maxPageSize (from ListAgentsDeps) is the authoritative cap — it may

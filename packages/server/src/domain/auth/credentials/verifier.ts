@@ -24,8 +24,8 @@ import * as jose from 'jose';
 
 import type { Logger } from '#observability/logger.js';
 import { AuthError } from '../errors.js';
-import type { SigningKey } from '../keys/keypair-store.js';
-import type { Hive, Participant } from '../participants/entities.js';
+import type { SigningKey } from '#domain/auth/keys/keypair-store.js';
+import type { Hive, Participant } from '#domain/auth/participants/entities.js';
 import type { CredentialSnapshot, IdentityContext, ParticipantKind, UUIDv7 } from '../types.js';
 
 import type { Blocklist } from './blocklist.js';

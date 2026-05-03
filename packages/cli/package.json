@@ -13,6 +13,7 @@
   "imports": {
     "#audit/*": "./dist/audit/*",
     "#commands/*": "./dist/commands/*",
+    "#composition/*": "./dist/composition/*",
     "#error/*": "./dist/error/*",
     "#input/*": "./dist/input/*",
     "#output/*": "./dist/output/*",

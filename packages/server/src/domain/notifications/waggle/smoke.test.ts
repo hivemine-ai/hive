@@ -55,7 +55,7 @@ import { migrateToLatest } from '#persistence/migrate.js';
 import { dateToIso, jsonStringify } from '#persistence/type-mappers.js';
 import { createLogger, type Logger } from '#observability/logger.js';
 
-import type { SubscriberHandle } from '../presence/subscriber-handle.js';
+import type { SubscriberHandle } from '#domain/notifications/presence/subscriber-handle.js';
 import type { WaggleNotification } from './types.js';
 
 const SYSTEM_CALLER: CallerContext = {

@@ -1,0 +1,13 @@
+{
+  "name": "@test/fixture-pkg",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#audit/*": "./dist/audit/*",
+    "#error/*": "./dist/error/*",
+    "#transport/*": "./dist/transport/*",
+    "#domain/*": "./dist/domain/*",
+    "#types.js": "./dist/types.js"
+  }
+}

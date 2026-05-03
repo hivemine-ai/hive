@@ -10,7 +10,7 @@ import { CliError } from '#error/cli-error.js';
 import { parseDuration } from '#input/parse-duration.js';
 import { resolveParticipantReference } from '#input/parse-reference.js';
 import { buildOperatorActor } from '#audit/operator-actor.js';
-import { toCallerContext } from '../hivekeeper/create.js';
+import { toCallerContext } from '#commands/hivekeeper/create.js';
 import type { GlobalCliOpts } from '#types.js';
 
 export interface CreateAgentOpts {

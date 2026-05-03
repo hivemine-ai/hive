@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IdentityContext, UUIDv7 } from '#domain/auth/types.js';
 
 import type { SubscriberHandle } from './subscriber-handle.js';
-import type { WaggleNotification } from '../waggle/types.js';
+import type { WaggleNotification } from '#domain/notifications/waggle/types.js';
 import { createPresenceRegistry } from './registry.js';
 import type { PresenceRegistry } from './registry.js';
 import { isWaggleError } from '../errors.js';

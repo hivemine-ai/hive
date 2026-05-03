@@ -10,7 +10,7 @@ import type { Logger } from '#observability/logger.js';
 import type { CellClosedEvent, CellsRepo, MessageDeliveredEvent } from '#domain/cells/index.js';
 import type { ParticipantsReadRepo } from '#domain/auth/index.js';
 
-import type { PresenceRegistry } from '../presence/registry.js';
+import type { PresenceRegistry } from '#domain/notifications/presence/registry.js';
 
 import type { Builder } from './builder.js';
 import type { Consolidator } from './consolidator.js';

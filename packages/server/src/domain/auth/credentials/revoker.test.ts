@@ -3,7 +3,7 @@ import { v7 as uuidv7 } from 'uuid';
 
 import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
 import type { AuthError } from '../errors.js';
-import { createParticipantsReadRepo } from '../participants/repository.js';
+import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
 import { loadBlocklist } from './blocklist.js';
 import { createIssuer } from './issuer.js';
 import { createRevoker } from './revoker.js';

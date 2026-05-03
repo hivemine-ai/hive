@@ -21,7 +21,7 @@ import {
   ListAgentsInputSchema,
   type ListAgentsDeps,
 } from './list-agents.js';
-import { encodeCursor, decodeCursor } from '../views/agent-list-view.js';
+import { encodeCursor, decodeCursor } from '#transport/mcp/views/agent-list-view.js';
 
 // ─────────────────────────────────────────────────────────────────────────
 // UUIDs

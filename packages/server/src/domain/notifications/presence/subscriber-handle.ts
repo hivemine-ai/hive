@@ -19,7 +19,7 @@
 
 import type { IdentityContext, UUIDv7 } from '#domain/auth/types.js';
 
-import type { WaggleNotification } from '../waggle/types.js';
+import type { WaggleNotification } from '#domain/notifications/waggle/types.js';
 
 export interface SubscriberHandle {
   readonly connectionId: UUIDv7;

@@ -62,9 +62,9 @@ import type { Database } from '#persistence/schema.js';
 import { createCellsHookAdapter } from './cells-hook-adapter.js';
 import { createNotificationsForProduction } from './notifications-factory.js';
 import { createVisibilityEngineForProduction } from './visibility-engine-factory.js';
-import { createMcpTransport } from '../transport/mcp/server.js';
-import { createHttpHost } from '../transport/mcp/http-host.js';
-import type { HttpHost } from '../transport/mcp/http-host.js';
+import { createMcpTransport } from '#transport/mcp/server.js';
+import { createHttpHost } from '#transport/mcp/http-host.js';
+import type { HttpHost } from '#transport/mcp/http-host.js';
 
 export interface WireConfig {
   /** Default `0.0.0.0`. */

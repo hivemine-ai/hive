@@ -20,8 +20,8 @@ import { v7 as uuidv7 } from 'uuid';
 import type { Database, JsonText } from '#persistence/schema.js';
 import { dateToIso, jsonStringify, validateJsonText } from '#persistence/type-mappers.js';
 import { AuthError } from '../errors.js';
-import type { SigningKey } from '../keys/keypair-store.js';
-import type { ParticipantsReadRepo } from '../participants/repository.js';
+import type { SigningKey } from '#domain/auth/keys/keypair-store.js';
+import type { ParticipantsReadRepo } from '#domain/auth/participants/repository.js';
 import type { Logger } from '#observability/logger.js';
 
 import type { Duration, IssuedCredential, ParticipantKind, UUIDv7 } from '../types.js';

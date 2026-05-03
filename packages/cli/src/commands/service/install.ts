@@ -17,8 +17,8 @@ import {
   SYSTEMD_UNIT_NAME,
 } from '#platform/detect.js';
 
-import { runConfigNetwork } from '../config/network.js';
-import type { NetworkMode } from '../config/network.js';
+import { runConfigNetwork } from '#commands/config/network.js';
+import type { NetworkMode } from '#commands/config/network.js';
 
 import { realProcessRunner } from './exec.js';
 import type { ProcessRunner } from './exec.js';

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
 import { isAuthError } from '../errors.js';
 import type { AuthError } from '../errors.js';
-import { createParticipantsReadRepo } from '../participants/repository.js';
+import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
 import { loadBlocklist } from './blocklist.js';
 import { createIssuer } from './issuer.js';
 import { createRotator } from './rotator.js';

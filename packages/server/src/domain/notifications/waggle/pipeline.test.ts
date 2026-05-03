@@ -11,8 +11,8 @@ import type { Logger } from '#observability/logger.js';
 
 import type { Builder } from './builder.js';
 import type { Consolidator } from './consolidator.js';
-import type { PresenceRegistry } from '../presence/registry.js';
-import type { SubscriberHandle } from '../presence/subscriber-handle.js';
+import type { PresenceRegistry } from '#domain/notifications/presence/registry.js';
+import type { SubscriberHandle } from '#domain/notifications/presence/subscriber-handle.js';
 import type { WaggleNotification } from './types.js';
 
 import { createPipeline } from './pipeline.js';

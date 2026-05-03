@@ -5,7 +5,10 @@ import type { Reader, ReadMailboxFilter, ReadMailboxInput } from '#domain/cells/
 
 import type { ReferenceResolver } from '../reference-resolver.js';
 import type { RequestContext } from '../types.js';
-import { adaptMailbox, type ReadMailboxWireOutput } from '../views/message-view-wire.js';
+import {
+  adaptMailbox,
+  type ReadMailboxWireOutput,
+} from '#transport/mcp/views/message-view-wire.js';
 
 const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
