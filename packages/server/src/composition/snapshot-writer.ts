@@ -122,7 +122,7 @@ export function createSnapshotWriter(deps: SnapshotWriterDeps): SnapshotWriter {
   function loadDatabaseBlock(): HiveStatusSnapshot['database'] {
     const block: HiveStatusSnapshot['database'] = {
       driver: deps.dbConfig.dialect,
-      location: deps.dbConfig.url,
+      location: redactDbUrl(deps.dbConfig.url),
     };
     if (deps.dbConfig.dialect === 'sqlite') {
       const sqlitePath = extractSqliteFsPath(deps.dbConfig.url);
@@ -252,4 +252,33 @@ async function countAgents(db: Kysely<Database>, hiveId: UUIDv7): Promise<number
 function extractSqliteFsPath(url: string): string | null {
   if (!url.startsWith('sqlite:')) return null;
   return url.slice('sqlite:'.length);
+}
+
+/**
+ * Strip credentials from a DB connection string before persisting it to the
+ * status snapshot sidecar. The snapshot is written with default umask (typically
+ * world-readable on single-user setups) — embedding a Postgres DSN with
+ * `user:password@host` would leak credentials to any local reader of the file.
+ *
+ * SQLite URLs (`sqlite:./var/db/hive.sqlite`) are passed through unchanged
+ * because they carry no credentials. Postgres URLs are parsed via the WHATWG
+ * `URL` API so the host/port/database remain intact for operator-facing
+ * cold-start UX. Non-standard URLs that fail to parse fall back to
+ * `<driver>://<redacted>` rather than throwing — the snapshot must always be
+ * writeable so the cold-start shows status.
+ */
+function redactDbUrl(url: string): string {
+  if (url.startsWith('sqlite:')) return url;
+  try {
+    const parsed = new URL(url);
+    if (parsed.password !== '' || parsed.username !== '') {
+      parsed.password = '';
+      parsed.username = parsed.username !== '' ? '<redacted>' : '';
+    }
+    return parsed.href;
+  } catch {
+    const schemeEnd = url.indexOf('://');
+    const scheme = schemeEnd >= 0 ? url.slice(0, schemeEnd) : 'db';
+    return `${scheme}://<redacted>`;
+  }
 }

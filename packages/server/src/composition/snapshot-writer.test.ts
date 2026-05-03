@@ -278,6 +278,64 @@ describe('createSnapshotWriter', () => {
     expect(snap.hive?.agents).toBe(1);
   });
 
+  it('redacts Postgres credentials from database.location (security fix)', async () => {
+    const writer = createSnapshotWriter({
+      db: world.db,
+      hiveId: world.hiveId,
+      dbConfig: {
+        dialect: 'postgres',
+        url: 'postgres://dbuser:s3cr3tP4ss@prod-db.internal:5432/hive',
+      },
+      logger: createLogger({ level: 'silent' }),
+      pathResolver: () => snapshotFile,
+    });
+
+    await writer.writeWithoutServer();
+    const snap = readSnapshotFile(snapshotFile);
+
+    expect(snap.database.driver).toBe('postgres');
+    // Credential MUST be stripped — both the password and the username should
+    // be replaced; host + port + database name remain for operator UX.
+    expect(snap.database.location).not.toContain('s3cr3tP4ss');
+    expect(snap.database.location).not.toContain('dbuser');
+    expect(snap.database.location).toContain('prod-db.internal');
+    expect(snap.database.location).toContain('5432');
+    expect(snap.database.location).toContain('/hive');
+  });
+
+  it('preserves SQLite URLs verbatim (no credentials to strip)', async () => {
+    const writer = createSnapshotWriter({
+      db: world.db,
+      hiveId: world.hiveId,
+      dbConfig: { dialect: 'sqlite', url: 'sqlite:./var/db/hive.sqlite' },
+      logger: createLogger({ level: 'silent' }),
+      pathResolver: () => snapshotFile,
+    });
+
+    await writer.writeWithoutServer();
+    const snap = readSnapshotFile(snapshotFile);
+
+    expect(snap.database.location).toBe('sqlite:./var/db/hive.sqlite');
+  });
+
+  it('falls back to <driver>://<redacted> on unparseable Postgres URL', async () => {
+    const writer = createSnapshotWriter({
+      db: world.db,
+      hiveId: world.hiveId,
+      // Non-standard / malformed DSN that the WHATWG URL parser rejects.
+      dbConfig: { dialect: 'postgres', url: 'postgres:///./socket-path?host=/tmp' },
+      logger: createLogger({ level: 'silent' }),
+      pathResolver: () => snapshotFile,
+    });
+
+    await writer.writeWithoutServer();
+    const snap = readSnapshotFile(snapshotFile);
+
+    // Whatever the result, it must NOT contain anything resembling credentials,
+    // and must NOT throw. The fallback path returns `<driver>://<redacted>`.
+    expect(snap.database.location).not.toMatch(/[^/]+:[^/]+@/);
+  });
+
   it('hive returns null when no Hive row exists for the configured hiveId', async () => {
     const writer = createSnapshotWriter({
       db: world.db,
