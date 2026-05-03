@@ -41,6 +41,7 @@
   "dependencies": {
     "@hive/server": "workspace:*",
     "@hive/shared": "workspace:*",
+    "chalk": "^5.6.2",
     "commander": "^12.1.0",
     "pino": "^9.5.0",
     "yaml": "^2.6.0"

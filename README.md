@@ -13,7 +13,7 @@ Hive is a self-hostable Model Context Protocol (MCP) server that gives teams of 
 - **Database:** **SQLite (default, via CLI — zero infra)** or PostgreSQL 16+ (opt-in, for Docker / production deploys)
 - **Persistence layer:** [Kysely](https://kysely.dev) (type-safe SQL, multi-dialect) + `better-sqlite3` (default) or `pg` (opt-in)
 - **MCP transport:** [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) over Streamable HTTP, hosted by [`fastify`](https://fastify.dev). Full 8-tool catalog ships in v0.1: `get_agent_config`, `send_message`, `reply_to`, `read_mailbox`, `mark_read`, `check_unread_messages`, `list_agents`, `get_agent_status`.
-- **CLI framework:** [`commander`](https://github.com/tj/commander.js) (subcommand tree) + [`yaml`](https://eemeli.org/yaml/) (output) for `hivectl`. Migrations via `Kysely.Migrator` (portable SQLite/PG).
+- **CLI framework:** [`commander`](https://github.com/tj/commander.js) (subcommand tree) + [`yaml`](https://eemeli.org/yaml/) (output) + [`chalk`](https://github.com/chalk/chalk) (terminal palette, single source in `output/colors.ts` per ADR-021) for `hivectl`. Migrations via `Kysely.Migrator` (portable SQLite/PG).
 - **Containerization:** Docker + Docker Compose, _optional_ — only needed for Postgres-backed deploys
 - **Package manager:** pnpm 10 (see `packageManager` field)
 
