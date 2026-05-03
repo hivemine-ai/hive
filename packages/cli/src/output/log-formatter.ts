@@ -134,7 +134,7 @@ export function formatLogLine(line: Record<string, unknown>, padding: FormatPadd
  * `knownNamespaces` may be empty — the formula falls back to 18 + 2 = 20
  * so columns stay aligned even when the server emits no `module` field
  * (the current state of `@hive/server`'s logger as of PRY-051; see the
- * PRY § Cambio de scope for the `-` fallback contract).
+ * PRY § Scope change note for the `-` fallback contract).
  */
 export function determineModulePathPadding(knownNamespaces: readonly string[]): number {
   let longest = 0;
