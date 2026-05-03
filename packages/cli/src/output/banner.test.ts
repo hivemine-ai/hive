@@ -69,7 +69,55 @@ describe('banner.compact', () => {
 });
 
 describe('banner.expanded', () => {
-  it('throws — implementation lands in PRY-052 (Slice 5) per the cascade plan', () => {
-    expect(() => expanded()).toThrow(/PRY-052/);
+  const previousLevel = chalk.level;
+  beforeEach(() => {
+    chalk.level = 0;
+  });
+  afterEach(() => {
+    chalk.level = previousLevel;
+  });
+
+  it('renders 5 lines (NO_COLOR plain text)', () => {
+    const lines = expanded().split('\n');
+    expect(lines).toHaveLength(5);
+  });
+
+  it('matches the design system frame byte-for-byte in NO_COLOR mode', () => {
+    // Per [[hivectl — Operator Experience]] § Ceremonial del init — see
+    // the 07c hivectl v3.html design reference. Banner is immutable;
+    // any diff here means a spec amend was required.
+    expect(expanded()).toBe(
+      [
+        '       ⬢ ⬢ ⬢ ⬢',
+        '     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      hivectl   ·   v0.1.0',
+        '   ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢',
+        '     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      bootstrapping a fresh Hive',
+        '       ⬢ ⬢ ⬢ ⬢        apache-2.0  ·  hivemine-ai/hive',
+      ].join('\n'),
+    );
+  });
+
+  it('emits ANSI sequences for the brand glyph cluster when colour is enabled', () => {
+    chalk.level = 3;
+    const out = expanded();
+    expect(ANSI_RE.test(out)).toBe(true);
+    expect(out).toContain('⬢');
+  });
+
+  it('renders the version metadata on line 2', () => {
+    const lines = expanded().split('\n');
+    expect(lines[1]).toContain('hivectl');
+    expect(lines[1]).toContain('v0.1.0');
+  });
+
+  it('renders the bootstrapping subtitle on line 4', () => {
+    const lines = expanded().split('\n');
+    expect(lines[3]).toContain('bootstrapping a fresh Hive');
+  });
+
+  it('renders the licence + repo footer on line 5', () => {
+    const lines = expanded().split('\n');
+    expect(lines[4]).toContain('apache-2.0');
+    expect(lines[4]).toContain('hivemine-ai/hive');
   });
 });

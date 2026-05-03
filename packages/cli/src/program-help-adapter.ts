@@ -275,8 +275,8 @@ function deriveTaglineFromDescription(description: string): string {
  *
  * Leaf commands (concrete actions like `agent create`, `credential
  * issue`, etc.) keep commander's default help — they take per-flag
- * options that the bespoke renderer is not specialised for. PRY-052+
- * may extend the design system to those if the design pulls them in.
+ * options that the bespoke renderer is not specialised for. Future
+ * work may extend the design system to those if the design pulls them in.
  */
 export function installHelpOverrides(program: Command): void {
   program.helpInformation = function rootHelp(): string {

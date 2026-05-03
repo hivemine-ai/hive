@@ -12,10 +12,12 @@
 //     `c.muted(...)` for fresh/missing, `c.warn(...)` for stale) so
 //     this module owns the brand cluster but never owns the state-
 //     dependent semantics of the third line.
-//   - `expanded()` — ceremonial 5-line banner reserved for `init`.
-//     Implemented in Slice 5 (PRY-052); throws explicitly until then
-//     so an accidental caller fails loudly instead of shipping an
-//     empty string.
+//   - `expanded()` — ceremonial 5-line banner reserved for `init`. The
+//     glyph column is 21 chars wide; clusters of 4 / 6 / 8 hexagons are
+//     centred to evoke the diamond/hex bloom shape of the design ref
+//     (see `_design-references/hivectl-cli-redesign/07c hivectl v3.html`).
+//     The text column on lines 2/4/5 is owned by this module — there
+//     is exactly one caller (`output/init-ceremonial.ts::printBootHeader`).
 
 import { c } from './colors.js';
 import { sym } from './symbols.js';
@@ -28,6 +30,13 @@ import { sym } from './symbols.js';
 // cluster on the line above.
 const NARROW = `${sym.hex} ${sym.hex} ${sym.hex}`;
 const WIDE = `${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex}`;
+
+// Expanded clusters: 4-, 6-, 8-hexagon rows. Each cluster is `N` glyphs
+// joined by single spaces (visual width = 2N-1). Centred within the
+// 21-char glyph column by the leading-space prefix on every line.
+const N4 = `${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex}`;
+const N6 = `${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex}`;
+const N8 = `${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex}`;
 
 /**
  * Render the daily compact banner — three lines, glyph column 11 chars
@@ -49,14 +58,29 @@ export function compact(subtitle: string): string {
 }
 
 /**
- * Render the ceremonial expanded banner. Reserved for `hivectl init`
- * (and the first-run `serve` after a fresh install).
+ * Render the ceremonial expanded banner — five lines, glyph column 21
+ * chars wide. Reserved for `hivectl init`: the operator runs `init`
+ * exactly once per Hive, so the surface trades terseness for a small
+ * "this is an event worth marking" cue. Every other subcommand uses
+ * `compact()`.
  *
- * NOT YET IMPLEMENTED — lands in Slice 5 (PRY-052). Throwing here keeps
- * the module honest: an accidental caller fails loudly and points to
- * the right PRY rather than shipping an empty banner that quietly
- * breaks the ceremony.
+ * Layout (visual widths in NO_COLOR mode):
+ *   line 1 — 4 hex (narrow top of the bloom)
+ *   line 2 — 6 hex + `hivectl   ·   v0.1.0`
+ *   line 3 — 8 hex (widest row)
+ *   line 4 — 6 hex + `bootstrapping a fresh Hive`
+ *   line 5 — 4 hex + `apache-2.0  ·  hivemine-ai/hive`
+ *
+ * The text on lines 2/4/5 is owned by this module — there is exactly
+ * one caller (`output/init-ceremonial.ts::printBootHeader`) and the
+ * ceremonial copy is fixed by the design ref. Editing the text
+ * requires the same spec amend as editing the glyph layout.
  */
 export function expanded(): string {
-  throw new Error('banner.expanded() not yet implemented — lands in PRY-052 (Slice 5)');
+  const l1 = `       ${c.brand(N4)}`;
+  const l2 = `     ${c.brand(N6)}      ${c.cmd('hive')}${c.muted('ctl')}   ${c.muted('·')}   ${c.num('v0.1.0')}`;
+  const l3 = `   ${c.brand(N8)}`;
+  const l4 = `     ${c.brand(N6)}      ${c.muted('bootstrapping a fresh Hive')}`;
+  const l5 = `       ${c.brand(N4)}        ${c.muted('apache-2.0  ·  hivemine-ai/hive')}`;
+  return `${l1}\n${l2}\n${l3}\n${l4}\n${l5}`;
 }

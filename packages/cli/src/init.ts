@@ -42,6 +42,23 @@ const INIT_LOCK_ID = 'hive_init';
 const INIT_LOCK_TTL_MS = 60_000;
 const DEFAULT_TTL_MS = 365 * 24 * 60 * 60 * 1000; // 365 days
 
+/**
+ * Tagged-union of bootstrap phases visible to the operator. Each variant is
+ * emitted by `performInit` exactly once after that phase succeeds — failures
+ * cause the function to throw without an event for the in-flight phase, and
+ * the caller's catch path renders the error.
+ *
+ * Used by `commands/init.ts::runInit` to drive the 5-step ceremonial output
+ * defined in the PRY-052 tech spec slice 5. Tests pass a recording callback
+ * to assert the sequence of events.
+ */
+export type InitPhaseEvent =
+  | { kind: 'database' }
+  | { kind: 'migrations'; appliedCount: number }
+  | { kind: 'signing-key'; kid: string }
+  | { kind: 'admin-hivekeeper'; adminId: UUIDv7; adminEmail: string }
+  | { kind: 'root-credential'; jti: UUIDv7; expiresAt: Date };
+
 export interface InitOptions {
   /** Database URL or fully-resolved DbConfig. */
   db: string | DbConfig;
@@ -59,6 +76,14 @@ export interface InitOptions {
    * Used by the snapshot writer to surface write failures (best-effort UX).
    */
   logger?: Logger;
+  /**
+   * Optional callback invoked once per visible bootstrap phase after that
+   * phase succeeds. Used by the CLI ceremonial output (pretty mode) and by
+   * tests that assert phase ordering. Failures bypass this callback —
+   * the error is propagated by `throw` and the caller's error path emits
+   * a single `error: ...` line (no half-rendered phase row).
+   */
+  onPhase?: (event: InitPhaseEvent) => void;
 }
 
 export interface InitResult {
@@ -75,11 +100,25 @@ export async function performInit(opts: InitOptions): Promise<InitResult> {
   const db = createDb(dbConfig);
   const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
 
-  try {
-    // Step 1-2: schema.
-    await migrateToLatest(db);
+  // The five phases below map 1:1 to the rows of the ceremonial output.
+  // `database` fires after `createDb` returns (which happens above, before
+  // this try block) so the event surface here covers steps 2–5. We emit
+  // step 1 immediately on entry — `createDb` itself does not perform I/O
+  // until the first query, so a failure to "open" surfaces during
+  // `migrateToLatest`. Reporting "database" up front matches the operator
+  // mental model: the row appears as soon as the URL is resolved.
+  opts.onPhase?.({ kind: 'database' });
 
-    // Step 3: acquire init lock (post-migrations so the locks table exists).
+  try {
+    // Phase 2: migrations.
+    const migResult = await migrateToLatest(db);
+    opts.onPhase?.({
+      kind: 'migrations',
+      appliedCount: migResult.results?.length ?? 0,
+    });
+
+    // Acquire init lock (post-migrations so the locks table exists). The
+    // lock is infrastructure — no ceremonial row.
     const lockOwner = uuidv7();
     const acquired = await acquireLock(db, {
       lockId: INIT_LOCK_ID,
@@ -93,13 +132,13 @@ export async function performInit(opts: InitOptions): Promise<InitResult> {
     }
 
     try {
-      // Step 4: idempotency check inside the lock.
+      // Idempotency check inside the lock — also infrastructure.
       const existing = await db.selectFrom('hives').select('id').limit(1).execute();
       if (existing.length > 0) {
         throw new AuthError('HIVE_ALREADY_INITIALIZED');
       }
 
-      // Step 5: signing key.
+      // Phase 3: signing key.
       const signingKey = opts.signingKeyOverride ?? generateKeypair();
       await writeKeypairToDisk({ keysDir: opts.keysDir }, signingKey);
       const now = new Date();
@@ -114,8 +153,9 @@ export async function performInit(opts: InitOptions): Promise<InitResult> {
           removed_at: null,
         })
         .execute();
+      opts.onPhase?.({ kind: 'signing-key', kid: signingKey.kid });
 
-      // Step 6: hive + colony + first admin Hivekeeper, all in one transaction.
+      // Phase 4: hive + colony + first admin Hivekeeper, all in one transaction.
       const hiveId = uuidv7();
       const colonyId = uuidv7();
       const adminHivekeeperId = uuidv7();
@@ -162,8 +202,13 @@ export async function performInit(opts: InitOptions): Promise<InitResult> {
           tx,
         );
       });
+      opts.onPhase?.({
+        kind: 'admin-hivekeeper',
+        adminId: adminHivekeeperId,
+        adminEmail: opts.adminEmail,
+      });
 
-      // Step 7: initial credential for the admin Hivekeeper.
+      // Phase 5: initial credential for the admin Hivekeeper.
       const repo = createParticipantsReadRepo(db);
       const issuer = createIssuer({
         signingKey,
@@ -175,6 +220,11 @@ export async function performInit(opts: InitOptions): Promise<InitResult> {
       const initialCredential = await issuer.issueCredential({
         participantId: adminHivekeeperId,
         ttl: ttlMs,
+      });
+      opts.onPhase?.({
+        kind: 'root-credential',
+        jti: initialCredential.jti,
+        expiresAt: initialCredential.expiresAt,
       });
 
       // Step 8: write the initial status snapshot (per ADR-022). The CLI

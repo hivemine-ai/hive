@@ -84,6 +84,10 @@ function makeState(rootOpts: RootCliOpts): RuntimeState {
 }
 
 function writeStdout(text: string): void {
+  // Empty payload = handler already wrote its own output (e.g. the
+  // ceremonial init renderer in PRY-052). Emitting a lone newline here
+  // would add a stray blank line below the rendered surface.
+  if (text === '') return;
   process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
 }
 
@@ -226,7 +230,13 @@ export function buildProgram(): BuildProgramResult {
             ttl: asOptionalString(cliOpts['ttl']),
             outputCredential: asOptionalString(cliOpts['outputCredential']),
           }),
-        (value, mode) => formatOutput(value, { mode, schema: initSchema }),
+        // PRY-052: in pretty mode (`--output=table`, the default for TTY)
+        // `runInit` writes the ceremonial output (banner + 5 steps + framed
+        // credential) to stdout itself. Returning '' here keeps `runHandler`
+        // from appending a redundant table render. JSON / YAML modes are
+        // unchanged — the structured summary still serializes via `formatOutput`.
+        (value, mode) =>
+          mode === 'table' ? '' : formatOutput(value, { mode, schema: initSchema }),
       );
     });
 

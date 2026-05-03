@@ -63,6 +63,11 @@ export const c = {
   err: (s: string): string => chalk.hex(palette.err)(s),
   info: (s: string): string => chalk.hex(palette.info)(s),
   head: (s: string): string => chalk.hex(palette.text).bold(s),
+  // `subtle` is darker than `muted` — reserved for frame chars
+  // (┌ ┐ └ ┘ ─ │) and other separators that should recede behind
+  // foreground content. First call site: the framed credential box
+  // in `output/init-ceremonial.ts` (PRY-052).
+  subtle: (s: string): string => chalk.hex(palette.subtle)(s),
   // Fixed-width chip used by the log-stream formatter (Slice 4 / PRY-051)
   // and the help renderer (Slice 3). The switch below is intentionally
   // exhaustive — the `_exhaustive: never` guard turns an omitted case

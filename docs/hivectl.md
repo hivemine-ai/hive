@@ -152,6 +152,48 @@ Bootstrap a fresh Hive: runs migrations, generates a signing key, creates the fi
 
 `init` auto-creates the parent directories of `--db` (when SQLite — Postgres is skipped), `--keys-dir`, and `--output-credential` if they do not exist, so `hivectl init` can run from any writable cwd without `mkdir -p var/db var/keys` first. Other subcommands (`migrate`, `serve`, etc.) keep the fail-fast behaviour on missing paths.
 
+#### Ceremonial output
+
+In pretty mode (`--output table`, the default for an interactive TTY) `init` renders an expanded banner followed by a five-step staged progress block, ending with the root credential in a framed box:
+
+```
+       ⬢ ⬢ ⬢ ⬢
+     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      hivectl   ·   v0.1.0
+   ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢
+     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      bootstrapping a fresh Hive
+       ⬢ ⬢ ⬢ ⬢        apache-2.0  ·  hivemine-ai/hive
+
+  [1/5] database            ✓ opened
+  [2/5] migrations          ✓ applied 5 migrations
+  [3/5] signing key         ✓ generated kid 7a32c3248a05
+  [4/5] admin hivekeeper    ✓ created 019defa6 — admin@example.com
+  [5/5] root credential     ✓ issued jti 019defa6 (ttl 365d)
+  ⚠ save this token now — it is shown only once
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │eyJhbGciOiJFZERTQSI…<root-jwt>…│
+  └─────────────────────────────────────────────────────────────────┘
+```
+
+The expanded banner is reserved for `init` — every other subcommand uses the three-line compact banner. Bootstrap is the singular operation of an operator's lifetime against a Hive (it happens exactly once per machine), so the surface trades terseness for a small "this is an event worth marking" cue.
+
+If a bootstrap step fails, the rows for completed steps remain visible and an `error: <message>` line replaces the steps that did not run. Re-running `init` against an already-initialised Hive surfaces `error: hive already initialized` after `[1/5] database` and `[2/5] migrations` (which run idempotently) and exits with `EXIT_PRECONDITION` (4).
+
+#### `--output-credential` (write the root token to a file)
+
+When `--output-credential <path>` is set, the root JWT is written to `<path>` with mode `0600` and **never** echoed to stdout. The framed credential box is replaced by:
+
+```
+  ✓ root credential written to ./var/secrets/admin.jwt
+  ⚠ this token is the ONLY admin credential — keep the file safe
+```
+
+This flow is preferred for non-interactive bootstraps (CI, IaC) where capturing the token from stdout is fragile. The single-shot warning still applies — `init` cannot re-issue the same credential, only revoke + reissue via `credential rotate`.
+
+#### Non-pretty output (`--output json`, `--output yaml`)
+
+In JSON or YAML mode, `init` stays silent during bootstrap and serializes the full result (including `credentialJwt` when `--output-credential` is unset) to stdout as a single record. The structured output is the contract for log shippers, IaC tools, and downstream automation.
+
 ### `migrate`
 
 ```
