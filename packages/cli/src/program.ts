@@ -26,6 +26,7 @@ import { registerServiceGroup } from './commands/service/index.js';
 import { mapErrorToExit } from '#error/handler.js';
 import { asOptionalNumber, asOptionalString, asString, asStringArray } from './input/coerce.js';
 import { formatOutput, formatOutputList, resolveOutputMode } from './output/format.js';
+import { attachHelpMetadata, installHelpOverrides } from './program-help-adapter.js';
 import {
   auditEntrySchema,
   createAgentSchema,
@@ -547,10 +548,114 @@ export function buildProgram(): BuildProgramResult {
   // Currently a single child: `config network <local-only | bind-all>`.
   registerConfigGroup(program, lifecycleHooks);
 
+  // ── help renderer (PRY-050) ───────────────────────────────────────────
+  // Attach examples + see-also metadata to the subgroups that benefit
+  // most from inline guidance, then install the renderer overrides on
+  // root + every subgroup. Leaf commands keep commander's default help.
+  attachServiceHelpMetadata(program);
+  attachAgentHelpMetadata(program);
+  attachCredentialHelpMetadata(program);
+  installHelpOverrides(program);
+
   return {
     program,
     getExitCode: () => stateRef.current?.exitCode ?? 0,
   };
+}
+
+function attachServiceHelpMetadata(program: Command): void {
+  const service = program.commands.find((c) => c.name() === 'service');
+  if (service === undefined) return;
+  attachHelpMetadata(service, {
+    tagline: 'manage the Hive system service',
+    description: 'delegates to systemd (linux) or launchd (mac). Windows → use Docker.',
+    examples: [
+      {
+        comment: 'first-time install on linux (requires root)',
+        command: 'sudo hivectl service install',
+      },
+      {
+        comment: 'quick health check, suitable for shell guards',
+        command: 'hivectl service status > /dev/null && echo "running"',
+      },
+      {
+        comment: 'tail the last 50 journal lines',
+        command: 'hivectl service status --logs 50',
+      },
+    ],
+    seeAlso: [
+      {
+        command: 'hivectl serve',
+        description: 'run in the foreground (no system supervisor)',
+      },
+      {
+        command: 'hivectl config network',
+        description: 'change the bind address before starting the service',
+      },
+    ],
+  });
+}
+
+function attachAgentHelpMetadata(program: Command): void {
+  const agent = program.commands.find((c) => c.name() === 'agent');
+  if (agent === undefined) return;
+  attachHelpMetadata(agent, {
+    tagline: 'agent lifecycle',
+    description: 'create, list, and revoke agents under existing Hivekeepers.',
+    examples: [
+      {
+        comment: 'create a worker under an existing keeper',
+        command: 'hivectl agent create --owner admin@hive --name summarizer-1 --type worker',
+      },
+      {
+        comment: 'list active agents (paged)',
+        command: 'hivectl agent list --state active --limit 50',
+      },
+      {
+        comment: 'revoke an agent (cascade-closes its Cell)',
+        command: 'hivectl agent revoke summarizer-1@admin.hive --yes',
+      },
+    ],
+    seeAlso: [
+      {
+        command: 'hivectl hivekeeper create',
+        description: 'create the owning Hivekeeper before its first agent',
+      },
+      {
+        command: 'hivectl credential issue',
+        description: 'mint a JWT for the agent (once active)',
+      },
+    ],
+  });
+}
+
+function attachCredentialHelpMetadata(program: Command): void {
+  const credential = program.commands.find((c) => c.name() === 'credential');
+  if (credential === undefined) return;
+  attachHelpMetadata(credential, {
+    tagline: 'credential lifecycle',
+    description: 'issue, list, rotate, and revoke JWTs for participants.',
+    examples: [
+      {
+        comment: 'issue a credential with default TTL',
+        command: 'hivectl credential issue --participant-id summarizer-1@admin.hive',
+      },
+      {
+        comment: "rotate the participant's currently-active credential",
+        command: 'hivectl credential rotate summarizer-1@admin.hive:latest --yes',
+      },
+      {
+        comment: 'revoke a specific credential by JTI',
+        command: 'hivectl credential revoke 01HX7K3...4F2A --yes --reason "lost device"',
+      },
+    ],
+    seeAlso: [
+      {
+        command: 'hivectl audit query --category credential.issued',
+        description: 'audit trail of credential issuance',
+      },
+    ],
+  });
 }
 
 function appendValue(value: string, previous: string[]): string[] {
