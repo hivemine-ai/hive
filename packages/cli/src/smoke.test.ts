@@ -426,7 +426,7 @@ describe('PRY-007 H21 — hivectl Slice 0 smoke E2E (SQLite)', () => {
       globals: makeGlobals(),
       adminEmail: 'leo@example.com',
       adminDisplayName: 'Leo',
-      hiveName: 'cotalker',
+      hiveName: 'test-hive',
       db: `sqlite:${dbPath}`,
       keysDir,
       ttl: '365d',
@@ -451,7 +451,7 @@ describe('PRY-007 H21 — hivectl Slice 0 smoke E2E (SQLite)', () => {
       // Revoke via friendly reference — `<name>@<owner-local>.<hive>`.
       const revoked = await runRevokeAgent(runtime, {
         globals: makeGlobals('leo@example.com'),
-        agentRef: 'worker-friendly@leo.cotalker',
+        agentRef: 'worker-friendly@leo.test-hive',
       });
       expect(revoked.revokedAgentId).toBe(created.agentId);
 
@@ -475,7 +475,7 @@ describe('PRY-007 H21 — hivectl Slice 0 smoke E2E (SQLite)', () => {
       try {
         await runRevokeAgent(runtime, {
           globals: makeGlobals('leo@example.com'),
-          agentRef: 'ghost@leo.cotalker',
+          agentRef: 'ghost@leo.test-hive',
         });
         expect.fail('should have thrown');
       } catch (err) {
@@ -495,7 +495,7 @@ describe('PRY-007 H21 — hivectl Slice 0 smoke E2E (SQLite)', () => {
       globals: makeGlobals(),
       adminEmail: 'leo@example.com',
       adminDisplayName: 'Leo',
-      hiveName: 'cotalker',
+      hiveName: 'test-hive',
       db: `sqlite:${dbPath}`,
       keysDir,
       ttl: '365d',
@@ -581,7 +581,7 @@ describe('PRY-007 H21 — hivectl Slice 0 smoke E2E (SQLite)', () => {
       globals: makeGlobals(),
       adminEmail: 'leo@example.com',
       adminDisplayName: 'Leo',
-      hiveName: 'cotalker',
+      hiveName: 'test-hive',
       db: `sqlite:${dbPath}`,
       keysDir,
       ttl: '365d',

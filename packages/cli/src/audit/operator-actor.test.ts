@@ -9,7 +9,7 @@ import { buildOperatorActor } from './operator-actor.js';
 
 const VALID_UUID = '019d57a0-d6e0-7b3a-8d4f-cb2c4e72d100';
 const HIVE_ID = '019de8c4-b3c3-7279-a2ee-09424384da11';
-const HIVE_NAME = 'cotalker';
+const HIVE_NAME = 'test-hive';
 
 interface MockRuntime {
   hiveStableIdentifier: string;
@@ -175,7 +175,7 @@ describe('buildOperatorActor', () => {
   it('agent-reference syntax throws CliError(OPERATOR_ID_INVALID, kind_not_allowed)', async () => {
     const { runtime } = makeRuntime();
     await expect(
-      buildOperatorActor(makeGlobals({ operatorId: 'worker@admin.cotalker' }), runtime),
+      buildOperatorActor(makeGlobals({ operatorId: 'worker@admin.test-hive' }), runtime),
     ).rejects.toSatisfy((err: unknown) => {
       expect(err).toBeInstanceOf(CliError);
       const e = err as CliError;

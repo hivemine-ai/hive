@@ -295,7 +295,7 @@ describe('resolveDetailMaxBytes', () => {
   });
 });
 
-describe('onAfterRecord post-commit hook (PRY-048 — snapshot writer wiring)', () => {
+describe('onAfterRecord post-commit hook (PRY-048 wiring + PRY-053 batch coalesce)', () => {
   let world: World;
 
   beforeEach(async () => {
@@ -343,7 +343,32 @@ describe('onAfterRecord post-commit hook (PRY-048 — snapshot writer wiring)', 
     expect(onAfterRecord).not.toHaveBeenCalled();
   });
 
-  it('fires once per event after recordEventBatch succeeds', async () => {
+  it('does NOT fire when recordEventBatch fails (post-commit semantics, batch path)', async () => {
+    const onAfterRecord = vi.fn(() => Promise.resolve());
+    const failingRepo: AuditRepo = {
+      insertAuditEvent: () => Promise.reject(new Error('simulated DB outage')),
+      insertAuditEventBatch: () => Promise.reject(new Error('simulated DB outage')),
+      findAuditEventById: () => Promise.resolve(null),
+      findRecentDenialsBySubject: () => Promise.resolve([]),
+      findAuditEventsByFilter: () => Promise.resolve([]),
+    };
+    const recorder = createAuditRecorder({
+      auditRepo: failingRepo,
+      logger: silentLogger(),
+      onAfterRecord,
+    });
+
+    await recorder.recordEventBatch([newDenialEvent(world), newDenialEvent(world)]);
+
+    expect(onAfterRecord).not.toHaveBeenCalled();
+  });
+
+  it('fires exactly ONCE per recordEventBatch (PRY-053 coalesce) with the last event of the batch', async () => {
+    // Per ADR-022 the snapshot is eventual-consistent and the writer ignores
+    // the event payload, so N writes per batch converge to the same state as
+    // 1 post-batch write. PRY-053 coalesces the dispatch to avoid N sequential
+    // snapshot writes (each ~5 DB COUNTs + JSON serialise + sync rename) on
+    // every batch insert.
     const onAfterRecord = vi.fn(() => Promise.resolve());
     const recorder = createAuditRecorder({
       auditRepo: world.repo,
@@ -354,10 +379,8 @@ describe('onAfterRecord post-commit hook (PRY-048 — snapshot writer wiring)', 
 
     await recorder.recordEventBatch(events);
 
-    expect(onAfterRecord).toHaveBeenCalledTimes(3);
-    for (let i = 0; i < events.length; i++) {
-      expect(onAfterRecord).toHaveBeenNthCalledWith(i + 1, events[i]);
-    }
+    expect(onAfterRecord).toHaveBeenCalledTimes(1);
+    expect(onAfterRecord).toHaveBeenCalledWith(events[events.length - 1]);
   });
 
   it('hook failure is logged but does NOT propagate to the caller', async () => {

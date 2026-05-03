@@ -38,7 +38,7 @@ hivectl agent list --owner you@example.com
 # 5. Rotate a credential (issues new + revokes old). Accepts a UUID v7 JTI
 #    or `<participant-ref>:latest` to target the participant's currently-
 #    active credential without an intermediate `credential list`.
-hivectl credential rotate worker-a@you.cotalker:latest --yes \
+hivectl credential rotate worker-a@you.test-hive:latest --yes \
   --operator-id you@example.com \
   --output-credential worker-a-rotated.jwt
 
@@ -47,7 +47,7 @@ hivectl audit query --limit 20 --operator-id you@example.com
 
 # 7. Revoke an agent (cascade-closes its Cell). Accepts UUID v7 or
 #    agent reference (<name>@<owner-local>.<hive>).
-hivectl agent revoke worker-a@you.cotalker --yes --operator-id you@example.com
+hivectl agent revoke worker-a@you.test-hive --yes --operator-id you@example.com
 ```
 
 `--operator-id` accepts either a Hivekeeper email or a UUID v7 — the email path resolves via DB lookup. UUID is preserved for scripts and tooling.
@@ -161,7 +161,7 @@ hivectl agent revoke <agent-ref> --yes
 
 `<agent-ref>` accepts two input forms (per [ADR-020](https://github.com/hivemine-ai/hive-vault)):
 
-- **Agent reference** — `<name>@<owner-local>.<hive>` (e.g. `worker-a@you.cotalker`). Resolves the owner Hivekeeper by email local-part, then the agent by name under that owner. Best for human operators who just ran `agent create` and remember the name + their own email.
+- **Agent reference** — `<name>@<owner-local>.<hive>` (e.g. `worker-a@you.test-hive`). Resolves the owner Hivekeeper by email local-part, then the agent by name under that owner. Best for human operators who just ran `agent create` and remember the name + their own email.
 - **UUID v7** — passed through directly (preserves the existing idempotent semantics: revoking an unknown UUID still exits `0`, since opaque ids may correspond to entities the script knows are already revoked). Best for scripts and tooling.
 
 ### `credential`
@@ -178,7 +178,7 @@ hivectl credential list    <participant-ref> [--limit N]
 `<jti-or-active-ref>` (per ADR-020 / PRY-041) accepts:
 
 - **UUID v7 JTI** — passed through directly. Best for scripts and tooling that already have the canonical id at hand.
-- **`<participant-ref>:latest`** — alias resolving to the participant's currently-active credential (`revoked_at IS NULL` AND `expires_at > now()`, most-recent by `issued_at`). The inner `<participant-ref>` may be a UUID, a hivekeeper email (`me@example.com:latest`), or an agent reference (`worker-a@you.cotalker:latest`). Resolves the participant first, then looks up the active credential. Errors:
+- **`<participant-ref>:latest`** — alias resolving to the participant's currently-active credential (`revoked_at IS NULL` AND `expires_at > now()`, most-recent by `issued_at`). The inner `<participant-ref>` may be a UUID, a hivekeeper email (`me@example.com:latest`), or an agent reference (`worker-a@you.test-hive:latest`). Resolves the participant first, then looks up the active credential. Errors:
   - Inner participant not found → `EXIT_NOT_FOUND (3)` with subcode `credential_owner_not_found` / `credential_agent_not_found`.
   - Participant exists but has no active credential → `EXIT_NOT_FOUND (3)` with subcode `no_active_credential` (issue a new one with `credential issue`).
   - Reference unparseable → `EXIT_USER_ERROR (1)` with subcode `jti_or_ref_unparseable`.
@@ -208,7 +208,7 @@ id, not by the active-credential alias. Example:
 
 ```bash
 hivectl audit query --actor-id you@example.com --limit 20
-hivectl audit query --subject-id worker-a@you.cotalker --category cell_close
+hivectl audit query --subject-id worker-a@you.test-hive --category cell_close
 ```
 
 ### `serve`

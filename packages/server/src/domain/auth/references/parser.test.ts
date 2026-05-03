@@ -118,7 +118,7 @@ describe('parseReference', () => {
   // --- hivekeeper-email (single @, suffix does NOT match) ---
 
   it('returns hivekeeper-email when suffix does NOT match the caller hiveName', () => {
-    const result = parseReference('admin@example.com', 'cotalker');
+    const result = parseReference('admin@example.com', 'test-hive');
     expect(result).toEqual<ParsedReference>({
       kind: 'hivekeeper-email',
       email: 'admin@example.com',
@@ -126,17 +126,17 @@ describe('parseReference', () => {
   });
 
   it('returns hivekeeper-email when suffix matches but ownerLocal would be empty (afterAt == hiveSuffix)', () => {
-    // input = 'admin@.cotalker' → afterAt = '.cotalker', hiveSuffix = '.cotalker',
-    // ownerLocal = '' → step 6 fails, step 7 evaluates: EMAIL_RE accepts 'admin@.cotalker'
+    // input = 'admin@.test-hive' → afterAt = '.test-hive', hiveSuffix = '.test-hive',
+    // ownerLocal = '' → step 6 fails, step 7 evaluates: EMAIL_RE accepts 'admin@.test-hive'
     // (lenient `[^@\s]+@[^@\s]+`), so this resolves as an email of last resort.
-    const result = parseReference('admin@.cotalker', 'cotalker');
+    const result = parseReference('admin@.test-hive', 'test-hive');
     expect(result?.kind).toBe('hivekeeper-email');
   });
 
   it('returns hivekeeper-email when domain happens to look like a longer suffix', () => {
-    // hiveName = 'cotalker', input domain = 'cotalker.example.com'
-    // hiveSuffix = '.cotalker' — afterAt 'cotalker.example.com' does NOT end with '.cotalker'
-    const result = parseReference('admin@cotalker.example.com', 'cotalker');
+    // hiveName = 'test-hive', input domain = 'test-hive.example.com'
+    // hiveSuffix = '.test-hive' — afterAt 'test-hive.example.com' does NOT end with '.test-hive'
+    const result = parseReference('admin@test-hive.example.com', 'test-hive');
     expect(result?.kind).toBe('hivekeeper-email');
   });
 
@@ -162,7 +162,7 @@ describe('parseReference', () => {
   });
 
   it('returns credential-active wrapping hivekeeper-email for `<email>:latest`', () => {
-    const result = parseReference('admin@example.com:latest', 'cotalker');
+    const result = parseReference('admin@example.com:latest', 'test-hive');
     expect(result).toEqual<ParsedReference>({
       kind: 'credential-active',
       participant: { kind: 'hivekeeper-email', email: 'admin@example.com' },
