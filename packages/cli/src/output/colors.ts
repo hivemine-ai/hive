@@ -64,6 +64,13 @@ export const c = {
   // (e.g. 'WARN ' has a trailing space, 'INFO' is 4 chars then a space
   // is added by the caller — handled here by routing on the trimmed
   // token so callers may pass either the padded or unpadded form).
+  //
+  // NOTE for Slice 4 (PRY-051): when extending `LevelChipToken` with a
+  // new member, refactor the ternary chain below to a `switch` with a
+  // `default: const _: never = trimmed; return c.muted(lvl);` branch so
+  // a future omitted case fails at compile time instead of silently
+  // rendering as muted. Pattern documented in `_meta/lessons-pry.md`
+  // PRY-003 (exhaustiveness guard for discriminated-union mappers).
   levelChip: (lvl: LevelChipToken): string => {
     const trimmed = lvl.trim();
     const colour =
