@@ -65,6 +65,9 @@ importers:
 
   packages/server:
     dependencies:
+      '@hive/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@modelcontextprotocol/sdk':
         specifier: ^1.18.0
         version: 1.29.0(zod@3.25.76)
@@ -109,7 +112,11 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@20.19.39)
 
-  packages/shared: {}
+  packages/shared:
+    devDependencies:
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@20.19.39)
 
 packages:
 

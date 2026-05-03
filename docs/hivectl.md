@@ -91,6 +91,18 @@ hivectl init --db postgres://user:pass@host:port/db       # Postgres opt-in
 
 All other subcommands consume the DB via the `HIVE_DB_URL` env var (or the default). They are dialect-agnostic.
 
+### Status snapshot (per ADR-022)
+
+The server (and `hivectl init`) maintains a JSON sidecar at `${XDG_STATE_HOME}/hive/status.json` (default `~/.local/state/hive/status.json` on Linux/Mac). The file holds the current hive name + counts, server runtime info (`bind`, `pid`, `uptimeStartedAt`, `version`) when a server is running, database driver/location/size, and the most recent audit event. Inspect it with:
+
+```
+cat ~/.local/state/hive/status.json | jq .
+```
+
+The snapshot is **eventually consistent**: the server refreshes it on boot, after every audit event, and on graceful shutdown (clears `server` to `null`). Every `hivectl` command also refreshes the snapshot on exit so a follow-up cold start (`hivectl` no args, planned) sees the latest state without any DB queries. A `SIGKILL`-ed server leaves the snapshot stale — the CLI flags this via `(now - writtenAt) > 2 × heartbeatSeconds` (currently 60 s) instead of mis-reporting "server up".
+
+The schema carries a top-level `v: 1`; future bumps treat older snapshots as missing rather than crashing the reader (forward-compat policy). The file is written atomically (`writeFileSync(.tmp)` + `renameSync`) so a CLI reader can never observe a half-written file.
+
 ## Subcommand reference
 
 ### `init`

@@ -20,6 +20,7 @@
     "#platform/*": "./dist/platform/*",
     "#runtime/*": "./dist/runtime/*",
     "#signals/*": "./dist/signals/*",
+    "#state/*": "./dist/state/*",
     "#types.js": "./dist/types.js"
   },
   "scripts": {

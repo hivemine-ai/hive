@@ -84,6 +84,20 @@ export type {
 } from './composition/notifications-factory.js';
 export { stubVisibilityEngine } from './composition/stubs.js';
 
+// Status snapshot writer (PRY-048, per ADR-022) — used by server `serve`
+// (auto-wired in `buildWire`) and by CLI bootstrap commands that bypass
+// `startCli` (notably `hivectl init`, which builds its own DB connection).
+export {
+  createSnapshotWriter,
+  SNAPSHOT_HIVE_VERSION,
+  SNAPSHOT_HEARTBEAT_SECONDS,
+} from './composition/snapshot-writer.js';
+export type {
+  ServerSnapshotInfo,
+  SnapshotWriter,
+  SnapshotWriterDeps,
+} from './composition/snapshot-writer.js';
+
 // CLI wire — public surface for hivectl per the hivectl + Admin Operations tech spec.
 export { startCli, stopCli, resolveCliConfigFromEnv } from './composition/wire.js';
 export type { CliRuntime, CliWireConfig, CliResolvedConfig } from './composition/wire.js';

@@ -64,6 +64,14 @@ export interface RecorderDeps {
   now?: () => Date;
   /** Override id generator for tests. Defaults to `uuidv7`. */
   idGen?: () => string;
+  /**
+   * Best-effort post-commit hook fired AFTER each successful audit insert. Used
+   * by the composition root to refresh the status snapshot sidecar (per
+   * [[ADR-022]]). Failures are logged + swallowed — never propagated to the
+   * caller. Wired both from the visibility engine factory (denial chokepoint)
+   * and from the CLI runtime factory (admin-op chokepoint).
+   */
+  onAfterRecord?: (event: NewAuditEvent) => void | Promise<void>;
 }
 
 export interface AuditRecorder {
@@ -182,6 +190,22 @@ export function createAuditRecorder(
     };
   }
 
+  async function fireAfterRecord(event: NewAuditEvent): Promise<void> {
+    if (!deps.onAfterRecord) return;
+    try {
+      await deps.onAfterRecord(event);
+    } catch (err) {
+      deps.logger.warn(
+        {
+          event: 'audit_after_record_hook_failed',
+          category: event.category,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'audit after-record hook threw — snapshot may be stale',
+      );
+    }
+  }
+
   return {
     async recordEvent(event) {
       const input = buildInsertInput(event);
@@ -203,6 +227,7 @@ export function createAuditRecorder(
         },
         'audit event recorded',
       );
+      await fireAfterRecord(event);
     },
 
     async recordEventBatch(events) {
@@ -232,6 +257,7 @@ export function createAuditRecorder(
           'audit event recorded',
         );
       }
+      for (const e of events) await fireAfterRecord(e);
     },
   };
 }
