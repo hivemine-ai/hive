@@ -252,9 +252,26 @@ hivectl audit query --subject-id worker-a@you.test-hive --category cell_close
 hivectl serve [--port N] [--host <addr>] [--log-level <level>] [--log-pretty]
 ```
 
-Runs the Hive MCP server in the foreground (PRY-031). Blocks until SIGINT/SIGTERM. Logs to stdout/stderr (JSON by default; pretty only with `--log-pretty` or `HIVE_MCP_LOG_PRETTY=true`). Reuses the server `buildWire` directly — no daemonize, no PID file (delegate-to-OS supervision via `service install`).
+Runs the Hive MCP server in the foreground (PRY-031). Blocks until SIGINT/SIGTERM. Reuses the server `buildWire` directly — no daemonize, no PID file (delegate-to-OS supervision via `service install`).
 
 Bind-address precedence (highest wins): `--host` flag → `HIVE_MCP_HTTP_HOST` env → `<workingDir>/config.json`'s `httpHost` (set by `config network`) → default `127.0.0.1`.
+
+#### Output shape (PRY-051)
+
+By default `serve` boots in **3 phases** for human operators sitting at a terminal:
+
+1. **Boot banner + sub-block** — the compact identity banner (`⬢ ⬢ ⬢ hivectl · v0.1.0 · apache-2.0` + tagline + `starting hive · <hive-name>`) followed by 3 metadata rows (`bind`, `database`, `log level`). The hive name comes from the on-disk status snapshot (per [ADR-022](https://github.com/hivemine-ai/hive-vault)) — fresh installs without an `init` yet show `starting hive` (no suffix). The `database` row strips Postgres credentials (`postgres://hive:***@db.example.com:5432/hivedb` is rendered as `postgres · hive@db.example.com:5432/hivedb`).
+2. **Live log stream** — every pino log line is reformatted to the canonical shape `hh:mm:ss.mmm␣␣LEVEL␣␣module.path␣␣message␣␣k=v…`. Level chips (`INFO ` / `DEBUG` / `WARN ` / `ERROR`) are 5 chars wide, padded right; the module column is padded to a width determined at boot (default 20 chars when no namespaces are known); separators are 2 spaces between segments. The log emitter on the server side is unchanged — pino still emits raw JSON internally, the formatter is read-only of that JSON line.
+3. **Readiness line** — once the HTTP listener is bound and answering health probes, a single line `⬡ ready · http://<host>:<port>` prints in the OK colour. After this, the live log stream continues showing actual traffic.
+
+#### JSON mode (log shippers)
+
+When piping `serve` output to a log aggregator (Loki, Cloudwatch, Datadog, etc.) the formatted output is wrong shape — log shippers want one valid JSON line per `\n`. Opt out into the legacy raw output via either:
+
+- **`--output=json`** (the global flag, recommended): `hivectl --output=json serve` emits raw JSON only, no banner, no readiness line, no formatting. The pino default destination (stdout) is used unchanged.
+- **`HIVE_MCP_LOG_PRETTY=false`** (legacy alias preserved for log-shipper deployments scripted against prior versions; same effect as `--output=json`).
+
+The legacy `--log-pretty` flag and `HIVE_MCP_LOG_PRETTY=true` env are no-op aliases since PRY-051 (the inline formatter is the prettifier; the old `pino-pretty` route fails inside the SEA bundle per [INC-2026-004](https://github.com/hivemine-ai/hive-vault), so they were retired). Old launch scripts continue to start `serve` without erroring; they simply receive the same default formatted output regardless of these flags.
 
 ### `service`
 

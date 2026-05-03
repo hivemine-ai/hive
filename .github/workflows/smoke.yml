@@ -70,6 +70,13 @@ jobs:
           HIVE_MCP_HTTP_HOST: 127.0.0.1
           HIVE_MCP_HTTP_PORT: '8443'
           HIVE_MCP_LOG_LEVEL: info
+          # PRY-051 changed the default `serve` output to a 3-phase formatted
+          # shape (banner → live formatted log lines → readiness). The PRY-018
+          # observability ACs (verified later in this job) parse `server.log`
+          # as JSON-per-line, so the smoke must opt back into JSON mode.
+          # `HIVE_MCP_LOG_PRETTY=false` is the canonical log-shipper opt-out
+          # (equivalent to `--output=json` — see docs/hivectl.md § serve).
+          HIVE_MCP_LOG_PRETTY: 'false'
         run: |
           set -euo pipefail
           # nohup + disown keeps the process alive after this step ends. PID

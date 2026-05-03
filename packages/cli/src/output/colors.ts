@@ -43,7 +43,11 @@ export const palette = {
 
 export type PaletteKey = keyof typeof palette;
 
-export type LevelChipToken = 'INFO' | 'DEBUG' | 'WARN ' | 'ERROR';
+// Tokens are intentionally either 4-char ('INFO') OR 5-char (the rest)
+// so callers can opt into width consistency. The log formatter (PRY-051)
+// passes the 5-char form 'INFO ' (note trailing space) to keep all chips
+// at a uniform column; help renderers (Slice 3) pass the 4-char form.
+export type LevelChipToken = 'INFO' | 'INFO ' | 'DEBUG' | 'WARN ' | 'ERROR';
 
 export const c = {
   prompt: (s: string): string => chalk.hex(palette.honey)(s),
@@ -59,29 +63,30 @@ export const c = {
   err: (s: string): string => chalk.hex(palette.err)(s),
   info: (s: string): string => chalk.hex(palette.info)(s),
   head: (s: string): string => chalk.hex(palette.text).bold(s),
-  // Fixed-width 5-char chip used by the log-stream formatter (Slice 4).
-  // Tokens are padded right when needed so the column stays aligned
-  // (e.g. 'WARN ' has a trailing space, 'INFO' is 4 chars then a space
-  // is added by the caller — handled here by routing on the trimmed
-  // token so callers may pass either the padded or unpadded form).
-  //
-  // NOTE for Slice 4 (PRY-051): when extending `LevelChipToken` with a
-  // new member, refactor the ternary chain below to a `switch` with a
-  // `default: const _: never = trimmed; return c.muted(lvl);` branch so
-  // a future omitted case fails at compile time instead of silently
-  // rendering as muted. Pattern documented in `_meta/lessons-pry.md`
-  // PRY-003 (exhaustiveness guard for discriminated-union mappers).
+  // Fixed-width chip used by the log-stream formatter (Slice 4 / PRY-051)
+  // and the help renderer (Slice 3). The switch below is intentionally
+  // exhaustive — the `_exhaustive: never` guard turns an omitted case
+  // into a TypeScript compile error so the next reviewer who adds a new
+  // LevelChipToken member must decide its colour explicitly. Pattern
+  // documented in `_meta/lessons-pry.md` PRY-003 (exhaustiveness guard
+  // for discriminated-union mappers).
   levelChip: (lvl: LevelChipToken): string => {
-    const trimmed = lvl.trim();
-    const colour =
-      trimmed === 'ERROR'
-        ? c.err
-        : trimmed === 'WARN'
-          ? c.warn
-          : trimmed === 'DEBUG'
-            ? c.info
-            : c.muted;
-    return colour(lvl);
+    switch (lvl) {
+      case 'ERROR':
+        return c.err(lvl);
+      case 'WARN ':
+        return c.warn(lvl);
+      case 'DEBUG':
+        return c.info(lvl);
+      case 'INFO':
+      case 'INFO ':
+        return c.muted(lvl);
+      default: {
+        const _exhaustive: never = lvl;
+        void _exhaustive;
+        return c.muted(lvl);
+      }
+    }
   },
 };
 
