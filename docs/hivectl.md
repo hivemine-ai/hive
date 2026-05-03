@@ -99,9 +99,44 @@ The server (and `hivectl init`) maintains a JSON sidecar at `${XDG_STATE_HOME}/h
 cat ~/.local/state/hive/status.json | jq .
 ```
 
-The snapshot is **eventually consistent**: the server refreshes it on boot, after every audit event, and on graceful shutdown (clears `server` to `null`). Every `hivectl` command also refreshes the snapshot on exit so a follow-up cold start (`hivectl` no args, planned) sees the latest state without any DB queries. A `SIGKILL`-ed server leaves the snapshot stale — the CLI flags this via `(now - writtenAt) > 2 × heartbeatSeconds` (currently 60 s) instead of mis-reporting "server up".
+The snapshot is **eventually consistent**: the server refreshes it on boot, after every audit event, and on graceful shutdown (clears `server` to `null`). Every `hivectl` command also refreshes the snapshot on exit so a follow-up cold start (`hivectl` no args — see § Cold start below) sees the latest state without any DB queries. A `SIGKILL`-ed server leaves the snapshot stale — the CLI flags this via `(now - writtenAt) > 2 × heartbeatSeconds` (currently 60 s) instead of mis-reporting "server up".
 
 The schema carries a top-level `v: 1`; future bumps treat older snapshots as missing rather than crashing the reader (forward-compat policy). The file is written atomically (`writeFileSync(.tmp)` + `renameSync`) so a CLI reader can never observe a half-written file.
+
+### Cold start (`hivectl` no args)
+
+Running `hivectl` with no arguments renders a local snapshot view in three frames — `fresh`, `stale`, or `missing` — depending on what the on-disk snapshot says:
+
+```
+$ hivectl
+
+    ⬢ ⬢ ⬢    hivectl  ·  v0.1.0  ·  apache-2.0
+  ⬢ ⬢ ⬢ ⬢ ⬢  open-source MCP server for collaborative AI agents
+    ⬢ ⬢ ⬢    snapshot 12s ago · ~/.local/state/hive/status.json
+
+  status
+    hive         ● my-hive · 1 colony · 4 keepers · 12 agents
+    server       ● running · 127.0.0.1:7700 · last seen 12s ago
+    database     ● sqlite · ./var/db/hive.sqlite · 14.2 MiB
+    last audit   12s ago — credential.issued by braindaamage
+
+  try
+    hivectl serve               start the MCP server in foreground
+    hivectl agent list          show agents in this hive
+    hivectl audit -n 20         tail recent audit events
+
+  run hivectl --help for the full command tree.
+```
+
+The cold start is **strictly local**: it reads the on-disk snapshot and never opens a network socket. The frame switches automatically:
+
+- **Fresh** — snapshot present and within `2 × heartbeatSeconds` (default 120 s). Suggested commands point at day-to-day operations.
+- **Stale** — snapshot present but past the staleness threshold. The server may be down. Suggested commands ("verify" block) point at `hivectl service status` for a real check.
+- **Missing** — no snapshot file (fresh install, never run `hivectl init`). Suggested commands point at bootstrap (`hivectl init`, `hivectl migrate up`, `hivectl --help`).
+
+The render is byte-identical to the design reference for each frame (the `Output Layer` tech spec § Slice 2 anchors this against `07c hivectl v3.html`). Subtitle on banner line 3 is the truth-telling timestamp: it shows snapshot age, not server uptime.
+
+Latency budget: < 50 ms warm including Node startup (~30 ms baseline) — the cold-start handler bypasses the commander tree and dispatches directly from `main.ts` so no subcommand modules load when no subcommand was asked for.
 
 ## Subcommand reference
 
