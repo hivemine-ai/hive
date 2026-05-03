@@ -16,7 +16,7 @@ function buildSnapshot(overrides: Partial<HiveStatusSnapshot> = {}): HiveStatusS
     v: 1,
     writtenAt: '2026-05-03T12:00:00.000Z',
     heartbeatSeconds: 30,
-    hive: { name: 'cotalker', colonies: 1, keepers: 1, agents: 0 },
+    hive: { name: 'test-hive', colonies: 1, keepers: 1, agents: 0 },
     server: null,
     database: { driver: 'sqlite', location: './var/db/hive.sqlite' },
     lastAudit: null,

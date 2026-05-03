@@ -20,7 +20,7 @@ const OWNER_UUID = '019d57a0-d6e0-7b3a-8d4f-cb2c4e72d300';
 const CREDENTIAL_JTI = '019d57a0-d6e0-7b3a-8d4f-cb2c4e72d401';
 const HIVE_ID = '019de8c4-b3c3-7279-a2ee-09424384da11';
 const COLONY_ID = '019de8c4-b3c3-7279-a2ee-09424384da12';
-const HIVE_NAME = 'cotalker';
+const HIVE_NAME = 'test-hive';
 
 interface MockRuntime {
   hiveStableIdentifier: string;
@@ -161,10 +161,10 @@ describe('parseParticipantReference', () => {
   });
 
   it('rejects agent-reference (out of scope for legacy callers — PRY-041/042 will widen)', () => {
-    // worker@admin.cotalker matches the agent-reference shape because the suffix
-    // .cotalker matches the hiveName. The 2-kind helper rejects it; PRY-041/042
+    // worker@admin.test-hive matches the agent-reference shape because the suffix
+    // .test-hive matches the hiveName. The 2-kind helper rejects it; PRY-041/042
     // will introduce a 3-kind helper that handles agent-reference.
-    expect(() => parseParticipantReference('worker@admin.cotalker', HIVE_NAME)).toThrow(
+    expect(() => parseParticipantReference('worker@admin.test-hive', HIVE_NAME)).toThrow(
       /neither a UUID v7 nor a valid email/,
     );
   });
@@ -262,9 +262,9 @@ describe('resolveOperatorId', () => {
 
   it('agent-reference syntax throws CliError(OPERATOR_ID_INVALID, kind_not_allowed)', async () => {
     const { runtime } = makeRuntime();
-    // worker@admin.cotalker is a valid agent-reference (suffix matches hiveName)
+    // worker@admin.test-hive is a valid agent-reference (suffix matches hiveName)
     // but operators must be Hivekeepers.
-    await expect(resolveOperatorId('worker@admin.cotalker', runtime)).rejects.toSatisfy(
+    await expect(resolveOperatorId('worker@admin.test-hive', runtime)).rejects.toSatisfy(
       (err: unknown) => {
         expect(err).toBeInstanceOf(CliError);
         const e = err as CliError;
@@ -311,7 +311,7 @@ describe('resolveAgentReference', () => {
     const findAgentByName = vi.fn().mockResolvedValue(makeAgent(AGENT_UUID, OWNER_UUID));
     const { runtime } = makeRuntime({ findHivekeeperByEmailLocalPart, findAgentByName });
 
-    const id = await resolveAgentReference('worker-a@admin.cotalker', runtime);
+    const id = await resolveAgentReference('worker-a@admin.test-hive', runtime);
 
     expect(id).toBe(AGENT_UUID);
     expect(findHivekeeperByEmailLocalPart).toHaveBeenCalledWith(HIVE_ID, 'admin');
@@ -357,7 +357,7 @@ describe('resolveAgentReference', () => {
 
   it('owner local-part not found throws AuthError(PARTICIPANT_NOT_FOUND, agent_owner_not_found)', async () => {
     const { runtime, findAgentByName } = makeRuntime();
-    await expect(resolveAgentReference('worker-a@ghost.cotalker', runtime)).rejects.toSatisfy(
+    await expect(resolveAgentReference('worker-a@ghost.test-hive', runtime)).rejects.toSatisfy(
       (err: unknown) => {
         expect(err).toBeInstanceOf(AuthError);
         const e = err as AuthError;
@@ -374,7 +374,7 @@ describe('resolveAgentReference', () => {
     const findAgentByName = vi.fn().mockResolvedValue(null);
     const { runtime } = makeRuntime({ findHivekeeperByEmailLocalPart, findAgentByName });
 
-    await expect(resolveAgentReference('ghost@admin.cotalker', runtime)).rejects.toSatisfy(
+    await expect(resolveAgentReference('ghost@admin.test-hive', runtime)).rejects.toSatisfy(
       (err: unknown) => {
         expect(err).toBeInstanceOf(AuthError);
         const e = err as AuthError;

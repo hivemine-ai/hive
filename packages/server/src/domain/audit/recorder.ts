@@ -65,11 +65,16 @@ export interface RecorderDeps {
   /** Override id generator for tests. Defaults to `uuidv7`. */
   idGen?: () => string;
   /**
-   * Best-effort post-commit hook fired AFTER each successful audit insert. Used
-   * by the composition root to refresh the status snapshot sidecar (per
-   * [[ADR-022]]). Failures are logged + swallowed — never propagated to the
-   * caller. Wired both from the visibility engine factory (denial chokepoint)
-   * and from the CLI runtime factory (admin-op chokepoint).
+   * Best-effort post-commit hook. Fired ONCE per successful `recordEvent` and
+   * ONCE per successful `recordEventBatch` (event = last of batch). Used by the
+   * composition root to refresh the status snapshot sidecar (per [[ADR-022]]).
+   * Failures are logged + swallowed — never propagated to the caller. Wired
+   * both from the visibility engine factory (denial chokepoint) and from the
+   * CLI runtime factory (admin-op chokepoint). Coalesced batch dispatch (1×
+   * regardless of N events) added in PRY-053 — snapshot semantics are eventual-
+   * consistent and the snapshot writer ignores the event payload, so the
+   * representative-event approach preserves API compatibility while avoiding N
+   * sequential snapshot writes per batch.
    */
   onAfterRecord?: (event: NewAuditEvent) => void | Promise<void>;
 }
@@ -257,7 +262,9 @@ export function createAuditRecorder(
           'audit event recorded',
         );
       }
-      for (const e of events) await fireAfterRecord(e);
+      // Coalesce: 1× hook invocation per batch (event = last of batch). The
+      // empty-batch case is filtered above so the non-null assertion is safe.
+      await fireAfterRecord(events[events.length - 1]!);
     },
   };
 }

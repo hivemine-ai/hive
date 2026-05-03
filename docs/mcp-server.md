@@ -90,7 +90,7 @@ Tools that accept a recipient (`send_message`, `get_agent_status`) or a sender f
 | Hivekeeper email | `admin@example.com`            | The Hivekeeper in the caller's hive whose email matches case-insensitively.                                                                   |
 | Agent reference  | `<agent>@<owner-local>.<hive>` | The agent named `<agent>` owned by the Hivekeeper whose email local-part is `<owner-local>`, where `<hive>` matches the caller's `hive.name`. |
 
-**Agent reference grammar (single `@`):** `<agent-name>@<owner-email-local>.<hive-name>` — for example, `worker-test@leonardo.olivares.cotalker` means "the agent `worker-test` owned by the Hivekeeper whose email starts with `leonardo.olivares@…`, in the hive `cotalker`". The trailing `.<hive-name>` is what disambiguates an agent reference from a Hivekeeper email; it must match the caller's hive name. Local-part chars are restricted to `[A-Za-z0-9._-]`.
+**Agent reference grammar (single `@`):** `<agent-name>@<owner-email-local>.<hive-name>` — for example, `worker-test@leonardo.olivares.test-hive` means "the agent `worker-test` owned by the Hivekeeper whose email starts with `leonardo.olivares@…`, in the hive `test-hive`". The trailing `.<hive-name>` is what disambiguates an agent reference from a Hivekeeper email; it must match the caller's hive name. Local-part chars are restricted to `[A-Za-z0-9._-]`.
 
 > **Operator convention.** Pick a `hive.name` that does NOT collide with a real TLD (e.g. avoid `com`, `net`). A Hivekeeper email whose domain happens to end in `.<hive-name>` would otherwise be parsed as an agent reference.
 

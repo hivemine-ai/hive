@@ -130,7 +130,7 @@ describe('resolveParticipantReference — happy paths', () => {
       findHivekeeperByEmail: vi.fn().mockResolvedValue(hivekeeper),
     });
     const resolver = createReferenceResolver({ participantsRepo: repo });
-    const identity = makeIdentity({ hiveName: 'cotalker' });
+    const identity = makeIdentity({ hiveName: 'test-hive' });
 
     const result = await resolver.resolveParticipantReference('keeper@example.com', identity);
 
@@ -252,7 +252,7 @@ describe('resolveParticipantReference — happy paths', () => {
       findHivekeeperByEmail: vi.fn().mockResolvedValue(hivekeeper),
     });
     const resolver = createReferenceResolver({ participantsRepo: repo });
-    const identity = makeIdentity({ hiveName: 'cotalker' });
+    const identity = makeIdentity({ hiveName: 'test-hive' });
 
     const result = await resolver.resolveParticipantReference('bob@example.com', identity);
 
@@ -453,7 +453,7 @@ describe('resolveCredentialActiveReference', () => {
       participantsRepo: repo,
       credentialsRepo,
     });
-    const identity = makeIdentity({ hiveName: 'cotalker' });
+    const identity = makeIdentity({ hiveName: 'test-hive' });
 
     const result = await resolver.resolveCredentialActiveReference(
       'admin@example.com:latest',

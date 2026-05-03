@@ -10,7 +10,7 @@ import { getCliCallerContext } from './caller-context.js';
 function makeRuntime(overrides?: Partial<CliRuntime>): CliRuntime {
   const base = {
     hiveStableIdentifier: '019de8c4-b3c3-7279-a2ee-09424384da11',
-    hiveName: 'cotalker',
+    hiveName: 'test-hive',
     ...overrides,
   };
   return base as unknown as CliRuntime;
@@ -22,7 +22,7 @@ describe('getCliCallerContext', () => {
     const ctx = getCliCallerContext(runtime);
     expect(ctx).toEqual({
       hiveId: '019de8c4-b3c3-7279-a2ee-09424384da11',
-      hiveName: 'cotalker',
+      hiveName: 'test-hive',
     });
   });
 
