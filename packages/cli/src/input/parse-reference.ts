@@ -32,7 +32,7 @@
 import { AuthError, parseReference, type ParsedReference } from '@hive/server';
 import type { CliRuntime, UUIDv7 } from '@hive/server';
 
-import { getCliCallerContext } from '../composition/caller-context.js';
+import { getCliCallerContext } from '#composition/caller-context.js';
 import { CliError } from '#error/cli-error.js';
 
 export type { ParsedReference };

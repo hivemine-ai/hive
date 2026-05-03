@@ -10,7 +10,7 @@ import type { Command } from 'commander';
 import { mapErrorToExit } from '#error/handler.js';
 import { detectPlatform, getDefaultMacLogPaths } from '#platform/detect.js';
 
-import type { NetworkMode } from '../config/network.js';
+import type { NetworkMode } from '#commands/config/network.js';
 
 import { renderInstallSuccess, runServiceInstall } from './install.js';
 import { runServiceLifecycle } from './lifecycle.js';

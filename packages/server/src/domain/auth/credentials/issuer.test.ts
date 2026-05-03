@@ -4,7 +4,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { destroyWorld, markAgentRevoked, seedWorld, type SeedWorld } from '../test-helpers.js';
 import { isAuthError } from '../errors.js';
 import type { AuthError } from '../errors.js';
-import { createParticipantsReadRepo } from '../participants/repository.js';
+import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
 import { createIssuer } from './issuer.js';
 import { createVerifier } from './verifier.js';
 import { loadBlocklist } from './blocklist.js';

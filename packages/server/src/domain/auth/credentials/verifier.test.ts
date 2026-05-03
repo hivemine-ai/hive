@@ -11,8 +11,8 @@ import {
 } from '../test-helpers.js';
 import { isAuthError } from '../errors.js';
 import type { AuthError, AuthErrorCode } from '../errors.js';
-import { generateKeypair } from '../keys/keypair-store.js';
-import { createParticipantsReadRepo } from '../participants/repository.js';
+import { generateKeypair } from '#domain/auth/keys/keypair-store.js';
+import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
 import { loadBlocklist } from './blocklist.js';
 import { createIssuer } from './issuer.js';
 import { createVerifier } from './verifier.js';

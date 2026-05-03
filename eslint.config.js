@@ -1,13 +1,14 @@
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
+import noCrossModuleRelative from './eslint-rules/no-cross-module-relative.js';
 import noSpanishLeakage from './eslint-rules/no-spanish-leakage.js';
 
-// Local plugin bundle. Houses repo-specific rules — currently only the
-// Spanish-leakage guard (per ADR-014). Add new rules here as they are
-// authored in `eslint-rules/`.
+// Local plugin bundle. Houses repo-specific rules. Add new rules here
+// as they are authored in `eslint-rules/`.
 const hiveLocal = {
   rules: {
+    'no-cross-module-relative': noCrossModuleRelative,
     'no-spanish-leakage': noSpanishLeakage,
   },
 };
@@ -64,6 +65,18 @@ export default tseslint.config(
       // with `// eslint-disable-next-line hive-local/no-spanish-leakage`
       // when the case is legitimate (eg. textually quoted vault spec name).
       'hive-local/no-spanish-leakage': 'error',
+      // Cross-module relative import guard per PRY-046. The built-in
+      // `no-restricted-imports` above blocks `'../../...'` (2+ levels)
+      // but permits `'../subdir/file.js'` (single-level cross-module),
+      // which leaves the dual-module bundling pitfall open: when the
+      // same file is imported via mixed specifier styles (relative +
+      // alias) across the package, esbuild bundles it twice and
+      // `instanceof` fails cross-boundary in the SEA output. This
+      // custom rule closes the gap with auto-fix when the matching
+      // `#alias/*` is declared, and emits a self-explanatory error
+      // (with the exact entry to add to `package.json#imports`) when
+      // it isn't. See ADR-009 + lessons-pry §Tooling (PRY-040, PRY-045).
+      'hive-local/no-cross-module-relative': 'error',
     },
   },
 );

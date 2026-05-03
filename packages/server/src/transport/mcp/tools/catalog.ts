@@ -52,9 +52,9 @@ import {
   createSendMessageHandler,
   type SendMessageDeps,
 } from './send-message.js';
-import type { AgentConfigView } from '../views/agent-config-view.js';
-import type { AgentListView } from '../views/agent-list-view.js';
-import type { ReadMailboxWireOutput } from '../views/message-view-wire.js';
+import type { AgentConfigView } from '#transport/mcp/views/agent-config-view.js';
+import type { AgentListView } from '#transport/mcp/views/agent-list-view.js';
+import type { ReadMailboxWireOutput } from '#transport/mcp/views/message-view-wire.js';
 
 export type ToolName =
   | 'get_agent_config'

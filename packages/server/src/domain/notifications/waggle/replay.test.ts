@@ -8,7 +8,7 @@ import type { ParticipantsReadRepo } from '#domain/auth/index.js';
 import type { Cell, CellsRepo } from '#domain/cells/index.js';
 import type { Logger } from '#observability/logger.js';
 
-import type { SubscriberHandle } from '../presence/subscriber-handle.js';
+import type { SubscriberHandle } from '#domain/notifications/presence/subscriber-handle.js';
 import type { WaggleNotification } from './types.js';
 
 import { createReplay } from './replay.js';

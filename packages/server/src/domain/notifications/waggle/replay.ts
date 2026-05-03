@@ -9,7 +9,7 @@ import type { Logger } from '#observability/logger.js';
 import type { CellsRepo } from '#domain/cells/index.js';
 import type { ParticipantsReadRepo } from '#domain/auth/index.js';
 
-import type { SubscriberHandle } from '../presence/subscriber-handle.js';
+import type { SubscriberHandle } from '#domain/notifications/presence/subscriber-handle.js';
 
 import type { Builder } from './builder.js';
 

@@ -16,7 +16,7 @@
 import { buildWire, createLogger } from '@hive/server';
 import type { LoggerOptions, Wire, WireConfig } from '@hive/server';
 
-import { getDefaultConfigPath } from '../platform/detect.js';
+import { getDefaultConfigPath } from '#platform/detect.js';
 
 import { readConfigFile, resolveHttpHost } from './config/loader.js';
 import type { PersistedConfig } from './config/loader.js';

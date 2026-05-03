@@ -4,7 +4,7 @@
 
 import type { Logger } from '@hive/server';
 
-import { EXIT_INTERNAL } from '../error/exit-codes.js';
+import { EXIT_INTERNAL } from '#error/exit-codes.js';
 
 let abortController: AbortController = new AbortController();
 let installed = false;

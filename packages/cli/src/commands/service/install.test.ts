@@ -9,7 +9,7 @@ import { CliError } from '#error/cli-error.js';
 
 import type { ProcessResult, ProcessRunner } from './exec.js';
 import { renderInstallSuccess, runServiceInstall } from './install.js';
-import { readConfigFile } from '../config/loader.js';
+import { readConfigFile } from '#commands/config/loader.js';
 
 let workDir: string;
 let stdoutBuf: string[];

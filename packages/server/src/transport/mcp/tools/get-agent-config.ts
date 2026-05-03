@@ -4,7 +4,7 @@ import { CellError } from '#domain/cells/index.js';
 import type { ParticipantsReadRepo } from '#domain/auth/index.js';
 
 import type { RequestContext } from '../types.js';
-import { adaptAgentConfig, type AgentConfigView } from '../views/agent-config-view.js';
+import { adaptAgentConfig, type AgentConfigView } from '#transport/mcp/views/agent-config-view.js';
 
 export const GetAgentConfigInputSchema = z.object({}).strict();
 export type GetAgentConfigInput = z.infer<typeof GetAgentConfigInputSchema>;
