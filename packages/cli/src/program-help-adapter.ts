@@ -233,9 +233,23 @@ export function buildSubgroupHelpInput(
 /**
  * Extract the inline argument cluster from a commander subcommand,
  * e.g. `[--user|--system]` shown next to `install` in `hivectl service
- * --help`. Today commander does not expose a clean primitive for this —
- * the convention is to attach it via help metadata when needed; this
- * helper exists so the adapter signature is uniform.
+ * --help`. **Currently always returns the empty string.**
+ *
+ * The renderer (`output/help.ts`) supports a per-row `args` field on
+ * `CommandSummary` and the byte-identical fixture in `help.test.ts`
+ * exercises it, but the integration path (adapter → renderer) does NOT
+ * surface inline args today. `HelpMetadata` has no `args` field and
+ * commander does not expose a clean primitive for the operator-facing
+ * arg cluster (its `Argument` API targets positional-arg parsing, not
+ * help-screen display strings). The PR-50 design HTML reference shows
+ * `[--user|--system]` next to `service install`; that bit of polish is
+ * deliberately deferred — closing it cleanly requires extending
+ * `HelpMetadata` with a `verbArgs?: Record<string, string>` map and
+ * threading it through this helper. Tracked as a follow-up nice-to-have
+ * in PRY-050 § Nice-to-have diferidos.
+ *
+ * The empty return preserves the current adapter signature uniformly
+ * across all subcommands so no caller branches on its presence.
  */
 function formatSubcommandArgs(_sub: Command): string {
   return '';

@@ -230,20 +230,33 @@ function renderEcho(invocation: string): string {
   // ends and the flags/positional begin without parsing, we apply
   // `c.cmd` to the full echoed text — chalk just colours the whole
   // sequence honey, matching the visual design weight.
-  return `${c.prompt(sym.prompt)} ${c.cmd(invocation)}`;
+  // Width-invariant guard: prompt glyph + space = 2 visible cols; the
+  // `truncate` budget for the invocation text is therefore 98.
+  const safeInvocation = truncate(invocation, HELP_MAX_WIDTH - 2);
+  return `${c.prompt(sym.prompt)} ${c.cmd(safeInvocation)}`;
 }
 
 function renderTitleBlock(programLabel: string, tagline: string, description: string): string {
   // Title block: 2-space indent + brand glyph + program label + ` · ` +
   // tagline; continuation line indented 4 spaces with the multi-word
   // description in `c.muted`.
-  const titleLine = `${SECTION_INDENT}${c.brand(sym.hex)} ${c.cmd(programLabel)} ${c.muted('·')} ${tagline}`;
-  const descLine = `${ROW_INDENT}${c.muted(description)}`;
+  // Width-invariant guard: title prefix is `<2 indent><1 hex glyph>
+  // <1 space><label><1 space><1 ·><1 space>` = 7 + label visible chars;
+  // truncate the tagline to fit. Description line is `<4 indent>` + the
+  // body, truncated to 96.
+  const titlePrefixCols = SECTION_INDENT.length + 1 + 1 + programLabel.length + 1 + 1 + 1;
+  const safeTagline = truncate(tagline, Math.max(0, HELP_MAX_WIDTH - titlePrefixCols));
+  const titleLine = `${SECTION_INDENT}${c.brand(sym.hex)} ${c.cmd(programLabel)} ${c.muted('·')} ${safeTagline}`;
+  const safeDescription = truncate(description, HELP_MAX_WIDTH - ROW_INDENT.length);
+  const descLine = `${ROW_INDENT}${c.muted(safeDescription)}`;
   return `${titleLine}\n${descLine}`;
 }
 
 function renderUsage(usage: string): string {
-  return [`${SECTION_INDENT}${c.head('usage')}`, `${ROW_INDENT}${c.cmd(usage)}`].join('\n');
+  // Width-invariant guard: row indent is 4 cols; truncate the usage
+  // text to fit within `HELP_MAX_WIDTH - 4` visible cols.
+  const safeUsage = truncate(usage, HELP_MAX_WIDTH - ROW_INDENT.length);
+  return [`${SECTION_INDENT}${c.head('usage')}`, `${ROW_INDENT}${c.cmd(safeUsage)}`].join('\n');
 }
 
 function renderGroup(group: CommandGroup): string {
@@ -272,11 +285,22 @@ function renderGlobalOptions(options: ReadonlyArray<OptionSummary>): string {
 function renderExamples(examples: ReadonlyArray<ExampleEntry>): string {
   const heading = `${SECTION_INDENT}${c.head('examples')}`;
   const blocks: string[] = [];
+  // Width-invariant guards:
+  //   - comment prefix: `<4 indent>` + `# ` (2 cols) = 6 cols → budget 94
+  //   - cmdLine prefix: `<4 indent>` + `<1 prompt glyph>` + `<1 space>` = 6 cols → budget 94
+  // Any example longer than the budget gets truncated to fit; the design
+  // system's curated examples in `program.ts` are well under this limit
+  // but the guard makes the contract structural rather than caller-
+  // discipline-dependent.
+  const COMMENT_PREFIX_COLS = ROW_INDENT.length + '# '.length;
+  const CMD_PREFIX_COLS = ROW_INDENT.length + 1 + 1;
   for (let i = 0; i < examples.length; i += 1) {
     const ex = examples[i];
     if (ex === undefined) continue;
-    const comment = `${ROW_INDENT}${c.muted(`# ${ex.comment}`)}`;
-    const cmdLine = `${ROW_INDENT}${c.prompt(sym.prompt)} ${c.cmd(ex.command)}`;
+    const safeComment = truncate(ex.comment, Math.max(0, HELP_MAX_WIDTH - COMMENT_PREFIX_COLS));
+    const safeCommand = truncate(ex.command, Math.max(0, HELP_MAX_WIDTH - CMD_PREFIX_COLS));
+    const comment = `${ROW_INDENT}${c.muted(`# ${safeComment}`)}`;
+    const cmdLine = `${ROW_INDENT}${c.prompt(sym.prompt)} ${c.cmd(safeCommand)}`;
     blocks.push(`${comment}\n${cmdLine}`);
   }
   return [heading, blocks.join('\n\n')].join('\n');
