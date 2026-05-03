@@ -5,18 +5,33 @@
 //
 // Per the hivectl + Admin Operations tech spec § "serve + service group":
 //   - Foreground process. Blocks until SIGINT/SIGTERM.
-//   - Logs to stdout/stderr — JSON by default; pretty only if `--log-pretty`
-//     or `HIVE_MCP_LOG_PRETTY=true`.
+//   - Output: 3-phase formatted output by default (boot banner → readiness
+//     line → live log stream via the inline pretty formatter from
+//     `output/log-formatter.ts`). Operators opt out into raw JSON via
+//     `--output=json` (global flag) or `HIVE_MCP_LOG_PRETTY=false`.
 //   - No daemonize, no PID file (delegate-to-OS — systemd / launchd via PRY-032).
 //   - Flag precedence: flag > env > default. Flags map to a `WireConfig`
 //     override + `LoggerOptions` fed directly to `buildWire` and `createLogger`
 //     (env vars are read inside `resolveWireConfigFromEnv` for the unset
 //     fields). `process.env` is never mutated on the production path.
+//
+// Implements PRY-051 (Slice 4 of the hivectl Output Layer cascade per
+// [[hivectl Output Layer + Status Snapshot]]).
 
 import { buildWire, createLogger } from '@hive/server';
 import type { LoggerOptions, Wire, WireConfig } from '@hive/server';
+import type { DestinationStream } from 'pino';
 
 import { getDefaultConfigPath } from '#platform/detect.js';
+import { c } from '#output/colors.js';
+import { compact as bannerCompact } from '#output/banner.js';
+import { sym } from '#output/symbols.js';
+import {
+  determineModulePathPadding,
+  formatLogLine,
+  type FormatPadding,
+} from '#output/log-formatter.js';
+import { readSnapshot } from '#state/snapshot.js';
 
 import { readConfigFile, resolveHttpHost } from './config/loader.js';
 import type { PersistedConfig } from './config/loader.js';
@@ -28,6 +43,12 @@ export interface ServeCommandOpts {
   host: string | undefined;
   logLevel: LogLevel | undefined;
   logPretty: boolean | undefined;
+  /**
+   * Global `--output` value forwarded from program.ts. When `'json'`, the
+   * 3-phase formatted output is suppressed and pino emits raw JSON to stdout
+   * (log-shipper friendly, byte-stable across versions).
+   */
+  output?: string | undefined;
 }
 
 const VALID_LOG_LEVELS: ReadonlySet<LogLevel> = new Set([
@@ -70,14 +91,14 @@ export function resolveServeOverrides(
   if (resolvedLevel !== undefined) {
     logger.level = resolvedLevel as LogLevel | 'silent';
   }
-  // pino-pretty defaults to ON when NODE_ENV !== 'production' inside
-  // createLogger. Match the legacy `packages/server/src/main.ts` behaviour:
-  // ALWAYS resolve to an explicit boolean here so JSON-only deployments
-  // (CI smoke jobs, journald-piped systemd units) get JSON unless the
-  // operator opts in with --log-pretty or HIVE_MCP_LOG_PRETTY=true.
-  const prettyFlag = opts.logPretty;
-  const prettyEnv = env['HIVE_MCP_LOG_PRETTY'];
-  logger.pretty = prettyFlag ?? prettyEnv === 'true';
+  // Pre-PRY-051 the `pretty` field routed pino through pino-pretty (worker
+  // thread). Post-PRY-051 the inline formatter is the prettifier and pino
+  // is always pointed at our DestinationStream when in formatted mode, so
+  // `logger.pretty` is set to false unconditionally here — the legacy
+  // `--log-pretty` flag and `HIVE_MCP_LOG_PRETTY=true` are no-ops kept for
+  // backward compat (so old launch scripts don't error). The new opt-out
+  // is `--output=json` or `HIVE_MCP_LOG_PRETTY=false` (handled in runServe).
+  logger.pretty = false;
   return { wire, logger };
 }
 
@@ -96,6 +117,89 @@ export function parseLogLevel(raw: string | undefined): LogLevel | undefined {
     );
   }
   return raw as LogLevel;
+}
+
+/**
+ * JSON mode is triggered by either:
+ *   - `--output=json` (global flag, forwarded via `opts.output`)
+ *   - `HIVE_MCP_LOG_PRETTY=false` (legacy env opt-out, preserved for
+ *     log-shipper deployments scripted against prior versions)
+ *
+ * In JSON mode, the 3-phase formatted output is suppressed entirely:
+ *   - No boot banner (operators piping to jq want only valid JSON lines).
+ *   - No readiness line.
+ *   - Pino writes raw JSON directly to stdout (its default).
+ *
+ * Exported for unit testing.
+ */
+export function isJsonMode(opts: ServeCommandOpts, env: NodeJS.ProcessEnv): boolean {
+  if (opts.output === 'json') return true;
+  if (env['HIVE_MCP_LOG_PRETTY'] === 'false') return true;
+  return false;
+}
+
+/**
+ * Translates a database URL into the `<driver> · <location>` shape used in
+ * the boot sub-block. SQLite paths are surfaced verbatim; Postgres URLs
+ * have credentials stripped (mirrors the snapshot redaction from PRY-048).
+ *
+ * Exported for unit testing.
+ */
+export function formatDbLocation(rawUrl: string | undefined): string {
+  if (rawUrl === undefined || rawUrl.length === 0) {
+    return 'sqlite · ./var/db/hive.sqlite';
+  }
+  if (rawUrl.startsWith('sqlite:')) {
+    return `sqlite · ${rawUrl.slice('sqlite:'.length)}`;
+  }
+  if (rawUrl.startsWith('postgres://') || rawUrl.startsWith('postgresql://')) {
+    try {
+      const u = new URL(rawUrl);
+      const auth = u.username.length > 0 ? `${u.username}@` : '';
+      return `postgres · ${auth}${u.host}${u.pathname}`;
+    } catch {
+      return 'postgres · <redacted>';
+    }
+  }
+  return rawUrl;
+}
+
+export interface BootBannerInput {
+  hiveName: string | null;
+  bind: string;
+  database: string;
+  logLevel: string;
+}
+
+/**
+ * Renders the 3-line compact banner + the boot sub-block (`bind`, `database`,
+ * `log level`) followed by a blank line so the live log stream that comes
+ * next sits in its own visual band.
+ *
+ * Exported for unit testing.
+ */
+export function renderBootBanner(input: BootBannerInput): string {
+  const subtitle =
+    input.hiveName !== null && input.hiveName.length > 0
+      ? c.muted(`starting hive · ${input.hiveName}`)
+      : c.muted('starting hive');
+  const banner = bannerCompact(subtitle);
+  const labelWidth = 11; // 'log level' (9) + 2 breathing spaces — keeps columns aligned.
+  const subBlock = [
+    `  ${c.muted('bind'.padEnd(labelWidth))}${input.bind}`,
+    `  ${c.muted('database'.padEnd(labelWidth))}${input.database}`,
+    `  ${c.muted('log level'.padEnd(labelWidth))}${input.logLevel}`,
+  ].join('\n');
+  return `${banner}\n\n${subBlock}\n`;
+}
+
+/**
+ * Renders the readiness line (`⬡ ready · http://<bind>:<port>`).
+ *
+ * Exported for unit testing.
+ */
+export function renderReadiness(host: string, port: number): string {
+  return `\n  ${c.ok(sym.prompt)} ${c.ok('ready')} ${c.muted('·')} ${c.muted(`http://${host}:${String(port)}`)}\n`;
 }
 
 export interface SignalsProcess {
@@ -122,6 +226,37 @@ export interface RunServeDeps {
   configPath?: string;
   /** Test seam: replace the config-file reader. */
   readConfigFileFn?: (path: string) => PersistedConfig | null;
+  /**
+   * Test seam: replace the snapshot reader (used to fetch hive name for the
+   * boot banner). Defaults to `readSnapshot` from `#state/snapshot.js`. Tests
+   * that don't care about the banner pass `() => Promise.resolve(null)`.
+   */
+  readSnapshotFn?: typeof readSnapshot;
+  /**
+   * Test seam: replace the stdout sink for banner + readiness writes. Defaults
+   * to `process.stdout.write`. Tests pass an array sink to capture the output
+   * for assertions without polluting the test runner's stdout.
+   */
+  outSink?: (line: string) => void;
+}
+
+function buildFormatterDest(
+  padding: FormatPadding,
+  sink: (line: string) => void,
+): DestinationStream {
+  return {
+    write(jsonLine: string): void {
+      const trimmed = jsonLine.endsWith('\n') ? jsonLine.slice(0, -1) : jsonLine;
+      try {
+        const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+        sink(`${formatLogLine(parsed, padding)}\n`);
+      } catch {
+        // Pass through anything we can't parse — keeps surprising lines
+        // visible to the operator instead of swallowing them silently.
+        sink(jsonLine);
+      }
+    },
+  };
 }
 
 /**
@@ -139,6 +274,12 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
   const buildWireFn = deps.buildWireFn ?? buildWire;
   const createLoggerFn = deps.createLoggerFn ?? createLogger;
   const readCfg = deps.readConfigFileFn ?? readConfigFile;
+  const readSnapshotFn = deps.readSnapshotFn ?? readSnapshot;
+  const outSink =
+    deps.outSink ??
+    ((line: string): void => {
+      process.stdout.write(line);
+    });
 
   let configFile: PersistedConfig | null = null;
   let configReadError: Error | null = null;
@@ -157,7 +298,35 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
   }
 
   const { wire: wireOverrides, logger: loggerOpts } = resolveServeOverrides(opts, env, configFile);
-  const logger = createLoggerFn(loggerOpts);
+  const jsonMode = isJsonMode(opts, env);
+
+  // Phase 1 — boot banner + sub-block. Suppressed in JSON mode so log
+  // shippers receive only valid JSON lines.
+  if (!jsonMode) {
+    let hiveName: string | null = null;
+    try {
+      const snap = await readSnapshotFn();
+      hiveName = snap?.hive?.name ?? null;
+    } catch {
+      // Snapshot missing or unreadable is not fatal for boot — the banner
+      // simply omits the hive-name suffix. The reader already swallows its
+      // own errors, but defensive catch keeps boot resilient even if a
+      // future change starts throwing.
+      hiveName = null;
+    }
+    const bind = `${wireOverrides.httpHost ?? '127.0.0.1'}:${wireOverrides.httpPort !== undefined ? String(wireOverrides.httpPort) : String(env['HIVE_MCP_HTTP_PORT'] ?? '7700')}`;
+    const database = formatDbLocation(env['HIVE_DB_URL']);
+    const logLevel = loggerOpts.level ?? env['HIVE_LOG_LEVEL'] ?? 'info';
+    outSink(renderBootBanner({ hiveName, bind, database, logLevel }));
+  }
+
+  // Phase 3 wiring (set up before logger creation so the formatter dest is
+  // attached from the very first log line).
+  const padding: FormatPadding = { modulePathWidth: determineModulePathPadding([]) };
+  const dest: DestinationStream | undefined = jsonMode
+    ? undefined
+    : buildFormatterDest(padding, outSink);
+  const logger = createLoggerFn(loggerOpts, dest);
 
   if (configReadError !== null) {
     logger.warn(
@@ -226,6 +395,17 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
     proc.exitCode = 1;
     proc.exit(1);
     return;
+  }
+
+  // Phase 2 — readiness line. Printed AFTER wire.start() resolves (HTTP
+  // listener bound + healthy) so the line appears below any boot logs and
+  // signals "the server is now answering requests". Suppressed in JSON mode.
+  if (!jsonMode) {
+    const boundPort = wire.port();
+    if (boundPort !== null) {
+      const host = wireOverrides.httpHost ?? '127.0.0.1';
+      outSink(renderReadiness(host, boundPort));
+    }
   }
 
   if (deps.onWireStarted !== undefined) {

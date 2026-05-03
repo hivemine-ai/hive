@@ -181,11 +181,18 @@ export function buildProgram(): BuildProgramResult {
         return;
       }
       const logPretty = cmdOpts['logPretty'] === true ? true : undefined;
+      // Forward the global --output value so runServe can decide JSON-mode
+      // (raw pino JSON, no banner, no readiness line) vs the default 3-phase
+      // formatted output (PRY-051). The global is parsed by commander into
+      // program.opts() — read it directly without forcing the lazy state
+      // builder so --help / --version remain logger-init-free.
+      const rootOutput = asOptionalString(program.opts<RootCliOpts>().output);
       await runServe({
         port,
         host: asOptionalString(cmdOpts['host']),
         logLevel,
         logPretty,
+        output: rootOutput,
       });
     });
 

@@ -11,7 +11,18 @@ import * as path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { parseLogLevel, resolveServeOverrides, runServe, type SignalsProcess } from './serve.js';
+import chalk from 'chalk';
+
+import {
+  formatDbLocation,
+  isJsonMode,
+  parseLogLevel,
+  renderBootBanner,
+  renderReadiness,
+  resolveServeOverrides,
+  runServe,
+  type SignalsProcess,
+} from './serve.js';
 import type { LogLevel, RunServeDeps, ServeCommandOpts } from './serve.js';
 import { runInit } from './init.js';
 import type { GlobalCliOpts } from '../types.js';
@@ -65,25 +76,29 @@ describe('PRY-031 — resolveServeOverrides (flag → wire/logger config precede
     expect(out.logger.level).toBe('warn');
   });
 
-  it('maps --log-pretty=true to logger.pretty=true', () => {
+  it('PRY-051: --log-pretty=true no longer routes pino-pretty (the inline formatter is default)', () => {
     const env: NodeJS.ProcessEnv = {};
     const out = resolveServeOverrides(
       { port: undefined, host: undefined, logLevel: undefined, logPretty: true },
       env,
     );
-    expect(out.logger.pretty).toBe(true);
+    // Post-PRY-051 the inline formatter is the prettifier; pino is always
+    // pointed at our DestinationStream when in formatted mode, so we never
+    // route through pino-pretty. The legacy flag is preserved (so old launch
+    // scripts don't error) but is a no-op.
+    expect(out.logger.pretty).toBe(false);
   });
 
-  it('parses HIVE_MCP_LOG_PRETTY env var ("true" → true) when flag is omitted', () => {
+  it('PRY-051: HIVE_MCP_LOG_PRETTY=true is a no-op alias (formatter is default)', () => {
     const env: NodeJS.ProcessEnv = { HIVE_MCP_LOG_PRETTY: 'true' };
     const out = resolveServeOverrides(
       { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
       env,
     );
-    expect(out.logger.pretty).toBe(true);
+    expect(out.logger.pretty).toBe(false);
   });
 
-  it('defaults logger.pretty=false when neither flag nor env is set (JSON output)', () => {
+  it('defaults logger.pretty=false when neither flag nor env is set (formatter is default)', () => {
     const env: NodeJS.ProcessEnv = {};
     const out = resolveServeOverrides(
       { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
@@ -92,9 +107,9 @@ describe('PRY-031 — resolveServeOverrides (flag → wire/logger config precede
     // Per PRY-032: httpHost defaults to 127.0.0.1 (local-only, closes
     // INC-2026-001 FLAG-005). Other fields stay unset.
     expect(out.wire).toEqual({ httpHost: '127.0.0.1' });
-    // pretty MUST resolve to an explicit boolean — matches the legacy
-    // packages/server/src/main.ts behaviour so journald/CI deployments get
-    // JSON unless the operator opts in.
+    // pretty MUST resolve to an explicit boolean — post-PRY-051 it is always
+    // false (the inline formatter is the prettifier; pino doesn't route
+    // through pino-pretty anymore from the CLI path).
     expect(out.logger.pretty).toBe(false);
     expect(out.logger.level).toBeUndefined();
   });
@@ -408,5 +423,523 @@ describe('PRY-031 — runServe failure paths', () => {
         (l as { event?: string }).event === 'wire_start_failed',
     );
     expect(startEvents).toHaveLength(1);
+  });
+});
+
+describe('PRY-051 — isJsonMode', () => {
+  it('returns true when --output=json (global flag forwarded)', () => {
+    expect(
+      isJsonMode(
+        {
+          port: undefined,
+          host: undefined,
+          logLevel: undefined,
+          logPretty: undefined,
+          output: 'json',
+        },
+        {},
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true when HIVE_MCP_LOG_PRETTY=false (legacy log-shipper opt-out)', () => {
+    expect(
+      isJsonMode(
+        { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+        { HIVE_MCP_LOG_PRETTY: 'false' },
+      ),
+    ).toBe(true);
+  });
+
+  it('returns false when --output is unset (formatted is default)', () => {
+    expect(
+      isJsonMode(
+        { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+        {},
+      ),
+    ).toBe(false);
+  });
+
+  it('returns false when --output=table (treated as formatted, not JSON)', () => {
+    expect(
+      isJsonMode(
+        {
+          port: undefined,
+          host: undefined,
+          logLevel: undefined,
+          logPretty: undefined,
+          output: 'table',
+        },
+        {},
+      ),
+    ).toBe(false);
+  });
+
+  it('returns false when --output=yaml (no JSON-mode behaviour for yaml; serve formats anyway)', () => {
+    expect(
+      isJsonMode(
+        {
+          port: undefined,
+          host: undefined,
+          logLevel: undefined,
+          logPretty: undefined,
+          output: 'yaml',
+        },
+        {},
+      ),
+    ).toBe(false);
+  });
+
+  it('returns false when HIVE_MCP_LOG_PRETTY=true (legacy alias, no-op post-PRY-051)', () => {
+    expect(
+      isJsonMode(
+        { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+        { HIVE_MCP_LOG_PRETTY: 'true' },
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('PRY-051 — formatDbLocation', () => {
+  it('shows the SQLite path verbatim (the cli default)', () => {
+    expect(formatDbLocation('sqlite:./var/db/hive.sqlite')).toBe('sqlite · ./var/db/hive.sqlite');
+  });
+
+  it('strips Postgres credentials before rendering host/database', () => {
+    expect(formatDbLocation('postgres://hive:secret@db.example.com:5432/hivedb')).toBe(
+      'postgres · hive@db.example.com:5432/hivedb',
+    );
+  });
+
+  it('handles postgresql:// scheme variant', () => {
+    expect(formatDbLocation('postgresql://hive:secret@db:5432/hivedb')).toBe(
+      'postgres · hive@db:5432/hivedb',
+    );
+  });
+
+  it('renders postgres without auth when no credentials present', () => {
+    expect(formatDbLocation('postgres://db:5432/hivedb')).toBe('postgres · db:5432/hivedb');
+  });
+
+  it('falls back to "<redacted>" when the postgres URL is unparseable', () => {
+    expect(formatDbLocation('postgres://malformed url with spaces')).toBe('postgres · <redacted>');
+  });
+
+  it('falls back to the SQLite default when env var is undefined', () => {
+    expect(formatDbLocation(undefined)).toBe('sqlite · ./var/db/hive.sqlite');
+  });
+
+  it('falls back to the SQLite default when env var is empty', () => {
+    expect(formatDbLocation('')).toBe('sqlite · ./var/db/hive.sqlite');
+  });
+});
+
+describe('PRY-051 — renderBootBanner / renderReadiness (NO_COLOR byte-stable)', () => {
+  const previousLevel = chalk.level;
+  beforeEach(() => {
+    chalk.level = 0;
+  });
+  afterEach(() => {
+    chalk.level = previousLevel;
+  });
+
+  it('renders the compact banner + sub-block with hive name when known', () => {
+    const out = renderBootBanner({
+      hiveName: 'my-hive',
+      bind: '127.0.0.1:7700',
+      database: 'sqlite · ./var/db/hive.sqlite',
+      logLevel: 'info',
+    });
+    // Banner first 3 lines (compact shape) + blank + 3 sub-block lines + trailing newline.
+    const lines = out.split('\n');
+    expect(lines).toHaveLength(8); // 3 banner + 1 blank + 3 sub-block + trailing ''
+    expect(lines[2]).toContain('starting hive · my-hive');
+    expect(lines[3]).toBe('');
+    expect(lines[4]).toBe('  bind       127.0.0.1:7700');
+    expect(lines[5]).toBe('  database   sqlite · ./var/db/hive.sqlite');
+    expect(lines[6]).toBe('  log level  info');
+    expect(lines[7]).toBe('');
+  });
+
+  it('omits the hive-name suffix when snapshot is missing', () => {
+    const out = renderBootBanner({
+      hiveName: null,
+      bind: '127.0.0.1:7700',
+      database: 'sqlite · ./var/db/hive.sqlite',
+      logLevel: 'info',
+    });
+    const lines = out.split('\n');
+    expect(lines[2]).toContain('starting hive');
+    expect(lines[2]).not.toContain('starting hive ·');
+  });
+
+  it('omits the hive-name suffix when snapshot returns empty hive name', () => {
+    const out = renderBootBanner({
+      hiveName: '',
+      bind: '127.0.0.1:7700',
+      database: 'sqlite · ./var/db/hive.sqlite',
+      logLevel: 'info',
+    });
+    const lines = out.split('\n');
+    expect(lines[2]).toContain('starting hive');
+    expect(lines[2]).not.toContain('starting hive ·');
+  });
+
+  it('renders the readiness line with the prompt glyph + bind url', () => {
+    const out = renderReadiness('127.0.0.1', 7700);
+    // Leading newline (visual band separator) + 2-space indent + glyph + body + trailing newline.
+    expect(out).toBe('\n  ⬡ ready · http://127.0.0.1:7700\n');
+  });
+
+  it('renders ipv6 addresses without bracket-wrapping (operator-supplied bind is verbatim)', () => {
+    const out = renderReadiness('::1', 7700);
+    expect(out).toBe('\n  ⬡ ready · http://::1:7700\n');
+  });
+});
+
+describe('PRY-051 — runServe 3-phase output (formatted mode)', () => {
+  const previousLevel = chalk.level;
+  beforeEach(() => {
+    chalk.level = 0; // byte-stable assertions across CI/dev terminals.
+  });
+  afterEach(() => {
+    chalk.level = previousLevel;
+  });
+
+  it('writes boot banner pre-build and readiness line post-start (formatted mode)', async () => {
+    const sink: string[] = [];
+    let exitCalls = 0;
+    const fakeProc: SignalsProcess = {
+      on() {
+        return undefined;
+      },
+      exit() {
+        exitCalls += 1;
+      },
+    };
+    const handlers: Partial<Record<'SIGTERM' | 'SIGINT', () => void>> = {};
+    const fakeWire = {
+      start: (): Promise<void> => Promise.resolve(),
+      stop: (): Promise<void> => Promise.resolve(),
+      port: (): number | null => 7700,
+      _httpHost: (): never => {
+        throw new Error('test stub');
+      },
+      _cellEvents: (): never => {
+        throw new Error('test stub');
+      },
+    };
+    const fakeLogger = makeLoggerStub([]);
+    fakeProc.on = (event, listener) => {
+      handlers[event] = listener;
+      return undefined;
+    };
+
+    const runPromise = runServe(
+      { port: undefined, host: '127.0.0.1', logLevel: undefined, logPretty: undefined },
+      {
+        proc: fakeProc,
+        outSink: (line) => {
+          sink.push(line);
+        },
+        createLoggerFn: ((): typeof fakeLogger => fakeLogger) as unknown as NonNullable<
+          RunServeDeps['createLoggerFn']
+        >,
+        buildWireFn: ((): Promise<typeof fakeWire> =>
+          Promise.resolve(fakeWire)) as unknown as NonNullable<RunServeDeps['buildWireFn']>,
+        readConfigFileFn: () => null,
+        readSnapshotFn: () =>
+          Promise.resolve({
+            v: 1,
+            writtenAt: '2026-05-03T00:00:00.000Z',
+            heartbeatSeconds: 30,
+            hive: { name: 'serve-smoke', colonies: 1, keepers: 1, agents: 1 },
+            server: null,
+            database: { driver: 'sqlite', location: './var/db/hive.sqlite' },
+            lastAudit: null,
+          }),
+      },
+    );
+
+    // Yield to the event loop so the boot banner + onWireStarted fire.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // Trigger graceful shutdown so the indefinite-block promise resolves
+    // (test path — fakeProc.exit returns rather than terminating).
+    handlers.SIGINT?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(exitCalls).toBeGreaterThanOrEqual(1);
+    void runPromise;
+
+    // Sink should contain banner block (1st write) + readiness line.
+    const concatenated = sink.join('');
+    expect(concatenated).toContain('starting hive · serve-smoke');
+    expect(concatenated).toContain('  bind       127.0.0.1:');
+    expect(concatenated).toContain('  ⬡ ready · http://127.0.0.1:7700');
+  });
+
+  it('JSON mode emits NO banner, NO readiness, NO formatter wrapping', async () => {
+    const sink: string[] = [];
+    let exitCalls = 0;
+    const fakeProc: SignalsProcess = {
+      on() {
+        return undefined;
+      },
+      exit() {
+        exitCalls += 1;
+      },
+    };
+    const handlers: Partial<Record<'SIGTERM' | 'SIGINT', () => void>> = {};
+    const fakeWire = {
+      start: (): Promise<void> => Promise.resolve(),
+      stop: (): Promise<void> => Promise.resolve(),
+      port: (): number | null => 7700,
+      _httpHost: (): never => {
+        throw new Error('test stub');
+      },
+      _cellEvents: (): never => {
+        throw new Error('test stub');
+      },
+    };
+    let createLoggerCallDest: unknown = 'unset';
+    const fakeLogger = makeLoggerStub([]);
+    fakeProc.on = (event, listener) => {
+      handlers[event] = listener;
+      return undefined;
+    };
+
+    const runPromise = runServe(
+      {
+        port: undefined,
+        host: '127.0.0.1',
+        logLevel: undefined,
+        logPretty: undefined,
+        output: 'json',
+      },
+      {
+        proc: fakeProc,
+        outSink: (line) => {
+          sink.push(line);
+        },
+        createLoggerFn: ((_opts: unknown, dest: unknown): typeof fakeLogger => {
+          createLoggerCallDest = dest;
+          return fakeLogger;
+        }) as unknown as NonNullable<RunServeDeps['createLoggerFn']>,
+        buildWireFn: ((): Promise<typeof fakeWire> =>
+          Promise.resolve(fakeWire)) as unknown as NonNullable<RunServeDeps['buildWireFn']>,
+        readConfigFileFn: () => null,
+        readSnapshotFn: () => Promise.resolve(null),
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    handlers.SIGINT?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(exitCalls).toBeGreaterThanOrEqual(1);
+    void runPromise;
+
+    // No banner, no readiness — sink stays empty.
+    expect(sink).toEqual([]);
+    // createLogger was called with `dest === undefined` so pino emits raw
+    // JSON via its default destination (process.stdout).
+    expect(createLoggerCallDest).toBeUndefined();
+  });
+
+  it('HIVE_MCP_LOG_PRETTY=false env triggers JSON mode (legacy alias preserved)', async () => {
+    const sink: string[] = [];
+    let exitCalls = 0;
+    const fakeProc: SignalsProcess = {
+      on() {
+        return undefined;
+      },
+      exit() {
+        exitCalls += 1;
+      },
+    };
+    const handlers: Partial<Record<'SIGTERM' | 'SIGINT', () => void>> = {};
+    const fakeWire = {
+      start: (): Promise<void> => Promise.resolve(),
+      stop: (): Promise<void> => Promise.resolve(),
+      port: (): number | null => 7700,
+      _httpHost: (): never => {
+        throw new Error('test stub');
+      },
+      _cellEvents: (): never => {
+        throw new Error('test stub');
+      },
+    };
+    let createLoggerCallDest: unknown = 'unset';
+    const fakeLogger = makeLoggerStub([]);
+    fakeProc.on = (event, listener) => {
+      handlers[event] = listener;
+      return undefined;
+    };
+
+    const runPromise = runServe(
+      { port: undefined, host: '127.0.0.1', logLevel: undefined, logPretty: undefined },
+      {
+        env: { HIVE_MCP_LOG_PRETTY: 'false' },
+        proc: fakeProc,
+        outSink: (line) => {
+          sink.push(line);
+        },
+        createLoggerFn: ((_opts: unknown, dest: unknown): typeof fakeLogger => {
+          createLoggerCallDest = dest;
+          return fakeLogger;
+        }) as unknown as NonNullable<RunServeDeps['createLoggerFn']>,
+        buildWireFn: ((): Promise<typeof fakeWire> =>
+          Promise.resolve(fakeWire)) as unknown as NonNullable<RunServeDeps['buildWireFn']>,
+        readConfigFileFn: () => null,
+        readSnapshotFn: () => Promise.resolve(null),
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    handlers.SIGINT?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(exitCalls).toBeGreaterThanOrEqual(1);
+    void runPromise;
+
+    expect(sink).toEqual([]);
+    expect(createLoggerCallDest).toBeUndefined();
+  });
+
+  it('formatter dest is wired in formatted mode (createLogger receives a dest)', async () => {
+    let exitCalls = 0;
+    const fakeProc: SignalsProcess = {
+      on() {
+        return undefined;
+      },
+      exit() {
+        exitCalls += 1;
+      },
+    };
+    const handlers: Partial<Record<'SIGTERM' | 'SIGINT', () => void>> = {};
+    const fakeWire = {
+      start: (): Promise<void> => Promise.resolve(),
+      stop: (): Promise<void> => Promise.resolve(),
+      port: (): number | null => 7700,
+      _httpHost: (): never => {
+        throw new Error('test stub');
+      },
+      _cellEvents: (): never => {
+        throw new Error('test stub');
+      },
+    };
+    let createLoggerCallDest: unknown = 'unset';
+    const fakeLogger = makeLoggerStub([]);
+    fakeProc.on = (event, listener) => {
+      handlers[event] = listener;
+      return undefined;
+    };
+
+    const runPromise = runServe(
+      { port: undefined, host: '127.0.0.1', logLevel: undefined, logPretty: undefined },
+      {
+        proc: fakeProc,
+        outSink: () => undefined,
+        createLoggerFn: ((_opts: unknown, dest: unknown): typeof fakeLogger => {
+          createLoggerCallDest = dest;
+          return fakeLogger;
+        }) as unknown as NonNullable<RunServeDeps['createLoggerFn']>,
+        buildWireFn: ((): Promise<typeof fakeWire> =>
+          Promise.resolve(fakeWire)) as unknown as NonNullable<RunServeDeps['buildWireFn']>,
+        readConfigFileFn: () => null,
+        readSnapshotFn: () => Promise.resolve(null),
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    handlers.SIGINT?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(exitCalls).toBeGreaterThanOrEqual(1);
+    void runPromise;
+
+    expect(createLoggerCallDest).toBeDefined();
+    expect(typeof (createLoggerCallDest as { write: unknown } | null)?.write).toBe('function');
+  });
+
+  it('formatter dest formats JSON lines and writes them to the sink', async () => {
+    const sink: string[] = [];
+    let capturedDest: { write(msg: string): void } | undefined;
+    let exitCalls = 0;
+    const fakeProc: SignalsProcess = {
+      on() {
+        return undefined;
+      },
+      exit() {
+        exitCalls += 1;
+      },
+    };
+    const handlers: Partial<Record<'SIGTERM' | 'SIGINT', () => void>> = {};
+    const fakeWire = {
+      start: (): Promise<void> => Promise.resolve(),
+      stop: (): Promise<void> => Promise.resolve(),
+      port: (): number | null => 7700,
+      _httpHost: (): never => {
+        throw new Error('test stub');
+      },
+      _cellEvents: (): never => {
+        throw new Error('test stub');
+      },
+    };
+    const fakeLogger = makeLoggerStub([]);
+    fakeProc.on = (event, listener) => {
+      handlers[event] = listener;
+      return undefined;
+    };
+
+    const runPromise = runServe(
+      { port: undefined, host: '127.0.0.1', logLevel: undefined, logPretty: undefined },
+      {
+        proc: fakeProc,
+        outSink: (line) => {
+          sink.push(line);
+        },
+        createLoggerFn: ((_opts: unknown, dest: unknown): typeof fakeLogger => {
+          capturedDest = dest as { write(msg: string): void } | undefined;
+          return fakeLogger;
+        }) as unknown as NonNullable<RunServeDeps['createLoggerFn']>,
+        buildWireFn: ((): Promise<typeof fakeWire> =>
+          Promise.resolve(fakeWire)) as unknown as NonNullable<RunServeDeps['buildWireFn']>,
+        readConfigFileFn: () => null,
+        readSnapshotFn: () => Promise.resolve(null),
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(capturedDest).toBeDefined();
+
+    // Simulate pino emitting one JSON line through the dest.
+    const initialSinkLen = sink.length;
+    capturedDest!.write(
+      `${JSON.stringify({
+        level: 30,
+        time: 1_770_000_000_000,
+        module: 'composition.wire',
+        msg: 'wire_started',
+        port: 7700,
+      })}\n`,
+    );
+    expect(sink.length).toBe(initialSinkLen + 1);
+    const formatted = sink[sink.length - 1]!;
+    expect(formatted).toContain('INFO ');
+    expect(formatted).toContain('composition.wire');
+    expect(formatted).toContain('wire_started');
+    expect(formatted).toContain('port=7700');
+    expect(formatted.endsWith('\n')).toBe(true);
+
+    // Malformed JSON should pass through unchanged (defensive — never swallow).
+    capturedDest!.write('not-valid-json\n');
+    expect(sink[sink.length - 1]).toBe('not-valid-json\n');
+
+    handlers.SIGINT?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(exitCalls).toBeGreaterThanOrEqual(1);
+    void runPromise;
   });
 });
