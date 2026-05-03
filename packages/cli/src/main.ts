@@ -3,9 +3,14 @@
 // `finally` so the DB pool exits cleanly. The lazy runtime keeps `--help`
 // and `--version` from touching Postgres.
 
+import { initColorMode } from './output/colors.js';
 import { buildProgram, closeRuntime } from './program.js';
 
 async function main(argv: string[]): Promise<number> {
+  // Apply NO_COLOR / --no-color before commander parses, so that
+  // `--version`, `--help`, and any parse-time errors are also rendered
+  // without ANSI sequences when the operator opted out of colour.
+  initColorMode({ argv, env: process.env });
   const { program, getExitCode } = buildProgram();
   try {
     await program.parseAsync(argv);
