@@ -11,10 +11,14 @@ import { runColdStart } from './cold-start.js';
 // `vi.mock` rewrites the `node:net` module BEFORE the import graph
 // resolves, so any direct or transitive `from 'node:net'` inside
 // runColdStart's chain gets the mock here. The mocked surface is
-// limited to the entry points used to open outbound TCP sockets:
-// `connect`, `createConnection`, plus the `Socket` class. Each mock
-// throws — if the cold-start path tries to talk to the network the
-// test fails with a precise pointer to the offender.
+// `connect` and `createConnection` — the entry points for opening
+// outbound TCP sockets. The `Socket` class is intentionally NOT
+// mocked: callers that do `new Socket().connect(...)` route through
+// `net.connect` internally, which IS mocked above, so the throw
+// still fires. If a future caller bypassed `net.connect` by other
+// means (e.g. raw libuv handles), this guard would not catch it —
+// at that point widen the mocks here. Each mock throws with a
+// pointed message so a regression names the offender immediately.
 //
 // Static analysis already says runColdStart imports renderColdStart
 // (pure) + readSnapshot (fs only), but this dynamic guard catches

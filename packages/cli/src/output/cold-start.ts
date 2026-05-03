@@ -68,6 +68,10 @@ export function formatBytes(n: number): string {
   return `${(n / GIB).toFixed(1)} GiB`;
 }
 
+function pluralize(n: number, singular: string, plural: string): string {
+  return `${n} ${n === 1 ? singular : plural}`;
+}
+
 function decideState(snap: HiveStatusSnapshot | null, opts: RenderColdStartOptions): State {
   if (snap === null) return 'missing';
   const stale = opts.isStaleFn ?? isStale;
@@ -120,14 +124,20 @@ function renderStatusBlock(state: State, snap: HiveStatusSnapshot | null, now: n
   const rows: string[] = [];
 
   // hive row — name + counts. Stale variant drops `colony` per the
-  // 07c v3 reference (shorter line, less visual weight).
+  // 07c v3 reference (shorter line, less visual weight). Plurality
+  // depends on the count (`1 keeper` vs `12 keepers`) — the fresh-state
+  // byte-identical fixture happens to use values where every count is
+  // already plural so a hardcoded plural would pass the snapshot test,
+  // but a fresh install (`colonies=1, keepers=1, agents=0`) would render
+  // the wrong English ("1 keepers · 0 agents") without `pluralize` above.
   if (snap.hive !== null) {
     const hive = snap.hive;
     const segs: string[] = [c.cmd(hive.name)];
     if (state === 'fresh') {
-      segs.push(`${hive.colonies} colony`);
+      segs.push(pluralize(hive.colonies, 'colony', 'colonies'));
     }
-    segs.push(`${hive.keepers} keepers`, `${hive.agents} agents`);
+    segs.push(pluralize(hive.keepers, 'keeper', 'keepers'));
+    segs.push(pluralize(hive.agents, 'agent', 'agents'));
     const content = segs.join(c.muted(' · '));
     rows.push(statusRow('hive', c.ok(sym.dot), content));
   }

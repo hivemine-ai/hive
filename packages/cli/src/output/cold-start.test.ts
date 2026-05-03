@@ -201,6 +201,27 @@ describe('renderColdStart', () => {
     expect(out.includes('●')).toBe(true);
   });
 
+  it('pluralizes counts correctly on the fresh-install edge case (1 keeper, 0 agents, 1 colony)', () => {
+    // Regression for S1 of code-reviewer Fase 5: the fresh-state
+    // byte-identical fixture happens to use plural-only values
+    // (keepers=4, agents=12, colonies=1 with the "colony" word
+    // matching anyway). A fresh install renders singular keeper +
+    // zero-plural agents — without `pluralize` the line read "1
+    // keepers · 0 agents".
+    const snap: HiveStatusSnapshot = {
+      ...freshSnapshot(),
+      hive: { name: 'test-hive', colonies: 1, keepers: 1, agents: 0 },
+    };
+    const out = renderColdStart(snap, {
+      now: NOW_MS,
+      pathResolver: () => '~/.local/state/hive/status.json',
+    });
+    expect(out).toContain('1 colony');
+    expect(out).toContain('1 keeper');
+    expect(out).not.toContain('1 keepers');
+    expect(out).toContain('0 agents');
+  });
+
   it('treats a missing lastAudit field as "no last audit row" (defensive)', () => {
     const snap = { ...freshSnapshot(), lastAudit: null };
     const out = renderColdStart(snap, {
