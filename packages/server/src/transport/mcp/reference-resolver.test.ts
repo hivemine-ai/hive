@@ -176,7 +176,7 @@ describe('resolveParticipantReference — happy paths', () => {
     const resolver = createReferenceResolver({ participantsRepo: repo });
     const identity = makeIdentity({ hiveId, hiveName });
 
-    // AC1 — caso nominal
+    // AC1 — nominal case
     const result = await resolver.resolveParticipantReference(
       `worker-a@admin.${hiveName}`,
       identity,

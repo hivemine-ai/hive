@@ -18,9 +18,16 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 import { performInit } from '../init.js';
-import type { InitResult } from '../init.js';
+import type { InitPhaseEvent, InitResult } from '../init.js';
 import { CliError } from '#error/cli-error.js';
 import { parseDuration } from '#input/parse-duration.js';
+import {
+  printBootHeader,
+  printCredentialBox,
+  printCredentialWritten,
+  startStep,
+  type CeremonialSink,
+} from '#output/init-ceremonial.js';
 import type { GlobalCliOpts } from '../types.js';
 
 export interface InitCommandOpts {
@@ -36,6 +43,11 @@ export interface InitCommandOpts {
   ttl: string | undefined;
   /** If set, write the JWT to this file (perms 0600). Otherwise stdout. */
   outputCredential: string | undefined;
+  /**
+   * Test-only sink override. Production callers leave this undefined and the
+   * ceremonial helpers write to `process.stdout`.
+   */
+  ceremonialSink?: CeremonialSink;
 }
 
 export interface InitCommandResult {
@@ -76,6 +88,19 @@ export async function runInit(opts: InitCommandOpts): Promise<InitCommandResult>
 
   const ttlMs = opts.ttl !== undefined ? parseDuration(opts.ttl) : undefined;
 
+  // Pretty mode triggers the ceremonial output: expanded banner + 5-step
+  // staged progress + framed credential box. JSON / YAML modes stay silent
+  // during bootstrap and serialize the result via `formatOutput` as usual.
+  // Pretty is identified by the resolved `output` field — the runtime
+  // resolver in `program.ts` lifts auto-detection (TTY check + env) into a
+  // concrete enum value before the handler runs.
+  const isPretty = opts.globals.output === 'table';
+  const sink = opts.ceremonialSink;
+
+  if (isPretty) {
+    printBootHeader(sink);
+  }
+
   const initOpts: Parameters<typeof performInit>[0] = {
     db: opts.db,
     adminEmail: opts.adminEmail,
@@ -87,6 +112,11 @@ export async function runInit(opts: InitCommandOpts): Promise<InitCommandResult>
   if (opts.globals.operatorNote !== undefined) initOpts.operatorNote = opts.globals.operatorNote;
   const osUser = process.env['USER'];
   if (osUser !== undefined && osUser !== '') initOpts.osUser = osUser;
+  if (isPretty) {
+    initOpts.onPhase = (event: InitPhaseEvent): void => {
+      renderPhase(event, sink);
+    };
+  }
 
   const result: InitResult = await performInit(initOpts);
 
@@ -94,6 +124,14 @@ export async function runInit(opts: InitCommandOpts): Promise<InitCommandResult>
   if (opts.outputCredential !== undefined && opts.outputCredential !== '') {
     writeFileSync(opts.outputCredential, result.initialCredential.jwt, { mode: 0o600 });
     credentialPath = opts.outputCredential;
+  }
+
+  if (isPretty) {
+    if (credentialPath !== null) {
+      printCredentialWritten(credentialPath, sink);
+    } else {
+      printCredentialBox(result.initialCredential.jwt, sink);
+    }
   }
 
   const summary: InitCommandResult = {
@@ -114,6 +152,49 @@ export async function runInit(opts: InitCommandOpts): Promise<InitCommandResult>
 
 function isPlausibleEmail(input: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input);
+}
+
+/**
+ * Render one ceremonial step row given a structured phase event from
+ * `performInit`. The mapping (phase → row number, label, message text)
+ * lives here, not in `init.ts`, so the CLI surface stays decoupled from
+ * the bootstrap implementation.
+ */
+function renderPhase(event: InitPhaseEvent, sink: CeremonialSink | undefined): void {
+  switch (event.kind) {
+    case 'database':
+      startStep(1, 'database', sink).complete('opened');
+      return;
+    case 'migrations': {
+      const word = event.appliedCount === 1 ? 'migration' : 'migrations';
+      startStep(2, 'migrations', sink).complete(`applied ${event.appliedCount} ${word}`);
+      return;
+    }
+    case 'signing-key':
+      // The kid is a 32-char hex (sha256 prefix of SPKI-DER). Display the
+      // first 12 chars — long enough to disambiguate at-a-glance during
+      // a manual init, short enough to fit on one row beside the label.
+      startStep(3, 'signing key', sink).complete(`generated kid ${event.kid.slice(0, 12)}`);
+      return;
+    case 'admin-hivekeeper':
+      // First 8 chars of the UUIDv7 (timestamp prefix) are the friendly
+      // "look-up handle" the operator sees in audit logs.
+      startStep(4, 'admin hivekeeper', sink).complete(
+        `created ${event.adminId.slice(0, 8)} — ${event.adminEmail}`,
+      );
+      return;
+    case 'root-credential': {
+      const ttlDays = Math.round((event.expiresAt.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+      startStep(5, 'root credential', sink).complete(
+        `issued jti ${event.jti.slice(0, 8)} (ttl ${ttlDays}d)`,
+      );
+      return;
+    }
+    default: {
+      const _exhaustive: never = event;
+      void _exhaustive;
+    }
+  }
 }
 
 /**
