@@ -17,7 +17,14 @@ const original = readFileSync(bundlePath, 'utf8');
 // references `import.meta` (`import_meta`, `import_meta2`, `import_meta3`,
 // ...). The capture group lets the replacement preserve each suffix so the
 // downstream `import_metaN.url` access lands on the patched object.
-const pattern = /var (import_meta\d*) = \{\};/g;
+//
+// As of esbuild ~0.24+, the emitter splits the prior `var import_metaN = {};`
+// into a hoisted declaration (`var import_metaN;`) plus a separate assignment
+// (`import_metaN = {};`) inside the wrapping `__esm({...})` initializer. We
+// match the assignment form (with optional `var` prefix for backward-compat
+// with the older emitter style) and rewrite it to seed `.url` with the
+// bundle's own file path.
+const pattern = /(?:var\s+)?(import_meta\d*) = \{\};/g;
 const matches = [...original.matchAll(pattern)];
 
 if (matches.length === 0) {
@@ -27,7 +34,7 @@ if (matches.length === 0) {
 
 const patched = original.replace(
   pattern,
-  (_match, name) => `var ${name} = { url: require("node:url").pathToFileURL(__filename).href };`,
+  (_match, name) => `${name} = { url: require("node:url").pathToFileURL(__filename).href };`,
 );
 
 if (patched === original) {
