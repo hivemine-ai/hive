@@ -13,8 +13,14 @@
 // HARD CONVENTION (per ADR-021): no other CLI file may call
 // `chalk.hex(...)`, `chalk.bold(...)`, or any other chalk modifier
 // directly. Every coloured fragment must come from a helper in `c`.
-// Verified via `grep -r "chalk\." packages/cli/src --include="*.ts" |
-// grep -v "output/colors.ts"` returning empty.
+// Verified via:
+//   grep -rE "chalk\." packages/cli/src --include="*.ts" \
+//     | grep -vE "output/colors(\.test)?\.ts"
+// returning empty. The pattern excludes both the production module
+// and its test file (the literal `output/colors.ts` substring is
+// not contained in `output/colors.test.ts` because `.test` breaks
+// the contiguity, so an unrefined `grep -v` would wrongly flag the
+// test file as a violation).
 
 import chalk from 'chalk';
 
