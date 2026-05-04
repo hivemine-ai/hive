@@ -10,7 +10,9 @@
 npm install -g @hivemine/hivectl
 ```
 
-Self-contained SEA binary (~108 MB) — no Node runtime required at the install host. Per-platform packages cover `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`; the wrapper `@hivemine/hivectl` resolves to the right binary on install via npm `optionalDependencies` filtered by `os` / `cpu`.
+Self-contained SEA binary (~108 MB) — no Node runtime required at the install host. Per-platform packages cover `linux-x64`, `linux-arm64`, `darwin-arm64`; the wrapper `@hivemine/hivectl` resolves to the right binary on install via npm `optionalDependencies` filtered by `os` / `cpu`.
+
+> **Intel Mac (`darwin-x64`) note for v0.1.0.** Apple Silicon Macs (M1/M2/M3+) are supported via the `darwin-arm64` binary. Intel Macs do not have a native binary in v0.1.0 — install [Rosetta 2](https://support.apple.com/en-us/HT211861) (`softwareupdate --install-rosetta` on macOS 15+; macOS 11-14 prompts automatically on first need) and use the `linux-x64` binary. See `CHANGELOG.md` under `[Unreleased]/Changed` for the GitHub Actions runner rationale and reversibility plan.
 
 Contributors building from source: see [`packages/cli/README.md`](../packages/cli/README.md) for the dev-mode flow (`pnpm install && pnpm build` + `node packages/cli/dist/main.js <args>`).
 

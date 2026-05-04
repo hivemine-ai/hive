@@ -62,10 +62,13 @@ jobs:
             platform: linux
             arch: arm64
             sea_target: linux
-          - os: macos-13
-            platform: darwin
-            arch: x64
-            sea_target: darwin
+          # darwin-x64 (Intel Mac) intentionally absent in v0.1.0 — Github
+          # Free org plan does not include `macos-*-large` (the only x64 Mac
+          # runners), and the only free x64 Mac runner (`macos-13`) is
+          # subject to severe pool scarcity and a sunset deprecation.
+          # Intel Mac users use the Linux x64 binary via Rosetta 2; see
+          # CHANGELOG.md and README.md for details. Reversible (1-line
+          # re-add) when the constraint is lifted. (PRY-054)
           - os: macos-14
             platform: darwin
             arch: arm64

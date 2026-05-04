@@ -61,7 +61,9 @@ Full operator surface (10 subcommand groups: `init` / `migrate` / `serve` / `ser
 
 ### Distribution
 
-Hive is **OSS** (Apache 2.0). The release pipeline ships `hivectl` as a self-contained SEA binary (~108 MB, no Node runtime needed at the install host) under `npm install -g @hivemine/hivectl`, with per-platform packages for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`. Releases are cut via the `release.yml` workflow in this repo.
+Hive is **OSS** (Apache 2.0). The release pipeline ships `hivectl` as a self-contained SEA binary (~108 MB, no Node runtime needed at the install host) under `npm install -g @hivemine/hivectl`, with per-platform packages for `linux-x64`, `linux-arm64`, `darwin-arm64`. Releases are cut via the `release.yml` workflow in this repo.
+
+> **Intel Mac (`darwin-x64`) note for v0.1.0.** Apple Silicon Macs (M1/M2/M3+) are supported via the `darwin-arm64` binary. Intel Macs do not have a native binary in v0.1.0 — install [Rosetta 2](https://support.apple.com/en-us/HT211861) (`softwareupdate --install-rosetta` on macOS 15+; macOS 11-14 prompts automatically on first need) and use the `linux-x64` binary. The npm wrapper's `install.js` emits an actionable warning when it detects `darwin x64`. See `CHANGELOG.md` under `[Unreleased]/Changed` for the GitHub Actions runner rationale and the reversibility plan.
 
 ### Deploy paths
 

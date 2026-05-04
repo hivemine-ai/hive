@@ -1,12 +1,16 @@
 # Platform packages
 
-This directory holds the template used by `release.yml` to generate the four
-platform-scoped binary packages that back `@hivemine/hivectl`:
+This directory holds the template used by `release.yml` to generate the three
+platform-scoped binary packages that back `@hivemine/hivectl` in v0.1.0:
 
 - `@hivemine/hivectl-linux-x64`
 - `@hivemine/hivectl-linux-arm64`
-- `@hivemine/hivectl-darwin-x64`
 - `@hivemine/hivectl-darwin-arm64`
+
+`darwin-x64` (Intel Mac) is intentionally absent in v0.1.0 — see
+`CHANGELOG.md` for the GitHub Actions runner rationale. Intel Mac users
+install the `linux-x64` binary via Rosetta 2; the wrapper's `install.js`
+emits an actionable warning when it sees `darwin x64`.
 
 The release workflow instantiates `package.json.template` per matrix job by
 substituting `{{PLATFORM_NAME}}`, `{{VERSION}}`, `{{OS}}`, `{{CPU}}`, copies
