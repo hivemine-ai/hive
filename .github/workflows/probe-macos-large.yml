@@ -1,0 +1,27 @@
+name: Probe macos-latest-large availability
+
+# Temporary workflow used by PRY-054 to validate that the hivemine-ai org has
+# `macos-latest-large` runners available before changing the release matrix.
+# Removed in the same PR after the probe completes.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe runner
+    runs-on: macos-latest-large
+    timeout-minutes: 5
+    steps:
+      - name: Report runner identity
+        shell: bash
+        run: |
+          echo "uname -m: $(uname -m)"
+          echo "uname -s: $(uname -s)"
+          echo "sw_vers:"
+          sw_vers
+          node --version || true
+          # Expect uname -m == x86_64 (macos-latest-large is the Intel x64 variant).
