@@ -12,11 +12,16 @@ on:
         required: false
         default: false
         type: boolean
-  # Tag-driven release is opt-in for v0.2+; keep dispatch-only for v0.1.x to
-  # minimise risk of accidental publishes from a mis-pushed tag.
-  # push:
-  #   tags:
-  #     - 'v[0-9]+.[0-9]+.[0-9]+'
+  # Release published via the GitHub Releases UI (Releases → New release → Publish).
+  # Workflow extracts version from the tag name and runs the publish pipeline,
+  # then attaches the binaries to the existing release. The `release` event only
+  # fires when a release is explicitly published from UI or API draft-publish —
+  # NOT on `git push --tags`, which preserves the original PRY-033 guarantee
+  # against accidental publishes from mis-pushed tags. The `push: tags` event
+  # remains intentionally disabled. (PRY-058 supersedes the dispatch-only
+  # decision of PRY-033; see the ADR-019 changelog entry.)
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -31,13 +36,28 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.set-version.outputs.value }}
+      dry_run: ${{ steps.set-version.outputs.dry_run }}
     steps:
-      - name: Resolve version
+      - name: Resolve version and dry_run
         id: set-version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          DISPATCH_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          VERSION="${{ github.event.inputs.version }}"
+          if [[ "$EVENT_NAME" == "release" ]]; then
+            # Release published via the GitHub Releases UI. Extract version
+            # from the tag name (strip leading "v"). dry_run is always false
+            # for UI-triggered releases — dry-run path remains workflow_dispatch.
+            VERSION="${RELEASE_TAG#v}"
+            DRY_RUN="false"
+          else
+            VERSION="$DISPATCH_VERSION"
+            DRY_RUN="$DISPATCH_DRY_RUN"
+          fi
           if [[ -z "$VERSION" ]]; then
-            echo "::error::version input is required"
+            echo "::error::version is required (workflow_dispatch input or release tag)"
             exit 1
           fi
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-zA-Z.-]+)?$ ]]; then
@@ -45,7 +65,8 @@ jobs:
             exit 1
           fi
           echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: ${VERSION}"
+          echo "dry_run=${DRY_RUN}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION} (event: ${EVENT_NAME}, dry_run: ${DRY_RUN})"
 
   build:
     name: Build SEA (${{ matrix.platform }}-${{ matrix.arch }})
@@ -173,7 +194,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Publish to npm
-        if: ${{ !inputs.dry_run }}
+        if: ${{ needs.prepare.outputs.dry_run != 'true' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -182,7 +203,7 @@ jobs:
           npm publish --access public
 
       - name: Dry-run summary
-        if: ${{ inputs.dry_run }}
+        if: ${{ needs.prepare.outputs.dry_run == 'true' }}
         run: |
           PLATFORM_NAME="${{ matrix.platform }}-${{ matrix.arch }}"
           echo "[dry-run] would publish @hivemine/hivectl-${PLATFORM_NAME}@${{ needs.prepare.outputs.version }}"
@@ -214,7 +235,7 @@ jobs:
           cat package.json
 
       - name: Publish to npm
-        if: ${{ !inputs.dry_run }}
+        if: ${{ needs.prepare.outputs.dry_run != 'true' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -222,14 +243,14 @@ jobs:
           npm publish --access public
 
       - name: Dry-run summary
-        if: ${{ inputs.dry_run }}
+        if: ${{ needs.prepare.outputs.dry_run == 'true' }}
         run: |
           echo "[dry-run] would publish @hivemine/hivectl@${{ needs.prepare.outputs.version }}"
 
   github-release:
     name: GitHub release
     needs: [prepare, publish-wrapper]
-    if: ${{ !inputs.dry_run }}
+    if: ${{ needs.prepare.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -251,7 +272,10 @@ jobs:
           done
           ls -la release-assets
 
-      - name: Create GitHub release
+      # workflow_dispatch path: no GitHub release exists yet — create it with
+      # an auto-generated body and attach the binaries.
+      - name: Create GitHub release (workflow_dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         # Pinned to commit SHA (release 2.6.2) per security review; mutable v2
         # tag would let a compromised action exfiltrate the workflow's
         # GITHUB_TOKEN (contents: write).
@@ -260,6 +284,20 @@ jobs:
           tag_name: v${{ needs.prepare.outputs.version }}
           name: v${{ needs.prepare.outputs.version }}
           generate_release_notes: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # release event path: the release was already created by the operator
+      # via the GitHub Releases UI. Attach the binaries to the existing release
+      # without overwriting the UI-set name or body. softprops/action-gh-release
+      # treats an existing tag as an update operation; omitting `name` and
+      # `body` preserves whatever was set in the UI.
+      - name: Attach binaries to GitHub release (release event)
+        if: ${{ github.event_name == 'release' }}
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
