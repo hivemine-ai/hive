@@ -6,6 +6,11 @@ name: Probe macos-latest-large availability
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - pry/PRY-054-fix-release-yml-sea-build-matrix
+    paths:
+      - .github/workflows/probe-macos-large.yml
 
 permissions:
   contents: read
