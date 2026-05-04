@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- **Operators can now publish releases from the GitHub Releases UI** (PRY-058). The `release.yml` workflow now triggers on `release.published` in addition to `workflow_dispatch` — publishing a release from `Releases → New release → Publish` automatically runs the npm publish pipeline and attaches the SEA binaries to the release without overwriting the title or notes you set in the UI. The `workflow_dispatch` path remains for dry-runs and emergency releases. See [`_meta/runbooks/release-publish.md`](.) Phase 4 for the two-path procedure.
+- **Operators can now publish releases from the GitHub Releases UI** (PRY-058). The `release.yml` workflow now triggers on `release.published` in addition to `workflow_dispatch` — publishing a release from `Releases → New release → Publish` automatically runs the npm publish pipeline and attaches the SEA binaries to the release without overwriting the title or notes you set in the UI. The `workflow_dispatch` path remains for dry-runs and emergency releases.
 
 ### Changed
 

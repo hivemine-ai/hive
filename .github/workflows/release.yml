@@ -19,7 +19,7 @@ on:
   # NOT on `git push --tags`, which preserves the original PRY-033 guarantee
   # against accidental publishes from mis-pushed tags. The `push: tags` event
   # remains intentionally disabled. (PRY-058 supersedes the dispatch-only
-  # decision of PRY-033; see the historial de cambios entry on ADR-019.)
+  # decision of PRY-033; see the ADR-019 changelog entry.)
   release:
     types: [published]
 
