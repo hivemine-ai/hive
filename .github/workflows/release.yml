@@ -194,7 +194,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Publish to npm
-        if: ${{ needs.prepare.outputs.dry_run != 'true' }}
+        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -235,7 +235,7 @@ jobs:
           cat package.json
 
       - name: Publish to npm
-        if: ${{ needs.prepare.outputs.dry_run != 'true' }}
+        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -250,7 +250,7 @@ jobs:
   github-release:
     name: GitHub release
     needs: [prepare, publish-wrapper]
-    if: ${{ needs.prepare.outputs.dry_run != 'true' }}
+    if: ${{ needs.prepare.outputs.dry_run == 'false' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
