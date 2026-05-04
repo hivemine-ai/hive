@@ -27,7 +27,7 @@ if (!pkg) {
       `[hivectl] platform darwin x64 (Intel Mac) is not supported by ` +
         `@hivemine/hivectl in v0.1.0. Workaround: install Rosetta 2 ` +
         `(\`softwareupdate --install-rosetta\` on macOS 15+; macOS 11-14 ` +
-        `prompt automatically) and use the linux x64 binary.`,
+        `prompts automatically) and use the linux x64 binary.`,
     );
   } else {
     console.warn(

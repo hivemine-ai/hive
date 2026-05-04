@@ -62,7 +62,7 @@ jobs:
             platform: linux
             arch: arm64
             sea_target: linux
-          # darwin-x64 (Intel Mac) intentionally absent in v0.1.0 — Github
+          # darwin-x64 (Intel Mac) intentionally absent in v0.1.0 — GitHub
           # Free org plan does not include `macos-*-large` (the only x64 Mac
           # runners), and the only free x64 Mac runner (`macos-13`) is
           # subject to severe pool scarcity and a sunset deprecation.
