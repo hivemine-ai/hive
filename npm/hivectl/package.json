@@ -28,7 +28,6 @@
   "optionalDependencies": {
     "@hivemine/hivectl-linux-x64": "0.0.0-dev",
     "@hivemine/hivectl-linux-arm64": "0.0.0-dev",
-    "@hivemine/hivectl-darwin-x64": "0.0.0-dev",
     "@hivemine/hivectl-darwin-arm64": "0.0.0-dev"
   },
   "publishConfig": {
