@@ -123,15 +123,21 @@ jobs:
           # Cross-runner portable rewrite via temp file (GNU sed `-i` and BSD
           # sed `-i ''` differ; `>tmp && mv` works on every runner).
           PATH_FILE="packages/shared/src/version.ts"
-          BEFORE=$(grep "HIVE_VERSION" "$PATH_FILE")
-          sed "s/'[^']*-dev'/'${RELEASE_VERSION}'/" "$PATH_FILE" > "$PATH_FILE.tmp"
-          mv "$PATH_FILE.tmp" "$PATH_FILE"
-          AFTER=$(grep "HIVE_VERSION" "$PATH_FILE")
-          if [ "$BEFORE" = "$AFTER" ]; then
-            echo "FAIL: HIVE_VERSION sentinel pattern not matched in $PATH_FILE"
+          # Pre-flight: assert the dev sentinel pattern exists on the
+          # HIVE_VERSION export line. This decouples "pattern not in file"
+          # from the "sed no-op replacement" edge case that would fire if
+          # the workflow were dispatched with a `-dev` pre-release version
+          # (e.g. `0.1.0-dev`) — both the BEFORE and AFTER captures would
+          # be identical without indicating whether the sentinel was matched.
+          if ! grep -E "^export const HIVE_VERSION = '[^']*-dev';" "$PATH_FILE" > /dev/null; then
+            echo "FAIL: HIVE_VERSION dev sentinel pattern not present in $PATH_FILE"
             cat "$PATH_FILE"
             exit 1
           fi
+          BEFORE=$(grep "^export const HIVE_VERSION" "$PATH_FILE")
+          sed "s/'[^']*-dev'/'${RELEASE_VERSION}'/" "$PATH_FILE" > "$PATH_FILE.tmp"
+          mv "$PATH_FILE.tmp" "$PATH_FILE"
+          AFTER=$(grep "^export const HIVE_VERSION" "$PATH_FILE")
           echo "Synced HIVE_VERSION:"
           echo "  before: $BEFORE"
           echo "  after:  $AFTER"
