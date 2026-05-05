@@ -156,7 +156,7 @@ jobs:
           chmod +x packages/cli/dist-sea/hivectl
           # Symlink better-sqlite3 next to the binary so the SEA's require can
           # resolve it during the smoke `--version` invocation. In production,
-          # the better-sqlite3 ABI 127 prebuild is bundled into the platform
+          # the matching better-sqlite3 prebuild is bundled into the platform
           # package via `bundleDependencies` (PRY-060 Bug A fix); this symlink
           # is build-time only.
           mkdir -p packages/cli/dist-sea/node_modules
@@ -240,10 +240,10 @@ jobs:
         shell: bash
         env:
           PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
-          # Force prebuild-install to fetch the prebuild for Node 22 (ABI 127),
-          # matching the SEA binary's internal Node version, regardless of the
-          # runner's host Node. Also pin the target platform/arch so the
-          # binding is correct even when the staging runner architecture
+          # Force prebuild-install to fetch the prebuild matching the SEA
+          # binary's internal Node version (set via `npm_config_target` below),
+          # regardless of the runner's host Node. Also pin the target platform/arch
+          # so the binding is correct even when the staging runner architecture
           # differs from the binary's target. (PRY-060 Bug A fix.)
           npm_config_target: '22.0.0'
           npm_config_runtime: 'node'
