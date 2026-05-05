@@ -37,7 +37,10 @@ jobs:
     outputs:
       version: ${{ steps.set-version.outputs.value }}
       dry_run: ${{ steps.set-version.outputs.dry_run }}
+      bsqlite3_version: ${{ steps.set-bsqlite3.outputs.value }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Resolve version and dry_run
         id: set-version
         env:
@@ -67,6 +70,28 @@ jobs:
           echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "dry_run=${DRY_RUN}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${VERSION} (event: ${EVENT_NAME}, dry_run: ${DRY_RUN})"
+
+      - name: Resolve better-sqlite3 version from pnpm lockfile
+        id: set-bsqlite3
+        run: |
+          # Extract the exact better-sqlite3 version pnpm resolved into the
+          # lockfile, propagated as an output to publish-binaries so the bundle
+          # step installs the same version that CI/dev tested against. Closes
+          # the supply-chain gap of the previous `^11.7.0` semver range, which
+          # would silently pick up a future 11.x.y patch released between
+          # merge and a real release trigger. Single source of truth: pnpm
+          # lockfile (committed in the repo).
+          VERSION=$(grep -E "^  better-sqlite3@[0-9]" pnpm-lock.yaml | head -1 | sed -E 's/^  better-sqlite3@([0-9.]+):.*/\1/')
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Failed to extract better-sqlite3 version from pnpm-lock.yaml"
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Extracted better-sqlite3 version is not valid semver (got: $VERSION)"
+            exit 1
+          fi
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved better-sqlite3 version from pnpm-lock.yaml: ${VERSION}"
 
   build:
     name: Build SEA (${{ matrix.platform }}-${{ matrix.arch }})
@@ -242,6 +267,7 @@ jobs:
           PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
           TARGET_PLATFORM: ${{ matrix.os_filter }}
           TARGET_ARCH: ${{ matrix.cpu_filter }}
+          BSQLITE3_VERSION: ${{ needs.prepare.outputs.bsqlite3_version }}
         run: |
           PKG_DIR="${GITHUB_WORKSPACE}/staging/@hivemine/hivectl-${PLATFORM_NAME}"
           # Install in a constraint-free temp workdir, NOT inside the staging
@@ -260,18 +286,19 @@ jobs:
           cd "${WORKDIR}"
           npm init -y > /dev/null
           echo "::group::Pre-install env"
-          echo "Runner platform: $(uname -s) $(uname -m)"
-          echo "Runner Node:     $(node --version)"
-          echo "Runner npm:      $(npm --version)"
-          echo "npm registry:    $(npm config get registry)"
-          echo "Workdir:         ${WORKDIR}"
-          echo "Staging dir:     ${PKG_DIR}"
-          echo "Target platform: ${TARGET_PLATFORM}"
-          echo "Target arch:     ${TARGET_ARCH}"
-          echo "Target Node:     ${NODE_VERSION}"
+          echo "Runner platform:      $(uname -s) $(uname -m)"
+          echo "Runner Node:          $(node --version)"
+          echo "Runner npm:           $(npm --version)"
+          echo "npm registry:         $(npm config get registry)"
+          echo "Workdir:              ${WORKDIR}"
+          echo "Staging dir:          ${PKG_DIR}"
+          echo "Target platform:      ${TARGET_PLATFORM}"
+          echo "Target arch:          ${TARGET_ARCH}"
+          echo "Target Node:          ${NODE_VERSION}"
+          echo "better-sqlite3 ver.:  ${BSQLITE3_VERSION} (from pnpm-lock.yaml)"
           echo "::endgroup::"
           echo "::group::npm install (no scripts, gets package + tooling without binding)"
-          npm install better-sqlite3@^11.7.0 --no-save --no-package-lock --ignore-scripts 2>&1 | tee install.log
+          npm install "better-sqlite3@${BSQLITE3_VERSION}" --no-save --no-package-lock --ignore-scripts 2>&1 | tee install.log
           echo "::endgroup::"
           echo "::group::prebuild-install (explicit cross-platform fetch)"
           cd node_modules/better-sqlite3
