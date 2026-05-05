@@ -255,10 +255,31 @@ jobs:
           # Initialise an isolated node_modules/ inside the staging dir so the
           # tarball published to npm includes the binding for the target
           # platform — NOT the runner's own platform.
-          npm install better-sqlite3@^11.7.0 --no-save --no-package-lock --silent
+          echo "::group::Pre-install env"
+          echo "Runner platform: $(uname -s) $(uname -m)"
+          echo "Runner Node:     $(node --version)"
+          echo "Runner npm:      $(npm --version)"
+          echo "npm registry:    $(npm config get registry)"
+          echo "npm_config_target=${npm_config_target}"
+          echo "npm_config_runtime=${npm_config_runtime}"
+          echo "npm_config_target_platform=${npm_config_target_platform}"
+          echo "npm_config_target_arch=${npm_config_target_arch}"
+          echo "::endgroup::"
+          echo "::group::npm install (full output)"
+          npm install better-sqlite3@^11.7.0 --no-save --no-package-lock 2>&1 | tee install.log
+          echo "::endgroup::"
+          echo "::group::Post-install inspection — binding location discovery"
+          ls -la node_modules/better-sqlite3/ 2>/dev/null || echo "(no better-sqlite3 dir)"
+          ls -la node_modules/better-sqlite3/build/ 2>/dev/null || echo "(no build dir)"
+          ls -la node_modules/better-sqlite3/build/Release/ 2>/dev/null || echo "(no Release dir)"
+          ls -la node_modules/better-sqlite3/prebuilds/ 2>/dev/null || echo "(no prebuilds dir)"
+          echo "All .node files under better-sqlite3/:"
+          find node_modules/better-sqlite3/ -name "*.node" 2>/dev/null || echo "(no .node files anywhere)"
+          echo "::endgroup::"
           BINDING="node_modules/better-sqlite3/build/Release/better_sqlite3.node"
           if [ ! -f "$BINDING" ]; then
-            echo "FAIL: better-sqlite3 binding not present after install"
+            echo "FAIL: better-sqlite3 binding not present at expected path: $BINDING"
+            echo "See 'Post-install inspection' group above for actual layout."
             exit 1
           fi
           echo "::group::Bundled binding"
