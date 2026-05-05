@@ -7,6 +7,7 @@
 import { Command } from 'commander';
 import { createLogger } from '@hive/server';
 import type { Logger } from '@hive/server';
+import { HIVE_VERSION } from '@hive/shared';
 
 import { runAuditQuery } from './commands/audit/query.js';
 import { runCreateAgent } from './commands/agent/create.js';
@@ -123,7 +124,7 @@ export function buildProgram(): BuildProgramResult {
     .description(
       'Admin CLI for Hive — bootstrap, manage participants, issue credentials, query audit log.',
     )
-    .version('0.1.0-dev')
+    .version(HIVE_VERSION)
     .option('-o, --output <format>', 'output format: table | json | yaml', undefined)
     .option('-y, --yes', 'skip confirmation prompts (required for destructive ops)')
     .option('--no-color', 'disable ANSI colors in output')

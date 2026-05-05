@@ -25,6 +25,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 
 import {
+  HIVE_VERSION,
   type HiveStatusSnapshot,
   atomicWriteJson,
   snapshotPath as defaultSnapshotPath,
@@ -45,12 +46,12 @@ import type { Database } from '#persistence/schema.js';
  */
 export const SNAPSHOT_HEARTBEAT_SECONDS = 30;
 
-/** Server `version` field. Bumped on each release alongside the package.json
- *  version. Hard-coded for v0.1 OSS dev — the SEA bundle does not have
- *  reliable access to the package.json at runtime, and process.env
- *  `npm_package_version` is unset under the SEA binary entry point.
+/** Server `version` field. Re-exported from `@hive/shared` to keep the
+ *  on-disk snapshot in lockstep with `hivectl --version` and audit events.
+ *  The release.yml workflow rewrites `HIVE_VERSION` in `@hive/shared` before
+ *  the SEA bundle, so the published binary reports the actual release tag.
  */
-export const SNAPSHOT_HIVE_VERSION = '0.1.0-dev';
+export const SNAPSHOT_HIVE_VERSION = HIVE_VERSION;
 
 export interface ServerSnapshotInfo {
   bind: string;
