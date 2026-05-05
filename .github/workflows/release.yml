@@ -110,6 +110,32 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Sync release version to source
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          # Rewrite the HIVE_VERSION sentinel in @hive/shared/version.ts before
+          # `pnpm build` so the SEA bundle bakes in the actual release tag.
+          # Fails explicitly if the pattern is not matched, preventing a silent
+          # ship of '0.1.0-dev' to npm. (PRY-060 Bug B fix.)
+          #
+          # Cross-runner portable rewrite via temp file (GNU sed `-i` and BSD
+          # sed `-i ''` differ; `>tmp && mv` works on every runner).
+          PATH_FILE="packages/shared/src/version.ts"
+          BEFORE=$(grep "HIVE_VERSION" "$PATH_FILE")
+          sed "s/'[^']*-dev'/'${RELEASE_VERSION}'/" "$PATH_FILE" > "$PATH_FILE.tmp"
+          mv "$PATH_FILE.tmp" "$PATH_FILE"
+          AFTER=$(grep "HIVE_VERSION" "$PATH_FILE")
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "FAIL: HIVE_VERSION sentinel pattern not matched in $PATH_FILE"
+            cat "$PATH_FILE"
+            exit 1
+          fi
+          echo "Synced HIVE_VERSION:"
+          echo "  before: $BEFORE"
+          echo "  after:  $AFTER"
+
       - name: Build TypeScript
         run: pnpm --filter @hive/cli build
 
@@ -118,14 +144,25 @@ jobs:
 
       - name: Verify binary runs
         shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           chmod +x packages/cli/dist-sea/hivectl
           # Symlink better-sqlite3 next to the binary so the SEA's require can
-          # resolve it. In production, npm installs better-sqlite3 alongside
-          # the platform package (declared as dependency).
+          # resolve it during the smoke `--version` invocation. In production,
+          # the better-sqlite3 ABI 127 prebuild is bundled into the platform
+          # package via `bundleDependencies` (PRY-060 Bug A fix); this symlink
+          # is build-time only.
           mkdir -p packages/cli/dist-sea/node_modules
           ln -s "$(pnpm --filter @hive/server exec node -p "require.resolve('better-sqlite3/package.json')" | xargs dirname)" packages/cli/dist-sea/node_modules/better-sqlite3
-          packages/cli/dist-sea/hivectl --version
+          # Assert the binary reports the release version, not the dev sentinel.
+          # Fails explicitly if the version sync step did not propagate. (PRY-060)
+          BINARY_VERSION=$(packages/cli/dist-sea/hivectl --version | tail -1 | tr -d '[:space:]')
+          if [ "$BINARY_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "FAIL: hivectl --version returned '$BINARY_VERSION', expected '$EXPECTED_VERSION'"
+            exit 1
+          fi
+          echo "OK: hivectl --version matches expected: $BINARY_VERSION"
 
       - name: Upload SEA binary
         uses: actions/upload-artifact@v4
@@ -188,9 +225,39 @@ jobs:
             -e "s|{{CPU}}|${{ matrix.cpu_filter }}|g" \
             npm/platforms/package.json.template \
             > "${PKG_DIR}/package.json"
-          echo "::group::Staged package"
+          echo "::group::Staged package.json"
           cat "${PKG_DIR}/package.json"
           ls -la "${PKG_DIR}/bin"
+          echo "::endgroup::"
+
+      - name: Bundle better-sqlite3 ABI 127 prebuild
+        shell: bash
+        env:
+          PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
+          # Force prebuild-install to fetch the prebuild for Node 22 (ABI 127),
+          # matching the SEA binary's internal Node version, regardless of the
+          # runner's host Node. Also pin the target platform/arch so the
+          # binding is correct even when the staging runner architecture
+          # differs from the binary's target. (PRY-060 Bug A fix.)
+          npm_config_target: '22.0.0'
+          npm_config_runtime: 'node'
+          npm_config_target_platform: ${{ matrix.os_filter }}
+          npm_config_target_arch: ${{ matrix.cpu_filter }}
+        run: |
+          PKG_DIR="staging/@hivemine/hivectl-${PLATFORM_NAME}"
+          cd "${PKG_DIR}"
+          # Initialise an isolated node_modules/ inside the staging dir so the
+          # tarball published to npm includes the binding for the target
+          # platform — NOT the runner's own platform.
+          npm install better-sqlite3@^11.7.0 --no-save --no-package-lock --silent
+          BINDING="node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+          if [ ! -f "$BINDING" ]; then
+            echo "FAIL: better-sqlite3 binding not present after install"
+            exit 1
+          fi
+          echo "::group::Bundled binding"
+          ls -la "$BINDING"
+          file "$BINDING" || true
           echo "::endgroup::"
 
       - name: Publish to npm

@@ -17,6 +17,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
+import { HIVE_VERSION } from '@hive/shared';
 import { v7 as uuidv7, validate as uuidValidate, version as uuidVersion } from 'uuid';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
@@ -72,7 +73,7 @@ export interface McpTransport {
   ensureSessionFor(sessionId: string, identity: IdentityContext): Promise<SessionState>;
 }
 
-const DEFAULT_SERVER_INFO = { name: 'hive', version: '0.1.0-dev' };
+const DEFAULT_SERVER_INFO = { name: 'hive', version: HIVE_VERSION };
 const DEFAULT_INSTRUCTIONS =
   'Hive v0.1 — agent messaging. Use get_agent_config to learn your identity, list_agents to discover others, get_agent_status to check who is online, send_message or reply_to to talk, check_unread_messages and read_mailbox to receive, mark_read to acknowledge.';
 

@@ -8,6 +8,7 @@
 
 import { isAuthError } from '@hive/server';
 import type { CliRuntime, UUIDv7 } from '@hive/server';
+import { HIVE_VERSION } from '@hive/shared';
 
 import { CliError } from '#error/cli-error.js';
 import { resolveOperatorId } from '#input/parse-reference.js';
@@ -18,8 +19,6 @@ export const OPERATOR_NOTE_MAX_LENGTH = parseInt(
   10,
 );
 
-const CLI_VERSION = '0.1.0-dev';
-
 /**
  * Resolve the OperatorActor for the current command. Validates that
  * `--operator-id`, when provided, references an active admin Hivekeeper.
@@ -29,7 +28,7 @@ export async function buildOperatorActor(
   opts: GlobalCliOpts,
   runtime: CliRuntime,
 ): Promise<OperatorActor> {
-  const detail: Record<string, unknown> = { cliVersion: CLI_VERSION };
+  const detail: Record<string, unknown> = { cliVersion: HIVE_VERSION };
 
   if (opts.operatorNote !== undefined) {
     detail['operatorNote'] = truncate(opts.operatorNote, OPERATOR_NOTE_MAX_LENGTH);
