@@ -240,30 +240,95 @@ jobs:
         shell: bash
         env:
           PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
-          # Force prebuild-install to fetch the prebuild matching the SEA
-          # binary's internal Node version (set via `npm_config_target` below),
-          # regardless of the runner's host Node. Also pin the target platform/arch
-          # so the binding is correct even when the staging runner architecture
-          # differs from the binary's target. (PRY-060 Bug A fix.)
-          npm_config_target: '22.0.0'
-          npm_config_runtime: 'node'
-          npm_config_target_platform: ${{ matrix.os_filter }}
-          npm_config_target_arch: ${{ matrix.cpu_filter }}
+          TARGET_PLATFORM: ${{ matrix.os_filter }}
+          TARGET_ARCH: ${{ matrix.cpu_filter }}
         run: |
-          PKG_DIR="staging/@hivemine/hivectl-${PLATFORM_NAME}"
-          cd "${PKG_DIR}"
-          # Initialise an isolated node_modules/ inside the staging dir so the
-          # tarball published to npm includes the binding for the target
-          # platform — NOT the runner's own platform.
-          npm install better-sqlite3@^11.7.0 --no-save --no-package-lock --silent
-          BINDING="node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+          PKG_DIR="${GITHUB_WORKSPACE}/staging/@hivemine/hivectl-${PLATFORM_NAME}"
+          # Install in a constraint-free temp workdir, NOT inside the staging
+          # dir itself. The staging package declares os/cpu (e.g. darwin/arm64)
+          # which npm enforces against the runner (linux/x64) with EBADPLATFORM
+          # before even consulting the dependency.
+          #
+          # Use --ignore-scripts on the npm install (skip postinstall =
+          # prebuild-install with implicit env), then invoke prebuild-install
+          # explicitly with --platform/--arch/--target flags. This is the
+          # only reliable way to fetch a prebuild for a target distinct from
+          # the runner: the npm_config_target_* env vars are not consistently
+          # respected by prebuild-install when invoked via npm postinstall
+          # (silent fallback to building from source for the runner ABI).
+          WORKDIR="$(mktemp -d)"
+          cd "${WORKDIR}"
+          npm init -y > /dev/null
+          echo "::group::Pre-install env"
+          echo "Runner platform: $(uname -s) $(uname -m)"
+          echo "Runner Node:     $(node --version)"
+          echo "Runner npm:      $(npm --version)"
+          echo "npm registry:    $(npm config get registry)"
+          echo "Workdir:         ${WORKDIR}"
+          echo "Staging dir:     ${PKG_DIR}"
+          echo "Target platform: ${TARGET_PLATFORM}"
+          echo "Target arch:     ${TARGET_ARCH}"
+          echo "Target Node:     ${NODE_VERSION}"
+          echo "::endgroup::"
+          echo "::group::npm install (no scripts, gets package + tooling without binding)"
+          npm install better-sqlite3@^11.7.0 --no-save --no-package-lock --ignore-scripts 2>&1 | tee install.log
+          echo "::endgroup::"
+          echo "::group::prebuild-install (explicit cross-platform fetch)"
+          cd node_modules/better-sqlite3
+          npx --no-install prebuild-install \
+            --runtime=node \
+            --target="${NODE_VERSION}.0.0" \
+            --platform="${TARGET_PLATFORM}" \
+            --arch="${TARGET_ARCH}" \
+            --verbose 2>&1 | tee prebuild.log
+          cd "${WORKDIR}"
+          echo "::endgroup::"
+          echo "::group::Post-install inspection — binding location discovery"
+          ls -la node_modules/better-sqlite3/ 2>/dev/null || echo "(no better-sqlite3 dir)"
+          ls -la node_modules/better-sqlite3/build/ 2>/dev/null || echo "(no build dir)"
+          ls -la node_modules/better-sqlite3/build/Release/ 2>/dev/null || echo "(no Release dir)"
+          ls -la node_modules/better-sqlite3/prebuilds/ 2>/dev/null || echo "(no prebuilds dir)"
+          echo "All .node files under better-sqlite3/:"
+          find node_modules/better-sqlite3/ -name "*.node" 2>/dev/null || echo "(no .node files anywhere)"
+          echo "::endgroup::"
+          # Move the resolved better-sqlite3 (with its fetched prebuild) into
+          # the staging package's node_modules. This is what gets bundled into
+          # the published tarball via `bundleDependencies`.
+          mkdir -p "${PKG_DIR}/node_modules"
+          cp -r "${WORKDIR}/node_modules/better-sqlite3" "${PKG_DIR}/node_modules/"
+          BINDING="${PKG_DIR}/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
           if [ ! -f "$BINDING" ]; then
-            echo "FAIL: better-sqlite3 binding not present after install"
+            echo "FAIL: better-sqlite3 binding not present at expected path: $BINDING"
+            echo "See 'Post-install inspection' group above for actual layout."
             exit 1
           fi
-          echo "::group::Bundled binding"
+          echo "::group::Bundled binding (in staging dir)"
           ls -la "$BINDING"
           file "$BINDING" || true
+          # Validate the binding architecture matches the target. Defensive:
+          # without this assertion, a wrong-platform binding silently ships
+          # to npm and breaks at install/runtime on the user's machine.
+          BINDING_INFO=$(file "$BINDING")
+          case "${TARGET_PLATFORM}-${TARGET_ARCH}" in
+            darwin-arm64)
+              echo "$BINDING_INFO" | grep -E "Mach-O.*arm64|Mach-O.*64-bit.*ARM64" > /dev/null \
+                || { echo "FAIL: binding is not Mach-O arm64. Got: $BINDING_INFO"; exit 1; }
+              echo "OK: binding architecture matches target ${TARGET_PLATFORM}-${TARGET_ARCH}"
+              ;;
+            linux-x64)
+              echo "$BINDING_INFO" | grep -E "ELF.*x86-64" > /dev/null \
+                || { echo "FAIL: binding is not ELF x86-64. Got: $BINDING_INFO"; exit 1; }
+              echo "OK: binding architecture matches target ${TARGET_PLATFORM}-${TARGET_ARCH}"
+              ;;
+            linux-arm64)
+              echo "$BINDING_INFO" | grep -E "ELF.*aarch64|ELF.*ARM aarch64" > /dev/null \
+                || { echo "FAIL: binding is not ELF aarch64. Got: $BINDING_INFO"; exit 1; }
+              echo "OK: binding architecture matches target ${TARGET_PLATFORM}-${TARGET_ARCH}"
+              ;;
+            *)
+              echo "WARN: no architecture assertion configured for ${TARGET_PLATFORM}-${TARGET_ARCH} — binding shipped unverified"
+              ;;
+          esac
           echo "::endgroup::"
 
       - name: Publish to npm
