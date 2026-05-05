@@ -1,6 +1,6 @@
 // Single source of truth for the Hive release version.
 //
-// The default value is the local development sentinel `'0.1.0-dev'`. The
+// The default value is the local development sentinel. The
 // `release.yml` workflow's `Sync release version to source` step rewrites
 // this string to the release version (e.g. `'0.1.0'`) before `pnpm build`
 // + SEA bundle, so the published binaries report the actual release tag

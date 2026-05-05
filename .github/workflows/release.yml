@@ -236,7 +236,7 @@ jobs:
           ls -la "${PKG_DIR}/bin"
           echo "::endgroup::"
 
-      - name: Bundle better-sqlite3 ABI 127 prebuild
+      - name: Bundle better-sqlite3 prebuild (Node ${{ env.NODE_VERSION }} ABI)
         shell: bash
         env:
           PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
