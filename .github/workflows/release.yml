@@ -313,20 +313,22 @@ jobs:
             darwin-arm64)
               echo "$BINDING_INFO" | grep -E "Mach-O.*arm64|Mach-O.*64-bit.*ARM64" > /dev/null \
                 || { echo "FAIL: binding is not Mach-O arm64. Got: $BINDING_INFO"; exit 1; }
+              echo "OK: binding architecture matches target ${TARGET_PLATFORM}-${TARGET_ARCH}"
               ;;
             linux-x64)
               echo "$BINDING_INFO" | grep -E "ELF.*x86-64" > /dev/null \
                 || { echo "FAIL: binding is not ELF x86-64. Got: $BINDING_INFO"; exit 1; }
+              echo "OK: binding architecture matches target ${TARGET_PLATFORM}-${TARGET_ARCH}"
               ;;
             linux-arm64)
               echo "$BINDING_INFO" | grep -E "ELF.*aarch64|ELF.*ARM aarch64" > /dev/null \
                 || { echo "FAIL: binding is not ELF aarch64. Got: $BINDING_INFO"; exit 1; }
+              echo "OK: binding architecture matches target ${TARGET_PLATFORM}-${TARGET_ARCH}"
               ;;
             *)
-              echo "WARN: no architecture assertion configured for ${TARGET_PLATFORM}-${TARGET_ARCH}"
+              echo "WARN: no architecture assertion configured for ${TARGET_PLATFORM}-${TARGET_ARCH} — binding shipped unverified"
               ;;
           esac
-          echo "OK: binding architecture matches target ${TARGET_PLATFORM}-${TARGET_ARCH}"
           echo "::endgroup::"
 
       - name: Publish to npm
