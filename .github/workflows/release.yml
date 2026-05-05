@@ -250,16 +250,24 @@ jobs:
           npm_config_target_platform: ${{ matrix.os_filter }}
           npm_config_target_arch: ${{ matrix.cpu_filter }}
         run: |
-          PKG_DIR="staging/@hivemine/hivectl-${PLATFORM_NAME}"
-          cd "${PKG_DIR}"
-          # Initialise an isolated node_modules/ inside the staging dir so the
-          # tarball published to npm includes the binding for the target
-          # platform — NOT the runner's own platform.
+          PKG_DIR="${GITHUB_WORKSPACE}/staging/@hivemine/hivectl-${PLATFORM_NAME}"
+          # Install in a constraint-free temp workdir, NOT inside the staging
+          # dir itself. The staging package declares os/cpu (e.g. darwin/arm64)
+          # which npm enforces against the runner (linux/x64) with EBADPLATFORM
+          # before even consulting the dependency. Sidestep by installing in
+          # a temp workdir whose package.json has no os/cpu, then copy the
+          # resolved better-sqlite3 module — including the prebuild fetched
+          # via npm_config_target_* env vars — into the staging node_modules.
+          WORKDIR="$(mktemp -d)"
+          cd "${WORKDIR}"
+          npm init -y > /dev/null
           echo "::group::Pre-install env"
           echo "Runner platform: $(uname -s) $(uname -m)"
           echo "Runner Node:     $(node --version)"
           echo "Runner npm:      $(npm --version)"
           echo "npm registry:    $(npm config get registry)"
+          echo "Workdir:         ${WORKDIR}"
+          echo "Staging dir:     ${PKG_DIR}"
           echo "npm_config_target=${npm_config_target}"
           echo "npm_config_runtime=${npm_config_runtime}"
           echo "npm_config_target_platform=${npm_config_target_platform}"
@@ -276,13 +284,18 @@ jobs:
           echo "All .node files under better-sqlite3/:"
           find node_modules/better-sqlite3/ -name "*.node" 2>/dev/null || echo "(no .node files anywhere)"
           echo "::endgroup::"
-          BINDING="node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+          # Move the resolved better-sqlite3 (with its fetched prebuild) into
+          # the staging package's node_modules. This is what gets bundled into
+          # the published tarball via `bundleDependencies`.
+          mkdir -p "${PKG_DIR}/node_modules"
+          cp -r "${WORKDIR}/node_modules/better-sqlite3" "${PKG_DIR}/node_modules/"
+          BINDING="${PKG_DIR}/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
           if [ ! -f "$BINDING" ]; then
             echo "FAIL: better-sqlite3 binding not present at expected path: $BINDING"
             echo "See 'Post-install inspection' group above for actual layout."
             exit 1
           fi
-          echo "::group::Bundled binding"
+          echo "::group::Bundled binding (in staging dir)"
           ls -la "$BINDING"
           file "$BINDING" || true
           echo "::endgroup::"
