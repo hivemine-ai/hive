@@ -242,6 +242,8 @@ jobs:
 
       - name: Stage platform package
         shell: bash
+        env:
+          BSQLITE3_VERSION: ${{ needs.prepare.outputs.bsqlite3_version }}
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
           PLATFORM_NAME="${{ matrix.platform }}-${{ matrix.arch }}"
@@ -249,11 +251,18 @@ jobs:
           mkdir -p "${PKG_DIR}/bin"
           cp artifact/hivectl "${PKG_DIR}/bin/hivectl"
           chmod +x "${PKG_DIR}/bin/hivectl"
+          # Interpolate BSQLITE3_VERSION into the template's `dependencies`
+          # field. npm requires bundleDependencies entries to ALSO be in
+          # `dependencies` (or devDependencies) for the bundling to take
+          # effect; without this, npm silently produces a tarball without
+          # the bundled subdir. Single source of truth: pnpm-lock.yaml via
+          # the `bsqlite3_version` job output.
           sed \
             -e "s|{{PLATFORM_NAME}}|${PLATFORM_NAME}|g" \
             -e "s|{{VERSION}}|${VERSION}|g" \
             -e "s|{{OS}}|${{ matrix.os_filter }}|g" \
             -e "s|{{CPU}}|${{ matrix.cpu_filter }}|g" \
+            -e "s|{{BSQLITE3_VERSION}}|${BSQLITE3_VERSION}|g" \
             npm/platforms/package.json.template \
             > "${PKG_DIR}/package.json"
           echo "::group::Staged package.json"
@@ -323,6 +332,27 @@ jobs:
           # the published tarball via `bundleDependencies`.
           mkdir -p "${PKG_DIR}/node_modules"
           cp -r "${WORKDIR}/node_modules/better-sqlite3" "${PKG_DIR}/node_modules/"
+          # Extend the bundled better-sqlite3's `files` field to include the
+          # prebuilt native binding. better-sqlite3@11.x publishes with `files:
+          # ["binding.gyp", "src/*.[ch]pp", "lib/**", "deps/**"]` — it does NOT
+          # ship the `build/` or `prebuilds/` directories, because in normal
+          # use the binding is fetched at install time via prebuild-install's
+          # postinstall hook. Our shipping model bundles the binding at publish
+          # time instead (so user installs do NOT run prebuild-install), so we
+          # must explicitly tell npm pack to keep `build/Release/*.node` and
+          # `prebuilds/**` when it bundles this dep into our platform tarball.
+          # Without this, the tarball contains the source tree but not the
+          # binding, and `require('better-sqlite3')` fails at runtime with
+          # `Cannot find module` after dlopen tries to load the missing .node.
+          node -e "
+            const fs = require('fs');
+            const p = '${PKG_DIR}/node_modules/better-sqlite3/package.json';
+            const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            const extra = ['build/Release/*.node', 'prebuilds/**'];
+            pkg.files = Array.from(new Set([...(pkg.files || []), ...extra]));
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+            console.log('Extended better-sqlite3 files field:', pkg.files);
+          "
           BINDING="${PKG_DIR}/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
           if [ ! -f "$BINDING" ]; then
             echo "FAIL: better-sqlite3 binding not present at expected path: $BINDING"
@@ -358,6 +388,84 @@ jobs:
           esac
           echo "::endgroup::"
 
+      - name: Validate published tarball contains bundled binding (Test layer 1)
+        shell: bash
+        env:
+          PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
+        run: |
+          # Run `npm pack` against the staging dir and assert the resulting
+          # tarball includes the bundled better_sqlite3 binding. This catches
+          # the silent no-op of `bundleDependencies` when the corresponding
+          # `dependencies` field is missing from package.json — the tarball
+          # would otherwise contain only `bin/hivectl` + `package.json` (2
+          # files) and the binary would fail at runtime with `Cannot find
+          # module 'better-sqlite3'`. Runs in both real and dry-run mode
+          # since pack output is a pure function of the staging dir.
+          PKG_DIR="${GITHUB_WORKSPACE}/staging/@hivemine/hivectl-${PLATFORM_NAME}"
+          cd "${PKG_DIR}"
+          TARBALL=$(npm pack --silent)
+          # Capture the tarball listing once into a variable. tar -tzf piped
+          # into grep -q causes SIGPIPE when grep exits early on a match;
+          # under bash `set -o pipefail` (the GHA default for `run:` blocks)
+          # the SIGPIPE makes the whole pipeline exit non-zero and the
+          # surrounding `if !` then sees a "miss" even though grep matched.
+          # Capturing once + grepping against the variable avoids the pipe
+          # entirely and also makes the assertions cheaper on a large tarball.
+          LISTING=$(tar -tzf "${TARBALL}")
+          echo "::group::Tarball contents"
+          printf '%s\n' "${LISTING}"
+          echo "::endgroup::"
+          FILE_COUNT=$(printf '%s\n' "${LISTING}" | wc -l | tr -d ' ')
+          if [ "${FILE_COUNT}" -le 2 ]; then
+            echo "FAIL: tarball has only ${FILE_COUNT} files — bundleDependencies likely silent no-op"
+            echo "Expected: bin/hivectl + package.json + node_modules/better-sqlite3/** (>50 files)"
+            echo "Hint: package.json must declare BOTH 'dependencies' and 'bundleDependencies' for bundling to work."
+            exit 1
+          fi
+          if ! printf '%s\n' "${LISTING}" | grep -q "node_modules/better-sqlite3/build/Release/better_sqlite3.node"; then
+            echo "FAIL: tarball missing better_sqlite3.node — bundleDependencies not effective"
+            echo "Hint: package.json must declare BOTH 'dependencies' and 'bundleDependencies' for bundling to work."
+            exit 1
+          fi
+          if ! printf '%s\n' "${LISTING}" | grep -q "^package/package.json$"; then
+            echo "FAIL: tarball missing package.json"
+            exit 1
+          fi
+          echo "OK: tarball contains ${FILE_COUNT} files including better_sqlite3.node binding"
+          # Cleanup local tarball; the actual `Publish to npm` step regenerates fresh.
+          rm -f "${TARBALL}"
+
+      - name: Verify version is publishable (Test layer 2 — burn check)
+        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
+        shell: bash
+        env:
+          PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          # `npm view <pkg>@<version>` exits:
+          #   0 + version output  → version exists, would conflict on publish
+          #   1 + "Unpublished on" → version-string burned by npm policy, would conflict
+          #   1 + plain E404       → version free to publish ✅
+          # This catches both accidental republish and version-burn issues
+          # before the 4-minute build/bundle path runs unnecessarily.
+          PKG_NAME="@hivemine/hivectl-${PLATFORM_NAME}"
+          set +e
+          VIEW_OUTPUT=$(npm view "${PKG_NAME}@${VERSION}" version 2>&1)
+          VIEW_EXIT=$?
+          set -e
+          if [ "${VIEW_EXIT}" -eq 0 ] && [ -n "${VIEW_OUTPUT}" ]; then
+            echo "FAIL: ${PKG_NAME}@${VERSION} already published; cannot republish same version-string."
+            echo "Bump version in CHANGELOG.md and retag."
+            exit 1
+          fi
+          if printf '%s\n' "${VIEW_OUTPUT}" | grep -q "Unpublished on"; then
+            echo "FAIL: ${PKG_NAME}@${VERSION} was unpublished (version-string permanently burned by npm policy)."
+            echo "${VIEW_OUTPUT}"
+            echo "Bump version in CHANGELOG.md and retag."
+            exit 1
+          fi
+          echo "OK: ${PKG_NAME}@${VERSION} is free to publish"
+
       - name: Publish to npm
         if: ${{ needs.prepare.outputs.dry_run == 'false' }}
         env:
@@ -367,11 +475,20 @@ jobs:
           cd "staging/@hivemine/hivectl-${PLATFORM_NAME}"
           npm publish --access public
 
-      - name: Dry-run summary
+      - name: Validate publish in dry-run mode (Test layer 3)
         if: ${{ needs.prepare.outputs.dry_run == 'true' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          # `npm publish --dry-run` validates auth + tarball + local hooks
+          # WITHOUT uploading to the registry. Replaces the previous echo-only
+          # summary step that left the entire publish path untested in
+          # dry-run mode (the blind spot that allowed the bundleDependencies
+          # bug to ship undetected across PRY-060 → PRY-064).
           PLATFORM_NAME="${{ matrix.platform }}-${{ matrix.arch }}"
-          echo "[dry-run] would publish @hivemine/hivectl-${PLATFORM_NAME}@${{ needs.prepare.outputs.version }}"
+          cd "staging/@hivemine/hivectl-${PLATFORM_NAME}"
+          npm publish --dry-run --access public
+          echo "[dry-run] validated @hivemine/hivectl-${PLATFORM_NAME}@${{ needs.prepare.outputs.version }} would publish successfully"
 
   publish-wrapper:
     name: Publish wrapper package
@@ -399,6 +516,34 @@ jobs:
           "
           cat package.json
 
+      - name: Verify wrapper version is publishable (Test layer 2 — burn check)
+        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          # Same burn-check logic as publish-binaries Test layer 2; applied
+          # to the wrapper package. Fails fast if the version is already
+          # published OR was unpublished (npm policy: unpublished version-
+          # strings are permanently burned for that package name).
+          PKG_NAME="@hivemine/hivectl"
+          set +e
+          VIEW_OUTPUT=$(npm view "${PKG_NAME}@${VERSION}" version 2>&1)
+          VIEW_EXIT=$?
+          set -e
+          if [ "${VIEW_EXIT}" -eq 0 ] && [ -n "${VIEW_OUTPUT}" ]; then
+            echo "FAIL: ${PKG_NAME}@${VERSION} already published; cannot republish same version-string."
+            echo "Bump version in CHANGELOG.md and retag."
+            exit 1
+          fi
+          if printf '%s\n' "${VIEW_OUTPUT}" | grep -q "Unpublished on"; then
+            echo "FAIL: ${PKG_NAME}@${VERSION} was unpublished (version-string permanently burned by npm policy)."
+            echo "${VIEW_OUTPUT}"
+            echo "Bump version in CHANGELOG.md and retag."
+            exit 1
+          fi
+          echo "OK: ${PKG_NAME}@${VERSION} is free to publish"
+
       - name: Publish to npm
         if: ${{ needs.prepare.outputs.dry_run == 'false' }}
         env:
@@ -407,10 +552,18 @@ jobs:
           cd npm/hivectl
           npm publish --access public
 
-      - name: Dry-run summary
+      - name: Validate publish in dry-run mode (Test layer 3)
         if: ${{ needs.prepare.outputs.dry_run == 'true' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          echo "[dry-run] would publish @hivemine/hivectl@${{ needs.prepare.outputs.version }}"
+          # Same dry-run real-publish-path validation as publish-binaries
+          # Test layer 3; applied to the wrapper package. Replaces the
+          # previous echo-only summary so dry-run mode actually exercises
+          # the publish code path.
+          cd npm/hivectl
+          npm publish --dry-run --access public
+          echo "[dry-run] validated @hivemine/hivectl@${{ needs.prepare.outputs.version }} would publish successfully"
 
   github-release:
     name: GitHub release
