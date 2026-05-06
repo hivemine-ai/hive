@@ -458,7 +458,7 @@ jobs:
             echo "Bump version in CHANGELOG.md and retag."
             exit 1
           fi
-          if echo "${VIEW_OUTPUT}" | grep -q "Unpublished on"; then
+          if printf '%s\n' "${VIEW_OUTPUT}" | grep -q "Unpublished on"; then
             echo "FAIL: ${PKG_NAME}@${VERSION} was unpublished (version-string permanently burned by npm policy)."
             echo "${VIEW_OUTPUT}"
             echo "Bump version in CHANGELOG.md and retag."
@@ -536,7 +536,7 @@ jobs:
             echo "Bump version in CHANGELOG.md and retag."
             exit 1
           fi
-          if echo "${VIEW_OUTPUT}" | grep -q "Unpublished on"; then
+          if printf '%s\n' "${VIEW_OUTPUT}" | grep -q "Unpublished on"; then
             echo "FAIL: ${PKG_NAME}@${VERSION} was unpublished (version-string permanently burned by npm policy)."
             echo "${VIEW_OUTPUT}"
             echo "Bump version in CHANGELOG.md and retag."
