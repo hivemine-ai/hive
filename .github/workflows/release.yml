@@ -404,22 +404,30 @@ jobs:
           PKG_DIR="${GITHUB_WORKSPACE}/staging/@hivemine/hivectl-${PLATFORM_NAME}"
           cd "${PKG_DIR}"
           TARBALL=$(npm pack --silent)
+          # Capture the tarball listing once into a variable. tar -tzf piped
+          # into grep -q causes SIGPIPE when grep exits early on a match;
+          # under bash `set -o pipefail` (the GHA default for `run:` blocks)
+          # the SIGPIPE makes the whole pipeline exit non-zero and the
+          # surrounding `if !` then sees a "miss" even though grep matched.
+          # Capturing once + grepping against the variable avoids the pipe
+          # entirely and also makes the assertions cheaper on a large tarball.
+          LISTING=$(tar -tzf "${TARBALL}")
           echo "::group::Tarball contents"
-          tar -tzf "${TARBALL}"
+          printf '%s\n' "${LISTING}"
           echo "::endgroup::"
-          FILE_COUNT=$(tar -tzf "${TARBALL}" | wc -l | tr -d ' ')
+          FILE_COUNT=$(printf '%s\n' "${LISTING}" | wc -l | tr -d ' ')
           if [ "${FILE_COUNT}" -le 2 ]; then
             echo "FAIL: tarball has only ${FILE_COUNT} files — bundleDependencies likely silent no-op"
             echo "Expected: bin/hivectl + package.json + node_modules/better-sqlite3/** (>50 files)"
             echo "Hint: package.json must declare BOTH 'dependencies' and 'bundleDependencies' for bundling to work."
             exit 1
           fi
-          if ! tar -tzf "${TARBALL}" | grep -q "node_modules/better-sqlite3/build/Release/better_sqlite3.node"; then
+          if ! printf '%s\n' "${LISTING}" | grep -q "node_modules/better-sqlite3/build/Release/better_sqlite3.node"; then
             echo "FAIL: tarball missing better_sqlite3.node — bundleDependencies not effective"
             echo "Hint: package.json must declare BOTH 'dependencies' and 'bundleDependencies' for bundling to work."
             exit 1
           fi
-          if ! tar -tzf "${TARBALL}" | grep -q "^package/package.json$"; then
+          if ! printf '%s\n' "${LISTING}" | grep -q "^package/package.json$"; then
             echo "FAIL: tarball missing package.json"
             exit 1
           fi
