@@ -332,6 +332,27 @@ jobs:
           # the published tarball via `bundleDependencies`.
           mkdir -p "${PKG_DIR}/node_modules"
           cp -r "${WORKDIR}/node_modules/better-sqlite3" "${PKG_DIR}/node_modules/"
+          # Extend the bundled better-sqlite3's `files` field to include the
+          # prebuilt native binding. better-sqlite3@11.x publishes with `files:
+          # ["binding.gyp", "src/*.[ch]pp", "lib/**", "deps/**"]` — it does NOT
+          # ship the `build/` or `prebuilds/` directories, because in normal
+          # use the binding is fetched at install time via prebuild-install's
+          # postinstall hook. Our shipping model bundles the binding at publish
+          # time instead (so user installs do NOT run prebuild-install), so we
+          # must explicitly tell npm pack to keep `build/Release/*.node` and
+          # `prebuilds/**` when it bundles this dep into our platform tarball.
+          # Without this, the tarball contains the source tree but not the
+          # binding, and `require('better-sqlite3')` fails at runtime with
+          # `Cannot find module` after dlopen tries to load the missing .node.
+          node -e "
+            const fs = require('fs');
+            const p = '${PKG_DIR}/node_modules/better-sqlite3/package.json';
+            const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            const extra = ['build/Release/*.node', 'prebuilds/**'];
+            pkg.files = Array.from(new Set([...(pkg.files || []), ...extra]));
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+            console.log('Extended better-sqlite3 files field:', pkg.files);
+          "
           BINDING="${PKG_DIR}/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
           if [ ! -f "$BINDING" ]; then
             echo "FAIL: better-sqlite3 binding not present at expected path: $BINDING"
