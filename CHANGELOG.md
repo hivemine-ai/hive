@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-06
+
+First public release of Hive OSS Fase 1 (MVP). Although `v0.1.0` was the version originally targeted, the publish attempt was rolled back (binary packages unpublished within the 72h window) and npm reserves unpublished version-strings permanently — so this release ships under `0.1.1`. Functionally identical to the `0.1.0` payload that was development-complete + Day 1 deployed on 2026-04-27 (PR series PRY-001 through PRY-064 in the project vault). The release notes below cover everything that has accumulated under `[Unreleased]` since the project began.
+
 ### Added
 
 - **Operators can now publish releases from the GitHub Releases UI** (PRY-058). The `release.yml` workflow now triggers on `release.published` in addition to `workflow_dispatch` — publishing a release from `Releases → New release → Publish` automatically runs the npm publish pipeline and attaches the SEA binaries to the release without overwriting the title or notes you set in the UI. The `workflow_dispatch` path remains for dry-runs and emergency releases.
