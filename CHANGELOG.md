@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-06
+
+First successfully runnable public release of Hive OSS Fase 1 (MVP). Functionally identical payload to the unreleased `0.1.0` and `0.1.1` attempts: `0.1.0` was rolled back before the binaries shipped (PRY-060 ABI mismatch + PRY-063 wrong-arch silent fallback), and `0.1.1` reached npm but the binaries failed at runtime with `Cannot find module 'better-sqlite3'` because the platform tarballs were silently published without the bundled native binding (PRY-065 root cause: `bundleDependencies` requires the dep to also be in `dependencies`, and better-sqlite3's own `files` field excludes `build/`). PRY-065 fixes both issues and adds a three-layer publish-tarball test in the release workflow so future regressions surface in dry-run instead of in production. npm reserves unpublished version-strings permanently, so this release ships under `0.1.2`. The release notes below cover everything that has accumulated under `[Unreleased]` since the project began.
+
 ## [0.1.1] - 2026-05-06
 
 First public release of Hive OSS Fase 1 (MVP). Although `v0.1.0` was the version originally targeted, the publish attempt was rolled back (binary packages unpublished within the 72h window) and npm reserves unpublished version-strings permanently — so this release ships under `0.1.1`. Functionally identical to the `0.1.0` payload that was development-complete + Day 1 deployed on 2026-04-27 (PR series PRY-001 through PRY-064 in the project vault). The release notes below cover everything that has accumulated under `[Unreleased]` since the project began.
