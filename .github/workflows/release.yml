@@ -480,6 +480,7 @@ jobs:
           rm -f "${TARBALL}"
 
       - name: Smoke-test bundled tarball with require + new Database (Test layer 4)
+        if: ${{ matrix.os_filter == 'linux' && matrix.cpu_filter == 'x64' }}
         shell: bash
         env:
           PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
@@ -491,11 +492,20 @@ jobs:
           # 1-3 do NOT (Test layer 1 only greps for the binding file,
           # Test layer 2 is registry-only, Test layer 3 only validates
           # pack-time + auth without running the resulting bundle).
-          # Runs in BOTH dry-run and real mode. The runner architecture
-          # matches the target architecture for all 3 matrix entries
-          # (linux-x64 → ubuntu-latest, linux-arm64 → ubuntu-24.04-arm,
-          # darwin-arm64 → macos-14) so the bundled prebuilt binding
-          # is loadable on the runner.
+          # Runs in BOTH dry-run and real mode.
+          #
+          # Conditional on linux-x64 matrix entry: the publish-binaries
+          # job runs on ubuntu-latest for every matrix entry, so npm
+          # install of a tarball declaring os:["darwin"] or cpu:["arm64"]
+          # is rejected with EBADPLATFORM on the runner. For darwin-arm64
+          # and linux-arm64 this step is skipped — the runtime JS dep
+          # tree (better-sqlite3 + bindings + file-uri-to-path) is
+          # platform-independent, so a successful smoke on linux-x64
+          # implies the same JS resolution would succeed on the other
+          # platforms. The binding architecture itself is verified by
+          # Test layer 1 (file present in tarball with the correct
+          # arch per per-platform `file` arch assertion in the bundle
+          # step).
           PKG_DIR="${GITHUB_WORKSPACE}/staging/@hivemine/hivectl-${PLATFORM_NAME}"
           cd "${PKG_DIR}"
           TARBALL=$(npm pack --silent)
