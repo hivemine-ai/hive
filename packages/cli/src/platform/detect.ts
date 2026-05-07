@@ -16,6 +16,10 @@ export interface PlatformLike {
   platform: NodeJS.Platform;
   homedir(): string;
   env: NodeJS.ProcessEnv;
+  /** Returns the current working directory of the invoking process. Used by
+   * `getDefaultWorkingDir` so the Linux default tracks the operator's cwd
+   * (where they ran `hivectl init`) instead of forcing a system-wide path. */
+  cwd(): string;
 }
 
 const DEFAULT_PLATFORM: PlatformLike = {
@@ -26,6 +30,7 @@ const DEFAULT_PLATFORM: PlatformLike = {
   get env() {
     return process.env;
   },
+  cwd: () => process.cwd(),
 };
 
 /**
@@ -50,24 +55,45 @@ export function detectPlatform(p: PlatformLike = DEFAULT_PLATFORM): SupportedPla
  * Default working directory per platform. Operator can override via
  * `--working-dir` on `service install` / `config network`.
  *
- *   - Linux: `/var/lib/hive` (FHS-compliant data dir for system services).
+ *   - Linux: the invoking process's cwd. The operator typically runs
+ *            `hivectl init` from a chosen directory (`~/test`, `~/work/hive`,
+ *            `/srv/hive`) and expects `service install` to wire the unit to
+ *            that same directory. Forcing `/var/lib/hive` (the previous
+ *            default) required the operator to manually copy state across
+ *            paths and was the most common cause of "service installed but
+ *            won't start" support tickets through v0.1.7. Operators who do
+ *            want the FHS layout pass `--working-dir /var/lib/hive`
+ *            explicitly.
  *   - Mac:   `~/Library/Application Support/Hive` (Apple HIG user-level data).
  */
 export function getDefaultWorkingDir(p: PlatformLike = DEFAULT_PLATFORM): string {
   const platform = detectPlatform(p);
-  if (platform === 'linux') return '/var/lib/hive';
+  if (platform === 'linux') return p.cwd();
   return path.join(p.homedir(), 'Library', 'Application Support', 'Hive');
 }
 
 /**
- * Default service user. Linux uses a dedicated `hive` system user (created at
- * install time if missing) — closes INC-2026-001 FLAG-002 (don't run as root).
- * Mac uses the calling user (launchd user-level agents always run as the
- * loading user; the field is informational only).
+ * Default service user. The intent is "run the service as the operator who
+ * invoked the install" so the unit can read the state the operator already
+ * created with `hivectl init`. Resolution order:
+ *
+ *   1. `SUDO_USER`   — set by sudo to the pre-elevation identity. The most
+ *                      common case: the operator runs `sudo hivectl service
+ *                      install` from their own shell.
+ *   2. `USER` / `LOGNAME` — fallbacks when not invoked via sudo (e.g. running
+ *                      directly as root, or in a container without sudo).
+ *   3. `'root'`      — final fallback. systemd accepts `User=root` and
+ *                      runs the service as PID 1's owner.
+ *
+ * Operators who want the previous Linux default (`User=hive`, dedicated
+ * system user, INC-2026-001 FLAG-002 hardening) pass `--user hive`
+ * explicitly. The flag also creates the user via `useradd` if missing.
  */
 export function getDefaultUser(p: PlatformLike = DEFAULT_PLATFORM): string {
   const platform = detectPlatform(p);
-  if (platform === 'linux') return 'hive';
+  if (platform === 'linux') {
+    return p.env['SUDO_USER'] ?? p.env['USER'] ?? p.env['LOGNAME'] ?? 'root';
+  }
   return p.env['USER'] ?? p.env['LOGNAME'] ?? 'unknown';
 }
 

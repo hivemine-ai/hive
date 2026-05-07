@@ -43,8 +43,18 @@ export function runServiceLifecycle(
     deps.unitPath ??
     getDefaultUnitPath(
       platform === 'linux'
-        ? { platform: 'linux', homedir: () => '/root', env: process.env }
-        : { platform: 'darwin', homedir: () => process.env['HOME'] ?? '/', env: process.env },
+        ? {
+            platform: 'linux',
+            homedir: () => '/root',
+            env: process.env,
+            cwd: () => process.cwd(),
+          }
+        : {
+            platform: 'darwin',
+            homedir: () => process.env['HOME'] ?? '/',
+            env: process.env,
+            cwd: () => process.cwd(),
+          },
     );
 
   if (!existsSync(unitPath)) {

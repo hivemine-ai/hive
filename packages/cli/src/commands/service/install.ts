@@ -121,15 +121,15 @@ function installLinux(input: RunServiceInstallInput, deps: LinuxDeps): RunServic
     });
   }
 
-  const user =
-    input.user ?? getDefaultUser({ platform: 'linux', homedir: () => '/root', env: process.env });
-  const workingDir =
-    input.workingDir ??
-    deps.paths?.workingDir ??
-    getDefaultWorkingDir({ platform: 'linux', homedir: () => '/root', env: process.env });
-  const unitPath =
-    deps.paths?.unitPath ??
-    getDefaultUnitPath({ platform: 'linux', homedir: () => '/root', env: process.env });
+  const linuxStub = {
+    platform: 'linux' as const,
+    homedir: () => '/root',
+    env: process.env,
+    cwd: () => process.cwd(),
+  };
+  const user = input.user ?? getDefaultUser(linuxStub);
+  const workingDir = input.workingDir ?? deps.paths?.workingDir ?? getDefaultWorkingDir(linuxStub);
+  const unitPath = deps.paths?.unitPath ?? getDefaultUnitPath(linuxStub);
 
   ensureSystemUser(user, workingDir, deps.runner, deps.stderr);
   ensureWorkingDir(workingDir, user, deps.runner);
@@ -306,6 +306,7 @@ function installDarwin(input: RunServiceInstallInput, deps: DarwinDeps): RunServ
     platform: 'darwin' as const,
     homedir: () => process.env['HOME'] ?? '/',
     env: process.env,
+    cwd: () => process.cwd(),
   };
   const user = input.user ?? getDefaultUser(darwinStub);
   const workingDir = input.workingDir ?? deps.paths?.workingDir ?? getDefaultWorkingDir(darwinStub);
@@ -358,26 +359,21 @@ export function renderInstallSuccess(result: RunServiceInstallResult): string {
     lines.push(`        to ${result.execPath} so the service user can traverse to it.`);
     lines.push('        (the source path is not system-accessible to non-root users.)');
   }
-  // State bootstrap instructions for systemd installs. The service runs as
-  // a non-root user with WorkingDirectory != the operator's cwd, so any
-  // signing keys + DB created by `hivectl init` from the operator's cwd
-  // will not be where `serve` looks. Make the next step explicit.
+  // State check for systemd installs. With the PRY-069 default
+  // (WorkingDirectory = process.cwd(), User = invoking user), the operator
+  // is typically already in a directory where they ran `hivectl init`.
+  // If yes — nothing to do, `start` will read the existing state.
+  // If no — single-line hint to run init in the working dir.
   if (result.supervisor === 'systemd') {
+    const stateOk = existsSync(path.join(result.workingDir, 'var', 'keys'));
     lines.push('');
-    lines.push('Next: bootstrap state in the working directory.');
-    lines.push(`  If you have NOT yet run 'hivectl init', do it as the service user`);
-    lines.push(`  inside ${result.workingDir}:`);
-    lines.push('');
-    lines.push(`    sudo -u ${result.user} bash -c 'cd ${result.workingDir} && hivectl init \\`);
-    lines.push("       --admin-email <you@example.com> --hive-name '<your-hive>'");
-    lines.push('');
-    lines.push(
-      `  If you ALREADY ran 'hivectl init' from another directory, copy the state into ${result.workingDir}:`,
-    );
-    lines.push('');
-    lines.push(`    sudo cp -r <init-cwd>/var/keys ${result.workingDir}/var/keys`);
-    lines.push(`    sudo cp -r <init-cwd>/var/db   ${result.workingDir}/var/db`);
-    lines.push(`    sudo chown -R ${result.user}:${result.user} ${result.workingDir}/var`);
+    if (stateOk) {
+      lines.push(`State:       found at ${path.join(result.workingDir, 'var', 'keys')}`);
+    } else {
+      lines.push(`State:       not yet initialized in ${result.workingDir}/var/`);
+      lines.push(`             Run 'hivectl init --admin-email <X> --hive-name <Y>' in this`);
+      lines.push(`             directory before starting the service.`);
+    }
   }
   lines.push('');
   lines.push('To start:');
