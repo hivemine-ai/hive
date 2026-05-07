@@ -24,6 +24,7 @@ import type { IncomingMessage } from 'node:http';
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { HIVE_DEFAULT_HTTP_PORT } from '@hive/shared';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import type { Kysely } from 'kysely';
@@ -53,7 +54,7 @@ export interface HttpHostOptions {
   mcpPath?: string;
   /** Default `0.0.0.0`. */
   host?: string;
-  /** Default `8443`. */
+  /** Default {@link HIVE_DEFAULT_HTTP_PORT} (`8443`). */
   port?: number;
   /** Default 500ms — readyz DB ping timeout. */
   readyzDbTimeoutMs?: number;
@@ -78,7 +79,7 @@ interface HiveAuth {
 export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}): HttpHost {
   const mcpPath = options.mcpPath ?? '/mcp';
   const host = options.host ?? '0.0.0.0';
-  const port = options.port ?? 8443;
+  const port = options.port ?? HIVE_DEFAULT_HTTP_PORT;
   const readyzTimeout = options.readyzDbTimeoutMs ?? 500;
 
   const app = Fastify({

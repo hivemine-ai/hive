@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import chalk from 'chalk';
 
+import { HIVE_DEFAULT_HTTP_PORT } from '@hive/shared';
+
 import {
   formatDbLocation,
   isJsonMode,
@@ -941,5 +943,150 @@ describe('PRY-051 — runServe 3-phase output (formatted mode)', () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(exitCalls).toBeGreaterThanOrEqual(1);
     void runPromise;
+  });
+});
+
+describe('PRY-071 — banner default port comes from HIVE_DEFAULT_HTTP_PORT', () => {
+  // Regression: the boot banner used to fall back to a stale literal `'7700'`
+  // when no `--port`, no `HIVE_MCP_HTTP_PORT`, and no config-file port were
+  // supplied — while the wire and the http-host actually bind on `8443`. The
+  // CLI banner now reads the same `HIVE_DEFAULT_HTTP_PORT` constant from
+  // `@hive/shared` that the wire and http-host use, so the displayed bind
+  // matches the actual listening socket.
+
+  const previousLevel = chalk.level;
+  beforeEach(() => {
+    chalk.level = 0;
+  });
+  afterEach(() => {
+    chalk.level = previousLevel;
+  });
+
+  it('banner falls back to HIVE_DEFAULT_HTTP_PORT when --port, env, and config are all absent', async () => {
+    const sink: string[] = [];
+    let exitCalls = 0;
+    const fakeProc: SignalsProcess = {
+      on() {
+        return undefined;
+      },
+      exit() {
+        exitCalls += 1;
+      },
+    };
+    const handlers: Partial<Record<'SIGTERM' | 'SIGINT', () => void>> = {};
+    // The wire's `port()` returns whatever the runtime bound — we use a
+    // distinct literal here on purpose so the assertion can distinguish the
+    // banner port (driven by the constant) from the readiness port (driven
+    // by `wire.port()`). Pre-PRY-071 the banner would have rendered `7700`
+    // by accident of the stale literal happening to match this fake; the
+    // post-fix banner renders the constant regardless.
+    const fakeWire = {
+      start: (): Promise<void> => Promise.resolve(),
+      stop: (): Promise<void> => Promise.resolve(),
+      port: (): number | null => 12345,
+      _httpHost: (): never => {
+        throw new Error('test stub');
+      },
+      _cellEvents: (): never => {
+        throw new Error('test stub');
+      },
+    };
+    const fakeLogger = makeLoggerStub([]);
+    fakeProc.on = (event, listener) => {
+      handlers[event] = listener;
+      return undefined;
+    };
+
+    const runPromise = runServe(
+      { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+      {
+        env: {},
+        proc: fakeProc,
+        outSink: (line) => {
+          sink.push(line);
+        },
+        createLoggerFn: ((): typeof fakeLogger => fakeLogger) as unknown as NonNullable<
+          RunServeDeps['createLoggerFn']
+        >,
+        buildWireFn: ((): Promise<typeof fakeWire> =>
+          Promise.resolve(fakeWire)) as unknown as NonNullable<RunServeDeps['buildWireFn']>,
+        readConfigFileFn: () => null,
+        readSnapshotFn: () => Promise.resolve(null),
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    handlers.SIGINT?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(exitCalls).toBeGreaterThanOrEqual(1);
+    void runPromise;
+
+    const concatenated = sink.join('');
+    // Banner port comes from the shared constant.
+    expect(concatenated).toContain(`  bind       127.0.0.1:${HIVE_DEFAULT_HTTP_PORT}`);
+    // Readiness comes from `wire.port()` — the fake's `12345`. The two paths
+    // are independent by design; this assertion makes that explicit.
+    expect(concatenated).toContain('  ⬡ ready · http://127.0.0.1:12345');
+  });
+
+  it('banner honors HIVE_MCP_HTTP_PORT env var override over the default', async () => {
+    const sink: string[] = [];
+    let exitCalls = 0;
+    const fakeProc: SignalsProcess = {
+      on() {
+        return undefined;
+      },
+      exit() {
+        exitCalls += 1;
+      },
+    };
+    const handlers: Partial<Record<'SIGTERM' | 'SIGINT', () => void>> = {};
+    const fakeWire = {
+      start: (): Promise<void> => Promise.resolve(),
+      stop: (): Promise<void> => Promise.resolve(),
+      port: (): number | null => 9000,
+      _httpHost: (): never => {
+        throw new Error('test stub');
+      },
+      _cellEvents: (): never => {
+        throw new Error('test stub');
+      },
+    };
+    const fakeLogger = makeLoggerStub([]);
+    fakeProc.on = (event, listener) => {
+      handlers[event] = listener;
+      return undefined;
+    };
+
+    const runPromise = runServe(
+      { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+      {
+        env: { HIVE_MCP_HTTP_PORT: '9000' },
+        proc: fakeProc,
+        outSink: (line) => {
+          sink.push(line);
+        },
+        createLoggerFn: ((): typeof fakeLogger => fakeLogger) as unknown as NonNullable<
+          RunServeDeps['createLoggerFn']
+        >,
+        buildWireFn: ((): Promise<typeof fakeWire> =>
+          Promise.resolve(fakeWire)) as unknown as NonNullable<RunServeDeps['buildWireFn']>,
+        readConfigFileFn: () => null,
+        readSnapshotFn: () => Promise.resolve(null),
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    handlers.SIGINT?.();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(exitCalls).toBeGreaterThanOrEqual(1);
+    void runPromise;
+
+    const concatenated = sink.join('');
+    expect(concatenated).toContain('  bind       127.0.0.1:9000');
+    // The default port should NOT leak through when an env override is set.
+    expect(concatenated).not.toContain(`  bind       127.0.0.1:${HIVE_DEFAULT_HTTP_PORT}`);
   });
 });

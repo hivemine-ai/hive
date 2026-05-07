@@ -21,6 +21,7 @@
 // entirely — they construct only what they need before the schema or signing
 // keys exist. Every other CLI subcommand consumes `startCli()`.
 
+import { HIVE_DEFAULT_HTTP_PORT } from '@hive/shared';
 import type { Kysely } from 'kysely';
 
 import {
@@ -74,7 +75,7 @@ import type { HttpHost } from '#transport/mcp/http-host.js';
 export interface WireConfig {
   /** Default `0.0.0.0`. */
   httpHost?: string;
-  /** Default `8443`. */
+  /** Default {@link HIVE_DEFAULT_HTTP_PORT} (`8443`). */
   httpPort?: number;
   /** Default `/mcp`. */
   mcpPath?: string;
@@ -111,7 +112,7 @@ export function resolveWireConfigFromEnv(
     httpHost: overrides.httpHost ?? env['HIVE_MCP_HTTP_HOST'] ?? '0.0.0.0',
     httpPort:
       overrides.httpPort ??
-      parseIntEnv(env['HIVE_MCP_HTTP_PORT'], 8443, {
+      parseIntEnv(env['HIVE_MCP_HTTP_PORT'], HIVE_DEFAULT_HTTP_PORT, {
         name: 'HIVE_MCP_HTTP_PORT',
         min: 1,
         max: 65535,
