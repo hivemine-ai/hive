@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-05-07
+
+### Fixed (regression introduced in v0.1.6 by PRY-068)
+
+- `hivectl service install` no longer ships a unit file whose `ExecStart` binary is unable to load `better-sqlite3` at runtime (PRY-070). PRY-068 detected non-system-accessible binary paths (under `/root/.nvm/`, `~/.npm/`, etc.) and copied **only the binary** to `/usr/local/bin/hivectl`. The SEA's `createRequire(__filename)` chain walks from the binary file looking for `node_modules/<name>/`, so leaving the bundled `node_modules/{better-sqlite3,bindings,file-uri-to-path}/` and `native/better_sqlite3.node` behind in the npm install location made the relocated binary fail with `fatal: Cannot find module 'better-sqlite3'` at the first DB-touching command. v0.1.6, v0.1.7, and v0.1.8 all shipped this regression.
+- v0.1.9 relocates the **whole platform package directory** (binary + native/ + node_modules/ + package.json) to `/usr/local/lib/hivemine-hivectl/` and creates a relative symlink at `/usr/local/bin/hivectl -> ../lib/hivemine-hivectl/bin/hivectl`. The unit's `ExecStart` points at the real binary inside the relocated package, so `__filename` resolves there and the createRequire chain finds the bundled deps. The symlink keeps the operator's PATH working unchanged. The relocation is idempotent — a same-size binary at the target reuses the existing copy; an upgrade with a different binary size triggers a full `rmSync` + recursive `cpSync` so stale files from the previous version do not survive.
+- Empirically validated on Linux/amd64 (Docker): `init` creates the DB and signing key end-to-end; `serve` boots and reports `hive server listening port=8443 mcpPath=/mcp`.
+
 ## [0.1.8] - 2026-05-07
 
 ### Changed (BREAKING — default behavior of `hivectl service install` on Linux)
