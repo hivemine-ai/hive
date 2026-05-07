@@ -332,6 +332,50 @@ jobs:
           # the published tarball via `bundleDependencies`.
           mkdir -p "${PKG_DIR}/node_modules"
           cp -r "${WORKDIR}/node_modules/better-sqlite3" "${PKG_DIR}/node_modules/"
+          # Bundle better-sqlite3's runtime transitive deps. better-sqlite3's
+          # `lib/database.js` does `require('bindings')` lazy on
+          # `new Database(...)`, and `bindings/bindings.js` does
+          # `require('file-uri-to-path')` at module load time. npm does NOT
+          # re-resolve transitive deps of bundleDependencies from the
+          # registry on user install (treats the bundle as self-contained),
+          # so without these we ship a tarball that imports a missing module
+          # at runtime — `hivectl --version` works (no DB) but `hivectl init`
+          # fails with "Cannot find module 'bindings'". `prebuild-install`
+          # and its tree are install-time only (postinstall hook, we
+          # `--ignore-scripts`) so they are NOT needed at runtime.
+          RUNTIME_TRANSITIVE_DEPS=("bindings" "file-uri-to-path")
+          for dep in "${RUNTIME_TRANSITIVE_DEPS[@]}"; do
+            if [ ! -d "${WORKDIR}/node_modules/${dep}" ]; then
+              echo "FAIL: expected runtime transitive dep ${dep} not present in WORKDIR install"
+              exit 1
+            fi
+            cp -r "${WORKDIR}/node_modules/${dep}" "${PKG_DIR}/node_modules/"
+          done
+          # Extend the staging package.json's `dependencies` and
+          # `bundleDependencies` with the actual installed versions of the
+          # transitive deps. npm requires bundleDependencies entries to ALSO
+          # be in `dependencies` for bundling to take effect (PRY-065
+          # lesson). Versions read dynamically from the WORKDIR install so a
+          # future better-sqlite3 bump propagates without hardcoded edits.
+          node -e "
+            const fs = require('fs');
+            const stagingPkgPath = '${PKG_DIR}/package.json';
+            const stagingPkg = JSON.parse(fs.readFileSync(stagingPkgPath, 'utf8'));
+            const deps = ['bindings', 'file-uri-to-path'];
+            stagingPkg.dependencies = stagingPkg.dependencies || {};
+            stagingPkg.bundleDependencies = stagingPkg.bundleDependencies || [];
+            for (const dep of deps) {
+              const depPkg = JSON.parse(fs.readFileSync('${PKG_DIR}/node_modules/' + dep + '/package.json', 'utf8'));
+              stagingPkg.dependencies[dep] = depPkg.version;
+              if (!stagingPkg.bundleDependencies.includes(dep)) {
+                stagingPkg.bundleDependencies.push(dep);
+              }
+            }
+            fs.writeFileSync(stagingPkgPath, JSON.stringify(stagingPkg, null, 2) + '\n');
+            console.log('Extended dependencies + bundleDependencies for transitive runtime deps:');
+            console.log('  dependencies:', JSON.stringify(stagingPkg.dependencies));
+            console.log('  bundleDependencies:', JSON.stringify(stagingPkg.bundleDependencies));
+          "
           # Extend the bundled better-sqlite3's `files` field to include the
           # prebuilt native binding. better-sqlite3@11.x publishes with `files:
           # ["binding.gyp", "src/*.[ch]pp", "lib/**", "deps/**"]` — it does NOT
@@ -434,6 +478,66 @@ jobs:
           echo "OK: tarball contains ${FILE_COUNT} files including better_sqlite3.node binding"
           # Cleanup local tarball; the actual `Publish to npm` step regenerates fresh.
           rm -f "${TARBALL}"
+
+      - name: Smoke-test bundled tarball with require + new Database (Test layer 4)
+        if: ${{ matrix.os_filter == 'linux' && matrix.cpu_filter == 'x64' }}
+        shell: bash
+        env:
+          PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
+        run: |
+          # Install the staged tarball into a fresh tmp dir and actually
+          # exercise better-sqlite3's runtime path: load module, create
+          # in-memory DB, exec a statement, close. This catches missing
+          # transitive runtime deps at publish time — which Test layers
+          # 1-3 do NOT (Test layer 1 only greps for the binding file,
+          # Test layer 2 is registry-only, Test layer 3 only validates
+          # pack-time + auth without running the resulting bundle).
+          # Runs in BOTH dry-run and real mode.
+          #
+          # Conditional on linux-x64 matrix entry: the publish-binaries
+          # job runs on ubuntu-latest for every matrix entry, so npm
+          # install of a tarball declaring os:["darwin"] or cpu:["arm64"]
+          # is rejected with EBADPLATFORM on the runner. For darwin-arm64
+          # and linux-arm64 this step is skipped — the runtime JS dep
+          # tree (better-sqlite3 + bindings + file-uri-to-path) is
+          # platform-independent, so a successful smoke on linux-x64
+          # implies the same JS resolution would succeed on the other
+          # platforms. The binding architecture itself is verified by
+          # Test layer 1 (file present in tarball with the correct
+          # arch per per-platform `file` arch assertion in the bundle
+          # step).
+          PKG_DIR="${GITHUB_WORKSPACE}/staging/@hivemine/hivectl-${PLATFORM_NAME}"
+          cd "${PKG_DIR}"
+          TARBALL=$(npm pack --silent)
+          TEST_DIR=$(mktemp -d)
+          pushd "${TEST_DIR}" > /dev/null
+          npm init -y > /dev/null
+          echo "::group::npm install <staged-tarball>"
+          npm install "${PKG_DIR}/${TARBALL}" --no-save --ignore-scripts 2>&1 | tail -5
+          echo "::endgroup::"
+          BSQ_PATH="${TEST_DIR}/node_modules/@hivemine/hivectl-${PLATFORM_NAME}/node_modules/better-sqlite3"
+          if [ ! -d "${BSQ_PATH}" ]; then
+            echo "FAIL: better-sqlite3 not present in installed tarball at ${BSQ_PATH}"
+            ls -la "${TEST_DIR}/node_modules/" 2>/dev/null || true
+            exit 1
+          fi
+          echo "::group::Smoke — require + new Database + exec + close"
+          node -e "
+            const Db = require('${BSQ_PATH}');
+            const db = new Db(':memory:');
+            db.exec('CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);');
+            const row = db.prepare('SELECT x FROM t').get();
+            if (row.x !== 1) {
+              console.error('FAIL: expected row.x=1, got', row);
+              process.exit(1);
+            }
+            db.close();
+            console.log('OK: better-sqlite3 loads, opens DB, exec, query, close — all runtime deps resolve');
+          "
+          echo "::endgroup::"
+          popd > /dev/null
+          rm -rf "${TEST_DIR}"
+          rm -f "${PKG_DIR}/${TARBALL}"
 
       - name: Verify version is publishable (Test layer 2 — burn check)
         if: ${{ needs.prepare.outputs.dry_run == 'false' }}
