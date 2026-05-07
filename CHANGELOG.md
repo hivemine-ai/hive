@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-05-07
+
+Three operational polish fixes from the v0.1.5 production smoke (PRY-068).
+
+- **`hivectl service install` no longer writes a broken unit on nvm-installed boxes.** When the binary lives under `/root/.nvm/`, `~/.nvm/`, `~/.npm/`, `~/.volta/`, `~/.fnm/`, `~/.asdf/`, or `~/.local/`, the installer now copies it to `/usr/local/bin/hivectl` and uses that path in the unit's `ExecStart`. The previous behavior emitted `ExecStart=/root/.nvm/.../hivectl` together with `User=hive`, which systemd rejected with `203/EXEC Permission denied` because `hive` cannot traverse `/root/` (mode 0700). The copy is idempotent (size match → reuse) so re-running `service install` on the same box is cheap. The post-install message also gains an explicit state-bootstrap section walking the operator through either running `hivectl init` as the service user inside `WorkingDirectory` or copying + chowning the existing state — same fix surface, different operator workflow.
+- **The `hivectl` daily banner now reflects the actual release version.** The banner had `v0.1.0` hardcoded as a string literal that PRY-060's `Sync release version to source` step did not touch (the step matches the `'X.Y.Z-dev'` sentinel, not the bare `v0.1.0` literal), so `hivectl --version` correctly reported the release while `hivectl` (the daily snapshot) kept showing `v0.1.0`. The banner now imports `HIVE_VERSION` from `@hive/shared` — same source of truth as `program.version()` — so future releases pick it up automatically.
+- **CI guardrail against internal refs leaking into MCP tool metadata.** A new `catalog.test.ts` builds the tool catalog with stub deps and asserts every `title`/`description` is free of `PRY-NNN`, `Slice N`, `ADR-NNN`, and `INC-YYYY-NNN` patterns. The current 8 tool descriptions are clean — this test prevents a future paste-from-vault-into-description regression at PR time.
+
 ## [0.1.5] - 2026-05-07
 
 Fixes a config default mismatch that broke `hivectl serve` after a successful `hivectl init`. `init` writes the signing keypair to `./var/keys/` (matching the `--keys-dir` flag default and the `docs/auth.md` + `docs/hivectl.md` documentation), but the server runtime config used by `serve` defaulted to `./keys`. Result: `init` succeeded, `serve` immediately failed with `No signing keypairs found in ./keys`. The server default is now aligned to `./var/keys`. Workaround for v0.1.4 installs: `HIVE_AUTH_KEYS_DIR=./var/keys hivectl serve`.
