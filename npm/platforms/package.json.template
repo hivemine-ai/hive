@@ -12,8 +12,12 @@
   "cpu": ["{{CPU}}"],
   "files": [
     "bin/",
+    "native/",
     "node_modules/"
   ],
+  "scripts": {
+    "postinstall": "node -e \"const fs=require('fs');const path=require('path');const src=path.join(process.cwd(),'native','better_sqlite3.node');const dst=path.join(process.cwd(),'node_modules','better-sqlite3','build','Release','better_sqlite3.node');if(!fs.existsSync(src)){console.log('hive: native backup binding not present, skipping restore (development install?)');process.exit(0);}fs.mkdirSync(path.dirname(dst),{recursive:true});fs.copyFileSync(src,dst);console.log('hive: restored bundled Node 22 better-sqlite3 binding to '+dst);\""
+  },
   "dependencies": {
     "better-sqlite3": "{{BSQLITE3_VERSION}}"
   },
