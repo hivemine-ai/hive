@@ -442,25 +442,57 @@ jobs:
           PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          # `npm view <pkg>@<version>` exits:
-          #   0 + version output  → version exists, would conflict on publish
-          #   1 + "Unpublished on" → version-string burned by npm policy, would conflict
-          #   1 + plain E404       → version free to publish ✅
-          # This catches both accidental republish and version-burn issues
-          # before the 4-minute build/bundle path runs unnecessarily.
+          # Distinguish three states of the target version on the registry:
+          #   (a) currently published       → `npm view <pkg>@<v> version`
+          #                                   exits 0 with the version string.
+          #                                   Republishing would conflict; FAIL.
+          #   (b) version-specific burn     → `npm view <pkg>@<v>` returns
+          #                                   "Unpublished on <ts>" with a
+          #                                   timestamp from when THIS version
+          #                                   was unpublished, AND the package
+          #                                   itself still has other versions
+          #                                   published. The version-string is
+          #                                   permanently reserved by npm
+          #                                   policy; FAIL.
+          #   (c) package fully unpublished → `npm view <pkg>@<v>` returns
+          #                                   "Unpublished on <ts>" but it is
+          #                                   the package-level state; npm
+          #                                   returns the same message for any
+          #                                   version of a fully-unpublished
+          #                                   package, including versions that
+          #                                   were never published. WARN and
+          #                                   defer to the real `npm publish`
+          #                                   step, which fails loudly with
+          #                                   E403/E400 if the version is
+          #                                   actually burned.
           PKG_NAME="@hivemine/hivectl-${PLATFORM_NAME}"
           set +e
-          VIEW_OUTPUT=$(npm view "${PKG_NAME}@${VERSION}" version 2>&1)
-          VIEW_EXIT=$?
+          VIEW_VER_OUTPUT=$(npm view "${PKG_NAME}@${VERSION}" version 2>&1)
+          VIEW_VER_EXIT=$?
           set -e
-          if [ "${VIEW_EXIT}" -eq 0 ] && [ -n "${VIEW_OUTPUT}" ]; then
+          if [ "${VIEW_VER_EXIT}" -eq 0 ] && [ -n "${VIEW_VER_OUTPUT}" ]; then
             echo "FAIL: ${PKG_NAME}@${VERSION} already published; cannot republish same version-string."
             echo "Bump version in CHANGELOG.md and retag."
             exit 1
           fi
-          if printf '%s\n' "${VIEW_OUTPUT}" | grep -q "Unpublished on"; then
+          if printf '%s\n' "${VIEW_VER_OUTPUT}" | grep -q "Unpublished on"; then
+            # Disambiguate (b) vs (c): query the package without the version
+            # specifier and compare timestamps.
+            set +e
+            VIEW_PKG_OUTPUT=$(npm view "${PKG_NAME}" 2>&1)
+            set -e
+            VER_UNPUB_TS=$(printf '%s\n' "${VIEW_VER_OUTPUT}" | grep -oE "Unpublished on [0-9TZ:.-]+" | head -1)
+            PKG_UNPUB_TS=$(printf '%s\n' "${VIEW_PKG_OUTPUT}" | grep -oE "Unpublished on [0-9TZ:.-]+" | head -1)
+            if [ -n "${PKG_UNPUB_TS}" ] && [ "${PKG_UNPUB_TS}" = "${VER_UNPUB_TS}" ]; then
+              echo "WARN: ${PKG_NAME} is fully unpublished (${PKG_UNPUB_TS});"
+              echo "      cannot determine version-string burn state from npm view alone in this state"
+              echo "      (npm returns the package-level message for any version queried)."
+              echo "      Proceeding to real publish — npm will reject with E403/E400"
+              echo "      if ${VERSION} was previously published-and-unpublished."
+              exit 0
+            fi
             echo "FAIL: ${PKG_NAME}@${VERSION} was unpublished (version-string permanently burned by npm policy)."
-            echo "${VIEW_OUTPUT}"
+            echo "${VIEW_VER_OUTPUT}"
             echo "Bump version in CHANGELOG.md and retag."
             exit 1
           fi
@@ -522,23 +554,38 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          # Same burn-check logic as publish-binaries Test layer 2; applied
-          # to the wrapper package. Fails fast if the version is already
-          # published OR was unpublished (npm policy: unpublished version-
-          # strings are permanently burned for that package name).
+          # Same disambiguation logic as publish-binaries Test layer 2: separate
+          # currently-published, version-specific burn, and package-level
+          # fully-unpublished states (npm returns the package-level
+          # "Unpublished on" message for any version queried when the package
+          # has no remaining versions). See the publish-binaries equivalent
+          # step for the full case-by-case rationale.
           PKG_NAME="@hivemine/hivectl"
           set +e
-          VIEW_OUTPUT=$(npm view "${PKG_NAME}@${VERSION}" version 2>&1)
-          VIEW_EXIT=$?
+          VIEW_VER_OUTPUT=$(npm view "${PKG_NAME}@${VERSION}" version 2>&1)
+          VIEW_VER_EXIT=$?
           set -e
-          if [ "${VIEW_EXIT}" -eq 0 ] && [ -n "${VIEW_OUTPUT}" ]; then
+          if [ "${VIEW_VER_EXIT}" -eq 0 ] && [ -n "${VIEW_VER_OUTPUT}" ]; then
             echo "FAIL: ${PKG_NAME}@${VERSION} already published; cannot republish same version-string."
             echo "Bump version in CHANGELOG.md and retag."
             exit 1
           fi
-          if printf '%s\n' "${VIEW_OUTPUT}" | grep -q "Unpublished on"; then
+          if printf '%s\n' "${VIEW_VER_OUTPUT}" | grep -q "Unpublished on"; then
+            set +e
+            VIEW_PKG_OUTPUT=$(npm view "${PKG_NAME}" 2>&1)
+            set -e
+            VER_UNPUB_TS=$(printf '%s\n' "${VIEW_VER_OUTPUT}" | grep -oE "Unpublished on [0-9TZ:.-]+" | head -1)
+            PKG_UNPUB_TS=$(printf '%s\n' "${VIEW_PKG_OUTPUT}" | grep -oE "Unpublished on [0-9TZ:.-]+" | head -1)
+            if [ -n "${PKG_UNPUB_TS}" ] && [ "${PKG_UNPUB_TS}" = "${VER_UNPUB_TS}" ]; then
+              echo "WARN: ${PKG_NAME} is fully unpublished (${PKG_UNPUB_TS});"
+              echo "      cannot determine version-string burn state from npm view alone in this state"
+              echo "      (npm returns the package-level message for any version queried)."
+              echo "      Proceeding to real publish — npm will reject with E403/E400"
+              echo "      if ${VERSION} was previously published-and-unpublished."
+              exit 0
+            fi
             echo "FAIL: ${PKG_NAME}@${VERSION} was unpublished (version-string permanently burned by npm policy)."
-            echo "${VIEW_OUTPUT}"
+            echo "${VIEW_VER_OUTPUT}"
             echo "Bump version in CHANGELOG.md and retag."
             exit 1
           fi
