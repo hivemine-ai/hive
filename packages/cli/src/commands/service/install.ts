@@ -4,7 +4,7 @@
 //
 // Per the hivectl + Admin Operations tech spec § "service install".
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { CliError } from '#error/cli-error.js';
@@ -61,6 +61,18 @@ export interface RunServiceInstallResult {
   workingDir: string;
   user: string;
   supervisor: 'systemd' | 'launchd';
+  /**
+   * The path written into the unit's `ExecStart`. May differ from the
+   * input `execPath` if the install copied the binary to
+   * `/usr/local/bin/hivectl` to make it traversable by the service user.
+   */
+  execPath?: string;
+  /**
+   * If the install copied the binary to make it system-accessible, the
+   * original source path. Used by the post-install instructions to
+   * explain what was done.
+   */
+  execPathCopiedFrom?: string;
 }
 
 export async function runServiceInstall(
@@ -122,10 +134,22 @@ function installLinux(input: RunServiceInstallInput, deps: LinuxDeps): RunServic
   ensureSystemUser(user, workingDir, deps.runner, deps.stderr);
   ensureWorkingDir(workingDir, user, deps.runner);
 
+  // Resolve a system-accessible ExecStart path. The unit file declares
+  // `User=<user>` (typically `hive`); when the binary lives under `/root/`,
+  // `~/.nvm/`, or any user dotdir, the non-root system user cannot
+  // traverse to it (mode 0700) and systemd fails with `203/EXEC Permission
+  // denied`. If the source path is not system-accessible, copy the binary
+  // to `/usr/local/bin/hivectl` and use that path in ExecStart.
+  const resolvedExecPath = resolveSystemAccessibleExecPath(
+    deps.execPath,
+    SYSTEM_BINARY_TARGET,
+    deps.stderr,
+  );
+
   if (existsSync(unitPath)) {
     deps.stderr.write(`warning: ${unitPath} exists; overwriting\n`);
   }
-  const unit = renderSystemdUnit({ execPath: deps.execPath, workingDir, user });
+  const unit = renderSystemdUnit({ execPath: resolvedExecPath, workingDir, user });
   mkdirSync(path.dirname(unitPath), { recursive: true });
   writeFileSync(unitPath, unit, 'utf8');
 
@@ -136,7 +160,96 @@ function installLinux(input: RunServiceInstallInput, deps: LinuxDeps): RunServic
     });
   }
 
-  return { unitPath, workingDir, user, supervisor: 'systemd' };
+  const result: RunServiceInstallResult = {
+    unitPath,
+    workingDir,
+    user,
+    supervisor: 'systemd',
+    execPath: resolvedExecPath,
+  };
+  if (resolvedExecPath !== deps.execPath) {
+    result.execPathCopiedFrom = deps.execPath;
+  }
+  return result;
+}
+
+/**
+ * Path patterns that are not safely traversable by non-root system users.
+ * `/root/` is mode 0700 by default; user dotdirs (`~/.nvm/`, `~/.npm/`,
+ * `~/.local/`) inherit restrictive permissions from `~/`. A unit file that
+ * runs as `User=hive` and points to a binary inside any of these paths
+ * fails to execve with `Permission denied` even when the binary itself
+ * has +x — the failure is at the directory-traversal step.
+ */
+const NON_SYSTEM_ACCESSIBLE_PATH_PATTERNS: readonly RegExp[] = [
+  /^\/root\//, // root's home (mode 0700)
+  /\/\.nvm\//, // nvm-managed Node installs
+  /\/\.npm\//, // npm cache directories
+  /\/\.volta\//, // Volta-managed Node installs
+  /\/\.fnm\//, // fnm-managed Node installs
+  /\/\.asdf\//, // asdf-managed Node installs
+  /\/\.local\//, // user-local installs
+];
+
+/**
+ * Where to copy the binary when the source path is not system-accessible.
+ * `/usr/local/bin` is on every Linux distro's default PATH and traversable
+ * by any user.
+ */
+const SYSTEM_BINARY_TARGET = '/usr/local/bin/hivectl';
+
+/**
+ * Returns true if `binaryPath` is reachable from a non-root system user
+ * (`hive`). System paths like `/usr/local/bin`, `/usr/bin`, `/opt/...` are
+ * traversable; user-scoped paths under `/root/` or any `~/.*` dotdir are
+ * not.
+ */
+export function isSystemAccessiblePath(binaryPath: string): boolean {
+  return !NON_SYSTEM_ACCESSIBLE_PATH_PATTERNS.some((re) => re.test(binaryPath));
+}
+
+/**
+ * Resolves a system-accessible ExecStart path for the systemd unit.
+ *
+ * If `sourcePath` is already system-accessible, returns it unchanged. If
+ * not, copies the binary to `targetPath` (mode 0755) and returns
+ * `targetPath`. Idempotent: if `targetPath` already exists with the same
+ * size as `sourcePath`, the copy is skipped (operator-driven re-installs
+ * after a Hive upgrade re-trigger the copy because the size changes with
+ * the binary).
+ *
+ * Exported for unit testing.
+ */
+export function resolveSystemAccessibleExecPath(
+  sourcePath: string,
+  targetPath: string,
+  stderr: NodeJS.WritableStream,
+): string {
+  if (isSystemAccessiblePath(sourcePath)) {
+    return sourcePath;
+  }
+  if (existsSync(targetPath)) {
+    try {
+      const srcStat = statSync(sourcePath);
+      const tgtStat = statSync(targetPath);
+      if (srcStat.size === tgtStat.size) {
+        stderr.write(
+          `info: ${targetPath} already present with matching size; reusing for ExecStart\n`,
+        );
+        return targetPath;
+      }
+    } catch {
+      // Stat failure → fall through to copy.
+    }
+  }
+  mkdirSync(path.dirname(targetPath), { recursive: true });
+  copyFileSync(sourcePath, targetPath);
+  chmodSync(targetPath, 0o755);
+  stderr.write(
+    `info: copied binary from ${sourcePath} to ${targetPath} ` +
+      `(source path is not traversable by the service user)\n`,
+  );
+  return targetPath;
 }
 
 function ensureSystemUser(
@@ -223,7 +336,7 @@ function installDarwin(input: RunServiceInstallInput, deps: DarwinDeps): RunServ
   });
   writeFileSync(unitPath, plist, 'utf8');
 
-  return { unitPath, workingDir, user, supervisor: 'launchd' };
+  return { unitPath, workingDir, user, supervisor: 'launchd', execPath: deps.execPath };
 }
 
 /**
@@ -235,6 +348,36 @@ export function renderInstallSuccess(result: RunServiceInstallResult): string {
   lines.push(`  Working dir: ${result.workingDir}`);
   if (result.supervisor === 'systemd') {
     lines.push(`  User:        ${result.user}`);
+  }
+  if (result.execPath !== undefined) {
+    lines.push(`  ExecStart:   ${result.execPath}`);
+  }
+  if (result.execPathCopiedFrom !== undefined && result.execPath !== undefined) {
+    lines.push('');
+    lines.push(`  note: copied binary from ${result.execPathCopiedFrom}`);
+    lines.push(`        to ${result.execPath} so the service user can traverse to it.`);
+    lines.push('        (the source path is not system-accessible to non-root users.)');
+  }
+  // State bootstrap instructions for systemd installs. The service runs as
+  // a non-root user with WorkingDirectory != the operator's cwd, so any
+  // signing keys + DB created by `hivectl init` from the operator's cwd
+  // will not be where `serve` looks. Make the next step explicit.
+  if (result.supervisor === 'systemd') {
+    lines.push('');
+    lines.push('Next: bootstrap state in the working directory.');
+    lines.push(`  If you have NOT yet run 'hivectl init', do it as the service user`);
+    lines.push(`  inside ${result.workingDir}:`);
+    lines.push('');
+    lines.push(`    sudo -u ${result.user} bash -c 'cd ${result.workingDir} && hivectl init \\`);
+    lines.push("       --admin-email <you@example.com> --hive-name '<your-hive>'");
+    lines.push('');
+    lines.push(
+      `  If you ALREADY ran 'hivectl init' from another directory, copy the state into ${result.workingDir}:`,
+    );
+    lines.push('');
+    lines.push(`    sudo cp -r <init-cwd>/var/keys ${result.workingDir}/var/keys`);
+    lines.push(`    sudo cp -r <init-cwd>/var/db   ${result.workingDir}/var/db`);
+    lines.push(`    sudo chown -R ${result.user}:${result.user} ${result.workingDir}/var`);
   }
   lines.push('');
   lines.push('To start:');

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Writable } from 'node:stream';
@@ -8,7 +8,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CliError } from '#error/cli-error.js';
 
 import type { ProcessResult, ProcessRunner } from './exec.js';
-import { renderInstallSuccess, runServiceInstall } from './install.js';
+import {
+  isSystemAccessiblePath,
+  renderInstallSuccess,
+  resolveSystemAccessibleExecPath,
+  runServiceInstall,
+} from './install.js';
 import { readConfigFile } from '#commands/config/loader.js';
 
 let workDir: string;
@@ -197,6 +202,46 @@ describe('runServiceInstall — Linux', () => {
     expect((caught as CliError).message).toContain('daemon-reload');
   });
 
+  it('copies the binary to /usr/local/bin and uses that in ExecStart when execPath is under /root/.nvm/', async () => {
+    // Reproduces the v0.1.5 production failure: the user installs hivectl
+    // via nvm under /root/, the SEA binary lands at
+    // /root/.nvm/.../hivectl, and `service install` would emit a unit
+    // file with User=hive + ExecStart pointing at /root/.nvm/...
+    // — which fails to execve with 203/EXEC because hive cannot
+    // traverse /root/ (mode 0700).
+    const sourceBinary = path.join(workDir, 'fake-nvm', '.nvm', 'bin', 'hivectl');
+    const targetBinary = path.join(workDir, 'fake-usr-local', 'bin', 'hivectl');
+    mkdirSync(path.dirname(sourceBinary), { recursive: true });
+    writeFileSync(sourceBinary, 'STUB-HIVECTL', 'utf8');
+    const unitPath = path.join(workDir, 'hive.service');
+    const wd = path.join(workDir, 'lib');
+    const { runner } = makeRunner(new Map([['id hive', { status: 0, stdout: '', stderr: '' }]]));
+    // Inject the target binary path so the test does not write to the
+    // real /usr/local/bin. We re-export the constant for testability via
+    // the resolveSystemAccessibleExecPath helper called directly.
+    const resolved = resolveSystemAccessibleExecPath(sourceBinary, targetBinary, stderrSink);
+    expect(resolved).toBe(targetBinary);
+    expect(existsSync(targetBinary)).toBe(true);
+    // Now exercise the full install with the resolved path mimicking the
+    // copy already happened (ensures the unit file uses targetBinary).
+    const result = await runServiceInstall(
+      { user: 'hive', workingDir: wd },
+      {
+        platform: 'linux',
+        execPath: targetBinary,
+        runner,
+        isRoot: () => true,
+        paths: { unitPath, workingDir: wd },
+        stdout: stdoutSink,
+        stderr: stderrSink,
+      },
+    );
+    expect(result.execPath).toBe(targetBinary);
+    const written = readFileSync(unitPath, 'utf8');
+    expect(written).toContain(`ExecStart=${targetBinary} serve`);
+    expect(written).not.toContain('/.nvm/');
+  });
+
   it('warns to stderr when overwriting an existing unit', async () => {
     const unitPath = path.join(workDir, 'hive.service');
     const wd = path.join(workDir, 'lib');
@@ -291,24 +336,156 @@ describe('renderInstallSuccess', () => {
       workingDir: '/var/lib/hive',
       user: 'hive',
       supervisor: 'systemd',
+      execPath: '/usr/local/bin/hivectl',
     });
     expect(out).toContain('Unit path:   /etc/systemd/system/hive.service');
     expect(out).toContain('Working dir: /var/lib/hive');
     expect(out).toContain('User:        hive');
+    expect(out).toContain('ExecStart:   /usr/local/bin/hivectl');
     expect(out).toContain('sudo systemctl enable hive && sudo systemctl start hive');
     expect(out).toContain('hivectl service start');
   });
 
-  it('renders launchd post-install instructions (no User: line)', () => {
+  it('emits a copy note when execPath was relocated for system accessibility', () => {
+    const out = renderInstallSuccess({
+      unitPath: '/etc/systemd/system/hive.service',
+      workingDir: '/var/lib/hive',
+      user: 'hive',
+      supervisor: 'systemd',
+      execPath: '/usr/local/bin/hivectl',
+      execPathCopiedFrom:
+        '/root/.nvm/versions/node/v20.18.1/lib/node_modules/@hivemine/hivectl/node_modules/@hivemine/hivectl-linux-x64/bin/hivectl',
+    });
+    expect(out).toContain('copied binary from /root/.nvm/');
+    expect(out).toContain('to /usr/local/bin/hivectl');
+    expect(out).toContain('not system-accessible');
+  });
+
+  it('omits the copy note when execPath was not relocated', () => {
+    const out = renderInstallSuccess({
+      unitPath: '/etc/systemd/system/hive.service',
+      workingDir: '/var/lib/hive',
+      user: 'hive',
+      supervisor: 'systemd',
+      execPath: '/usr/local/bin/hivectl',
+    });
+    expect(out).not.toContain('copied binary');
+  });
+
+  it('emits state bootstrap instructions for systemd installs', () => {
+    const out = renderInstallSuccess({
+      unitPath: '/etc/systemd/system/hive.service',
+      workingDir: '/var/lib/hive',
+      user: 'hive',
+      supervisor: 'systemd',
+      execPath: '/usr/local/bin/hivectl',
+    });
+    expect(out).toContain('bootstrap state in the working directory');
+    expect(out).toContain("sudo -u hive bash -c 'cd /var/lib/hive && hivectl init");
+    expect(out).toContain('sudo cp -r <init-cwd>/var/keys /var/lib/hive/var/keys');
+    expect(out).toContain('sudo cp -r <init-cwd>/var/db   /var/lib/hive/var/db');
+    expect(out).toContain('sudo chown -R hive:hive /var/lib/hive/var');
+  });
+
+  it('renders launchd post-install instructions (no User: line, no state bootstrap)', () => {
     const out = renderInstallSuccess({
       unitPath: '/Users/op/Library/LaunchAgents/com.hivemine.hivectl.plist',
       workingDir: '/Users/op/Library/Application Support/Hive',
       user: 'op',
       supervisor: 'launchd',
+      execPath: '/usr/local/bin/hivectl',
     });
     expect(out).toContain('launchctl load -w');
     expect(out).not.toContain('User:        ');
+    expect(out).not.toContain('bootstrap state');
     expect(out).toContain('hivectl service start');
+  });
+});
+
+describe('isSystemAccessiblePath', () => {
+  it('flags /root/-rooted paths as not system-accessible', () => {
+    expect(isSystemAccessiblePath('/root/.nvm/versions/node/v20/bin/hivectl')).toBe(false);
+    expect(isSystemAccessiblePath('/root/whatever/hivectl')).toBe(false);
+  });
+
+  it('flags any path inside an nvm-managed install as not system-accessible', () => {
+    expect(isSystemAccessiblePath('/home/operator/.nvm/versions/node/v22/bin/hivectl')).toBe(false);
+    expect(isSystemAccessiblePath('/Users/op/.nvm/versions/node/v22/bin/hivectl')).toBe(false);
+  });
+
+  it('flags volta / fnm / asdf / .npm / .local paths as not system-accessible', () => {
+    expect(isSystemAccessiblePath('/home/op/.volta/tools/image/node/22/bin/hivectl')).toBe(false);
+    expect(isSystemAccessiblePath('/home/op/.fnm/node-versions/v22/bin/hivectl')).toBe(false);
+    expect(isSystemAccessiblePath('/home/op/.asdf/installs/nodejs/22/bin/hivectl')).toBe(false);
+    expect(isSystemAccessiblePath('/root/.npm/_npx/abcd/node_modules/.bin/hivectl')).toBe(false);
+    expect(isSystemAccessiblePath('/home/op/.local/bin/hivectl')).toBe(false);
+  });
+
+  it('accepts standard system paths', () => {
+    expect(isSystemAccessiblePath('/usr/local/bin/hivectl')).toBe(true);
+    expect(isSystemAccessiblePath('/usr/bin/hivectl')).toBe(true);
+    expect(isSystemAccessiblePath('/opt/hive/bin/hivectl')).toBe(true);
+    expect(isSystemAccessiblePath('/srv/hive/hivectl')).toBe(true);
+  });
+});
+
+describe('resolveSystemAccessibleExecPath', () => {
+  it('returns the source path unchanged when already system-accessible', () => {
+    const stderrBuf: string[] = [];
+    const stderr = makeWritable(stderrBuf);
+    const result = resolveSystemAccessibleExecPath(
+      '/usr/local/bin/hivectl',
+      '/usr/local/bin/hivectl',
+      stderr,
+    );
+    expect(result).toBe('/usr/local/bin/hivectl');
+    expect(stderrBuf.join('')).toBe('');
+  });
+
+  it('copies the binary when the source path is not system-accessible', () => {
+    const sourcePath = path.join(workDir, 'fake-nvm', 'node', 'lib', 'hivectl');
+    const targetPath = path.join(workDir, 'usr-local-bin', 'hivectl');
+    // Create a fake binary with known content. The source path includes
+    // ".nvm" to trigger the non-system-accessible branch.
+    const realSource = sourcePath.replace(workDir, path.join(workDir, '.nvm'));
+    const realSourceDir = path.dirname(realSource);
+    mkdirSync(realSourceDir, { recursive: true });
+    writeFileSync(realSource, '#!/bin/sh\necho hivectl-stub\n', 'utf8');
+    const stderrBuf: string[] = [];
+    const stderr = makeWritable(stderrBuf);
+    const result = resolveSystemAccessibleExecPath(realSource, targetPath, stderr);
+    expect(result).toBe(targetPath);
+    expect(existsSync(targetPath)).toBe(true);
+    expect(readFileSync(targetPath, 'utf8')).toBe('#!/bin/sh\necho hivectl-stub\n');
+    expect(stderrBuf.join('')).toContain('copied binary');
+    expect(stderrBuf.join('')).toContain('not traversable');
+  });
+
+  it('reuses an existing target when sizes match (idempotent)', () => {
+    const realSource = path.join(workDir, '.nvm', 'src-bin');
+    const targetPath = path.join(workDir, 'tgt-bin');
+    mkdirSync(path.dirname(realSource), { recursive: true });
+    writeFileSync(realSource, 'IDENTICAL', 'utf8');
+    writeFileSync(targetPath, 'IDENTICAL', 'utf8');
+    const stderrBuf: string[] = [];
+    const result = resolveSystemAccessibleExecPath(realSource, targetPath, makeWritable(stderrBuf));
+    expect(result).toBe(targetPath);
+    expect(stderrBuf.join('')).toContain('already present');
+    // Content must be unchanged (no copy occurred).
+    expect(readFileSync(targetPath, 'utf8')).toBe('IDENTICAL');
+  });
+
+  it('overwrites the target when sizes differ (e.g., post-Hive-upgrade)', () => {
+    const realSource = path.join(workDir, '.nvm', 'src-bin');
+    const targetPath = path.join(workDir, 'tgt-bin');
+    mkdirSync(path.dirname(realSource), { recursive: true });
+    writeFileSync(realSource, 'NEW VERSION (longer than old)', 'utf8');
+    writeFileSync(targetPath, 'OLD', 'utf8');
+    const stderrBuf: string[] = [];
+    const result = resolveSystemAccessibleExecPath(realSource, targetPath, makeWritable(stderrBuf));
+    expect(result).toBe(targetPath);
+    expect(readFileSync(targetPath, 'utf8')).toBe('NEW VERSION (longer than old)');
+    expect(stderrBuf.join('')).toContain('copied binary');
   });
 });
 

@@ -1,7 +1,10 @@
+import { HIVE_VERSION } from '@hive/shared';
 import chalk from 'chalk';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { compact, expanded } from './banner.js';
+
+const VLABEL = `v${HIVE_VERSION}`;
 
 // Detect ANSI SGR sequences via control char built from charCode (the
 // `no-control-regex` ESLint rule flags raw ESC literals).
@@ -32,7 +35,7 @@ describe('banner.compact', () => {
     // diff here means a spec amend was required.
     expect(compact('snapshot 12s ago')).toBe(
       [
-        '    ⬢ ⬢ ⬢    hivectl  ·  v0.1.0  ·  apache-2.0',
+        `    ⬢ ⬢ ⬢    hivectl  ·  ${VLABEL}  ·  apache-2.0`,
         '  ⬢ ⬢ ⬢ ⬢ ⬢  open-source MCP server for collaborative AI agents',
         '    ⬢ ⬢ ⬢    snapshot 12s ago',
       ].join('\n'),
@@ -58,7 +61,7 @@ describe('banner.compact', () => {
   it('renders the version/license metadata on line 1', () => {
     const lines = compact('any').split('\n');
     expect(lines[0]).toContain('hivectl');
-    expect(lines[0]).toContain('v0.1.0');
+    expect(lines[0]).toContain(VLABEL);
     expect(lines[0]).toContain('apache-2.0');
   });
 
@@ -89,7 +92,7 @@ describe('banner.expanded', () => {
     expect(expanded()).toBe(
       [
         '       ⬢ ⬢ ⬢ ⬢',
-        '     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      hivectl   ·   v0.1.0',
+        `     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      hivectl   ·   ${VLABEL}`,
         '   ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢',
         '     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      bootstrapping a fresh Hive',
         '       ⬢ ⬢ ⬢ ⬢        apache-2.0  ·  hivemine-ai/hive',
@@ -107,7 +110,7 @@ describe('banner.expanded', () => {
   it('renders the version metadata on line 2', () => {
     const lines = expanded().split('\n');
     expect(lines[1]).toContain('hivectl');
-    expect(lines[1]).toContain('v0.1.0');
+    expect(lines[1]).toContain(VLABEL);
   });
 
   it('renders the bootstrapping subtitle on line 4', () => {

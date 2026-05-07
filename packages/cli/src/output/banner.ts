@@ -19,8 +19,18 @@
 //     The text column on lines 2/4/5 is owned by this module — there
 //     is exactly one caller (`output/init-ceremonial.ts::printBootHeader`).
 
+import { HIVE_VERSION } from '@hive/shared';
+
 import { c } from './colors.js';
 import { sym } from './symbols.js';
+
+// Banner version label. Single source of truth: `@hive/shared`'s
+// `HIVE_VERSION`, rewritten to the release tag at build time by
+// `release.yml`'s "Sync release version to source" step (PRY-060).
+// Hardcoding the literal here would re-introduce the v0.1.5 bug where
+// `hivectl --version` returned the synced version but the banner kept
+// showing `v0.1.0` (PRY-068).
+const VERSION_LABEL = `v${HIVE_VERSION}`;
 
 // Built once at module load (per the tech spec § "No allocations in
 // the banner" performance note). The narrow cluster is `⬢ ⬢ ⬢` (5
@@ -51,7 +61,7 @@ const N8 = `${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex} ${sym.hex} ${
  * the same 2-space header indent for `status` / `try` / `verify`).
  */
 export function compact(subtitle: string): string {
-  const line1 = `  ${c.brand(`  ${NARROW}  `)}  ${c.cmd('hive')}${c.muted('ctl')}  ${c.muted('·')}  ${c.num('v0.1.0')}  ${c.muted('·')}  apache-2.0`;
+  const line1 = `  ${c.brand(`  ${NARROW}  `)}  ${c.cmd('hive')}${c.muted('ctl')}  ${c.muted('·')}  ${c.num(VERSION_LABEL)}  ${c.muted('·')}  apache-2.0`;
   const line2 = `  ${c.brand(WIDE)}  open-source MCP server for collaborative AI agents`;
   const line3 = `  ${c.brand(`  ${NARROW}  `)}  ${subtitle}`;
   return `${line1}\n${line2}\n${line3}`;
@@ -78,7 +88,7 @@ export function compact(subtitle: string): string {
  */
 export function expanded(): string {
   const l1 = `       ${c.brand(N4)}`;
-  const l2 = `     ${c.brand(N6)}      ${c.cmd('hive')}${c.muted('ctl')}   ${c.muted('·')}   ${c.num('v0.1.0')}`;
+  const l2 = `     ${c.brand(N6)}      ${c.cmd('hive')}${c.muted('ctl')}   ${c.muted('·')}   ${c.num(VERSION_LABEL)}`;
   const l3 = `   ${c.brand(N8)}`;
   const l4 = `     ${c.brand(N6)}      ${c.muted('bootstrapping a fresh Hive')}`;
   const l5 = `       ${c.brand(N4)}        ${c.muted('apache-2.0  ·  hivemine-ai/hive')}`;
