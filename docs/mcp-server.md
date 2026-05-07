@@ -210,7 +210,7 @@ TLS termination is the operator's responsibility — run the server behind nginx
 | `HIVE_MCP_READYZ_DB_TIMEOUT_MS`           | `500`          | DB ping timeout for `GET /readyz`.                                                                                                                                                                        |
 | `HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` | `30`           | Max time to drain in-flight requests on SIGTERM/SIGINT.                                                                                                                                                   |
 | `HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE`      | `100`          | Hard cap server-side for `list_agents.pagination.limit`. The zod schema also enforces a `100` literal cap; this env var is the runtime authority and may be set lower.                                    |
-| `HIVE_AUTH_KEYS_DIR`                      | `./keys`       | Where to load the signing keypairs from.                                                                                                                                                                  |
+| `HIVE_AUTH_KEYS_DIR`                      | `./var/keys`   | Where to load the signing keypairs from.                                                                                                                                                                  |
 
 ### Presence (session lifecycle)
 
