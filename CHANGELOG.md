@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-05-07
+
+### Changed (BREAKING — default behavior of `hivectl service install` on Linux)
+
+- The Linux service install defaults now match the operator's invocation context instead of forcing a system-wide layout (PRY-069). `WorkingDirectory` defaults to `process.cwd()` (the directory where the operator runs `service install`) instead of `/var/lib/hive`. `User` and `Group` default to `SUDO_USER ?? USER ?? LOGNAME ?? root` (the human who invoked sudo, or whoever runs directly) instead of the dedicated `hive` system user. Operators who run `hivectl init` from a chosen directory and then `sudo hivectl service install` from the same directory now get a unit that reads the existing state without any state-bootstrap ceremony or flags.
+- The hardening configuration that was the previous default — dedicated `hive` system user under `/var/lib/hive` — is still available via explicit flags: `sudo hivectl service install --user hive --working-dir /var/lib/hive`. The auto-create branch via `useradd` still runs when `--user X` names a non-existent user.
+- The post-install message replaces the multi-line state-bootstrap block from v0.1.6 / v0.1.7 with a one-line state check: `State: found at <workingDir>/var/keys` when init has already run, or `State: not yet initialized in <workingDir>/var/. Run 'hivectl init' in this directory before starting the service.` when not.
+- Existing service installs are not migrated automatically. Re-running `service install` overwrites the unit with the new defaults; operators on the previous defaults who do nothing keep their `User=hive` / `WorkingDirectory=/var/lib/hive` unit unchanged.
+
 ## [0.1.7] - 2026-05-07
 
 Re-cut of v0.1.6 after a partial publish: the three platform binary packages (`@hivemine/hivectl-{linux-x64,linux-arm64,darwin-arm64}`) reached npm at `0.1.6`, but the `publish-wrapper` job did not run because `publish-binaries` matrix `fail-fast: true` aborted the pipeline after `linux-x64`'s `npm publish` step returned a spurious E403 ~14 seconds after the upload had actually succeeded (npm internal retry race). Users `npm install -g @hivemine/hivectl@0.1.6` would resolve no wrapper. v0.1.7 ships the same payload with the wrapper attached. Same fixes as v0.1.6: PRY-068 service install path hardening, banner version sync, and the tool catalog audit guardrail.
