@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Writable } from 'node:stream';
@@ -9,6 +17,7 @@ import { CliError } from '#error/cli-error.js';
 
 import type { ProcessResult, ProcessRunner } from './exec.js';
 import {
+  findPlatformPackageRoot,
   isSystemAccessiblePath,
   renderInstallSuccess,
   resolveSystemAccessibleExecPath,
@@ -202,33 +211,79 @@ describe('runServiceInstall — Linux', () => {
     expect((caught as CliError).message).toContain('daemon-reload');
   });
 
-  it('copies the binary to /usr/local/bin and uses that in ExecStart when execPath is under /root/.nvm/', async () => {
-    // Reproduces the v0.1.5 production failure: the user installs hivectl
-    // via nvm under /root/, the SEA binary lands at
-    // /root/.nvm/.../hivectl, and `service install` would emit a unit
-    // file with User=hive + ExecStart pointing at /root/.nvm/...
-    // — which fails to execve with 203/EXEC because hive cannot
-    // traverse /root/ (mode 0700).
-    const sourceBinary = path.join(workDir, 'fake-nvm', '.nvm', 'bin', 'hivectl');
-    const targetBinary = path.join(workDir, 'fake-usr-local', 'bin', 'hivectl');
-    mkdirSync(path.dirname(sourceBinary), { recursive: true });
-    writeFileSync(sourceBinary, 'STUB-HIVECTL', 'utf8');
+  it('relocates the WHOLE platform package and uses the relocated binary in ExecStart when execPath is under /root/.nvm/', async () => {
+    // Reproduces the v0.1.5/v0.1.7/v0.1.8 production chain: the binary
+    // alone gets copied to a system path but the bundled
+    // node_modules/better-sqlite3 stays behind, so the SEA's
+    // createRequire chain fails with "Cannot find module
+    // 'better-sqlite3'" at first DB-touching command. PRY-070 fixes
+    // this by copying the whole platform package directory.
+    const fakePkgRoot = path.join(workDir, 'fake-nvm', '.nvm', 'pkg');
+    mkdirSync(path.join(fakePkgRoot, 'bin'), { recursive: true });
+    mkdirSync(path.join(fakePkgRoot, 'node_modules', 'better-sqlite3', 'build', 'Release'), {
+      recursive: true,
+    });
+    writeFileSync(path.join(fakePkgRoot, 'bin', 'hivectl'), 'STUB-HIVECTL', 'utf8');
+    writeFileSync(
+      path.join(fakePkgRoot, 'node_modules', 'better-sqlite3', 'package.json'),
+      '{"name":"better-sqlite3"}',
+      'utf8',
+    );
+    writeFileSync(
+      path.join(
+        fakePkgRoot,
+        'node_modules',
+        'better-sqlite3',
+        'build',
+        'Release',
+        'better_sqlite3.node',
+      ),
+      'STUB-BINDING',
+      'utf8',
+    );
+    writeFileSync(
+      path.join(fakePkgRoot, 'package.json'),
+      '{"name":"@hivemine/hivectl-stub","version":"0.0.0"}',
+      'utf8',
+    );
+
+    const sourceBinary = path.join(fakePkgRoot, 'bin', 'hivectl');
+    const targetPkg = path.join(workDir, 'system-lib', 'hivemine-hivectl');
+    const targetBin = path.join(workDir, 'system-bin', 'hivectl');
+
+    // Direct test of the resolver before exercising the full install.
+    const stderrBuf: string[] = [];
+    const resolved = resolveSystemAccessibleExecPath(
+      sourceBinary,
+      targetPkg,
+      targetBin,
+      makeWritable(stderrBuf),
+    );
+    expect(resolved).toBe(path.join(targetPkg, 'bin', 'hivectl'));
+    // Bundled deps were copied with the binary — this is the regression PRY-070 fixes.
+    expect(
+      existsSync(
+        path.join(
+          targetPkg,
+          'node_modules',
+          'better-sqlite3',
+          'build',
+          'Release',
+          'better_sqlite3.node',
+        ),
+      ),
+    ).toBe(true);
+
+    // Full install end-to-end: feed the resolved path back as execPath
+    // and ensure the unit references it.
     const unitPath = path.join(workDir, 'hive.service');
     const wd = path.join(workDir, 'lib');
     const { runner } = makeRunner(new Map([['id hive', { status: 0, stdout: '', stderr: '' }]]));
-    // Inject the target binary path so the test does not write to the
-    // real /usr/local/bin. We re-export the constant for testability via
-    // the resolveSystemAccessibleExecPath helper called directly.
-    const resolved = resolveSystemAccessibleExecPath(sourceBinary, targetBinary, stderrSink);
-    expect(resolved).toBe(targetBinary);
-    expect(existsSync(targetBinary)).toBe(true);
-    // Now exercise the full install with the resolved path mimicking the
-    // copy already happened (ensures the unit file uses targetBinary).
     const result = await runServiceInstall(
       { user: 'hive', workingDir: wd },
       {
         platform: 'linux',
-        execPath: targetBinary,
+        execPath: resolved,
         runner,
         isRoot: () => true,
         paths: { unitPath, workingDir: wd },
@@ -236,9 +291,9 @@ describe('runServiceInstall — Linux', () => {
         stderr: stderrSink,
       },
     );
-    expect(result.execPath).toBe(targetBinary);
+    expect(result.execPath).toBe(resolved);
     const written = readFileSync(unitPath, 'utf8');
-    expect(written).toContain(`ExecStart=${targetBinary} serve`);
+    expect(written).toContain(`ExecStart=${resolved} serve`);
     expect(written).not.toContain('/.nvm/');
   });
 
@@ -444,62 +499,193 @@ describe('isSystemAccessiblePath', () => {
 });
 
 describe('resolveSystemAccessibleExecPath', () => {
+  // Helper: build a fake platform package layout under `dirRoot`, return
+  // the path to the binary inside. Mirrors what npm install actually
+  // produces:
+  //   <dirRoot>/bin/hivectl                    (binary)
+  //   <dirRoot>/native/better_sqlite3.node     (PRY-067 backup)
+  //   <dirRoot>/node_modules/better-sqlite3/...
+  //   <dirRoot>/node_modules/bindings/...
+  //   <dirRoot>/package.json
+  function makeFakePlatformPackage(dirRoot: string, binaryContent: string): string {
+    mkdirSync(path.join(dirRoot, 'bin'), { recursive: true });
+    mkdirSync(path.join(dirRoot, 'native'), { recursive: true });
+    mkdirSync(path.join(dirRoot, 'node_modules', 'better-sqlite3', 'build', 'Release'), {
+      recursive: true,
+    });
+    mkdirSync(path.join(dirRoot, 'node_modules', 'bindings'), { recursive: true });
+    writeFileSync(path.join(dirRoot, 'bin', 'hivectl'), binaryContent, 'utf8');
+    writeFileSync(path.join(dirRoot, 'native', 'better_sqlite3.node'), 'STUB-NODE', 'utf8');
+    writeFileSync(
+      path.join(dirRoot, 'node_modules', 'better-sqlite3', 'package.json'),
+      '{"name":"better-sqlite3"}',
+      'utf8',
+    );
+    writeFileSync(
+      path.join(
+        dirRoot,
+        'node_modules',
+        'better-sqlite3',
+        'build',
+        'Release',
+        'better_sqlite3.node',
+      ),
+      'STUB-BINDING',
+      'utf8',
+    );
+    writeFileSync(
+      path.join(dirRoot, 'node_modules', 'bindings', 'package.json'),
+      '{"name":"bindings"}',
+      'utf8',
+    );
+    writeFileSync(
+      path.join(dirRoot, 'package.json'),
+      '{"name":"@hivemine/hivectl-stub","version":"0.0.0"}',
+      'utf8',
+    );
+    return path.join(dirRoot, 'bin', 'hivectl');
+  }
+
   it('returns the source path unchanged when already system-accessible', () => {
     const stderrBuf: string[] = [];
     const stderr = makeWritable(stderrBuf);
     const result = resolveSystemAccessibleExecPath(
       '/usr/local/bin/hivectl',
-      '/usr/local/bin/hivectl',
+      path.join(workDir, 'usr-local-lib-pkg'),
+      path.join(workDir, 'usr-local-bin-symlink'),
       stderr,
     );
     expect(result).toBe('/usr/local/bin/hivectl');
     expect(stderrBuf.join('')).toBe('');
   });
 
-  it('copies the binary when the source path is not system-accessible', () => {
-    const sourcePath = path.join(workDir, 'fake-nvm', 'node', 'lib', 'hivectl');
-    const targetPath = path.join(workDir, 'usr-local-bin', 'hivectl');
-    // Create a fake binary with known content. The source path includes
-    // ".nvm" to trigger the non-system-accessible branch.
-    const realSource = sourcePath.replace(workDir, path.join(workDir, '.nvm'));
-    const realSourceDir = path.dirname(realSource);
-    mkdirSync(realSourceDir, { recursive: true });
-    writeFileSync(realSource, '#!/bin/sh\necho hivectl-stub\n', 'utf8');
+  it('copies the WHOLE platform package and creates a bin symlink when source is not system-accessible', () => {
+    const fakePkgRoot = path.join(workDir, '.nvm', 'pkg');
+    const sourceBinary = makeFakePlatformPackage(fakePkgRoot, '#!/bin/sh\necho hivectl-stub\n');
+    const targetPkg = path.join(workDir, 'system-lib', 'hivemine-hivectl');
+    const targetBin = path.join(workDir, 'system-bin', 'hivectl');
     const stderrBuf: string[] = [];
-    const stderr = makeWritable(stderrBuf);
-    const result = resolveSystemAccessibleExecPath(realSource, targetPath, stderr);
-    expect(result).toBe(targetPath);
-    expect(existsSync(targetPath)).toBe(true);
-    expect(readFileSync(targetPath, 'utf8')).toBe('#!/bin/sh\necho hivectl-stub\n');
-    expect(stderrBuf.join('')).toContain('copied binary');
-    expect(stderrBuf.join('')).toContain('not traversable');
+    const result = resolveSystemAccessibleExecPath(
+      sourceBinary,
+      targetPkg,
+      targetBin,
+      makeWritable(stderrBuf),
+    );
+
+    // The returned path is the binary inside the relocated package.
+    expect(result).toBe(path.join(targetPkg, 'bin', 'hivectl'));
+
+    // Whole package was copied — not just the binary.
+    expect(existsSync(path.join(targetPkg, 'bin', 'hivectl'))).toBe(true);
+    expect(existsSync(path.join(targetPkg, 'native', 'better_sqlite3.node'))).toBe(true);
+    expect(existsSync(path.join(targetPkg, 'node_modules', 'better-sqlite3', 'package.json'))).toBe(
+      true,
+    );
+    expect(
+      existsSync(
+        path.join(
+          targetPkg,
+          'node_modules',
+          'better-sqlite3',
+          'build',
+          'Release',
+          'better_sqlite3.node',
+        ),
+      ),
+    ).toBe(true);
+    expect(existsSync(path.join(targetPkg, 'node_modules', 'bindings', 'package.json'))).toBe(true);
+    expect(existsSync(path.join(targetPkg, 'package.json'))).toBe(true);
+
+    // Bin symlink points (relative) at the relocated binary.
+    expect(existsSync(targetBin)).toBe(true);
+    expect(lstatSync(targetBin).isSymbolicLink()).toBe(true);
+
+    expect(stderrBuf.join('')).toContain('copied platform package');
+    expect(stderrBuf.join('')).toContain('createRequire chain');
+    expect(stderrBuf.join('')).toContain('bin symlink');
   });
 
-  it('reuses an existing target when sizes match (idempotent)', () => {
-    const realSource = path.join(workDir, '.nvm', 'src-bin');
-    const targetPath = path.join(workDir, 'tgt-bin');
-    mkdirSync(path.dirname(realSource), { recursive: true });
-    writeFileSync(realSource, 'IDENTICAL', 'utf8');
-    writeFileSync(targetPath, 'IDENTICAL', 'utf8');
+  it('reuses an existing relocated package when sizes match (idempotent)', () => {
+    const fakePkgRoot = path.join(workDir, '.nvm', 'pkg');
+    const sourceBinary = makeFakePlatformPackage(fakePkgRoot, 'IDENTICAL');
+    const targetPkg = path.join(workDir, 'system-lib', 'hivemine-hivectl');
+    const targetBin = path.join(workDir, 'system-bin', 'hivectl');
+    // Pre-populate the target as if a prior install had run.
+    mkdirSync(path.join(targetPkg, 'bin'), { recursive: true });
+    writeFileSync(path.join(targetPkg, 'bin', 'hivectl'), 'IDENTICAL', 'utf8');
+
     const stderrBuf: string[] = [];
-    const result = resolveSystemAccessibleExecPath(realSource, targetPath, makeWritable(stderrBuf));
-    expect(result).toBe(targetPath);
+    const result = resolveSystemAccessibleExecPath(
+      sourceBinary,
+      targetPkg,
+      targetBin,
+      makeWritable(stderrBuf),
+    );
+    expect(result).toBe(path.join(targetPkg, 'bin', 'hivectl'));
     expect(stderrBuf.join('')).toContain('already present');
-    // Content must be unchanged (no copy occurred).
-    expect(readFileSync(targetPath, 'utf8')).toBe('IDENTICAL');
+    // Content unchanged (no recursive copy occurred).
+    expect(readFileSync(path.join(targetPkg, 'bin', 'hivectl'), 'utf8')).toBe('IDENTICAL');
+    // Symlink still gets ensured even on the reuse path.
+    expect(existsSync(targetBin)).toBe(true);
   });
 
-  it('overwrites the target when sizes differ (e.g., post-Hive-upgrade)', () => {
-    const realSource = path.join(workDir, '.nvm', 'src-bin');
-    const targetPath = path.join(workDir, 'tgt-bin');
-    mkdirSync(path.dirname(realSource), { recursive: true });
-    writeFileSync(realSource, 'NEW VERSION (longer than old)', 'utf8');
-    writeFileSync(targetPath, 'OLD', 'utf8');
+  it('overwrites the relocated package when binary sizes differ (Hive upgrade)', () => {
+    const fakePkgRoot = path.join(workDir, '.nvm', 'pkg');
+    const sourceBinary = makeFakePlatformPackage(
+      fakePkgRoot,
+      'NEW BINARY (much longer than the old stub binary)',
+    );
+    const targetPkg = path.join(workDir, 'system-lib', 'hivemine-hivectl');
+    const targetBin = path.join(workDir, 'system-bin', 'hivectl');
+    // Pre-populate target with an older smaller binary + a stale file
+    // that should be removed on upgrade.
+    mkdirSync(path.join(targetPkg, 'bin'), { recursive: true });
+    writeFileSync(path.join(targetPkg, 'bin', 'hivectl'), 'OLD', 'utf8');
+    writeFileSync(path.join(targetPkg, 'STALE-FILE-FROM-PRIOR-VERSION'), 'STALE', 'utf8');
+
     const stderrBuf: string[] = [];
-    const result = resolveSystemAccessibleExecPath(realSource, targetPath, makeWritable(stderrBuf));
-    expect(result).toBe(targetPath);
-    expect(readFileSync(targetPath, 'utf8')).toBe('NEW VERSION (longer than old)');
-    expect(stderrBuf.join('')).toContain('copied binary');
+    resolveSystemAccessibleExecPath(sourceBinary, targetPkg, targetBin, makeWritable(stderrBuf));
+    // New binary is in place.
+    expect(readFileSync(path.join(targetPkg, 'bin', 'hivectl'), 'utf8')).toBe(
+      'NEW BINARY (much longer than the old stub binary)',
+    );
+    // Stale file from the prior install was removed by the rmSync before cpSync.
+    expect(existsSync(path.join(targetPkg, 'STALE-FILE-FROM-PRIOR-VERSION'))).toBe(false);
+    expect(stderrBuf.join('')).toContain('copied platform package');
+  });
+
+  it('throws when the source binary is not inside an npm package layout', () => {
+    // No package.json two levels up from the binary → cannot relocate
+    // safely without breaking the createRequire chain.
+    const orphanBinary = path.join(workDir, '.nvm', 'orphan-hivectl');
+    mkdirSync(path.dirname(orphanBinary), { recursive: true });
+    writeFileSync(orphanBinary, 'standalone-binary-no-package', 'utf8');
+    expect(() =>
+      resolveSystemAccessibleExecPath(
+        orphanBinary,
+        path.join(workDir, 'system-lib', 'pkg'),
+        path.join(workDir, 'system-bin', 'hivectl'),
+        makeWritable([]),
+      ),
+    ).toThrow(/Cannot locate platform package root/);
+  });
+});
+
+describe('findPlatformPackageRoot', () => {
+  it('returns the parent of bin/ when package.json is present', () => {
+    const root = path.join(workDir, 'pkg');
+    mkdirSync(path.join(root, 'bin'), { recursive: true });
+    writeFileSync(path.join(root, 'package.json'), '{}', 'utf8');
+    const binary = path.join(root, 'bin', 'hivectl');
+    writeFileSync(binary, '', 'utf8');
+    expect(findPlatformPackageRoot(binary)).toBe(root);
+  });
+
+  it('throws when no package.json sits two levels up', () => {
+    const orphan = path.join(workDir, 'somewhere', 'hivectl');
+    mkdirSync(path.dirname(orphan), { recursive: true });
+    writeFileSync(orphan, '', 'utf8');
+    expect(() => findPlatformPackageRoot(orphan)).toThrow(/Cannot locate/);
   });
 });
 
