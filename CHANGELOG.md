@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-07
+
+Second runnable v0.1.x publish attempt. v0.1.2 reached npm but the binaries crashed at runtime on the first DB-touching command (`hivectl init`) with `Cannot find module 'bindings'` — PRY-065 bundled `better-sqlite3` itself but not its transitive runtime dependencies (`bindings` + `file-uri-to-path`), and npm does not auto-resolve transitive deps of `bundleDependencies` entries on user install. PRY-066 fixes the gap (bundles the two missing JS-only transitive deps with their installed versions read dynamically from the workdir) and adds Test layer 4 — a post-pack install smoke that fresh-installs the staged tarball and exercises `new Database(':memory:')` against the bundled tree, catching this exact class of bug at publish time. Same payload as the unreleased v0.1.2 attempt.
+
 ## [0.1.2] - 2026-05-06
 
 First successfully runnable public release of Hive OSS Fase 1 (MVP). Functionally identical payload to the unreleased `0.1.0` and `0.1.1` attempts: `0.1.0` was rolled back before the binaries shipped (PRY-060 ABI mismatch + PRY-063 wrong-arch silent fallback), and `0.1.1` reached npm but the binaries failed at runtime with `Cannot find module 'better-sqlite3'` because the platform tarballs were silently published without the bundled native binding (PRY-065 root cause: `bundleDependencies` requires the dep to also be in `dependencies`, and better-sqlite3's own `files` field excludes `build/`). PRY-065 fixes both issues and adds a three-layer publish-tarball test in the release workflow so future regressions surface in dry-run instead of in production. npm reserves unpublished version-strings permanently, so this release ships under `0.1.2`. The release notes below cover everything that has accumulated under `[Unreleased]` since the project began.
