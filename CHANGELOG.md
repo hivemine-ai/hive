@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-05-07
+
+Re-cut of v0.1.6 after a partial publish: the three platform binary packages (`@hivemine/hivectl-{linux-x64,linux-arm64,darwin-arm64}`) reached npm at `0.1.6`, but the `publish-wrapper` job did not run because `publish-binaries` matrix `fail-fast: true` aborted the pipeline after `linux-x64`'s `npm publish` step returned a spurious E403 ~14 seconds after the upload had actually succeeded (npm internal retry race). Users `npm install -g @hivemine/hivectl@0.1.6` would resolve no wrapper. v0.1.7 ships the same payload with the wrapper attached. Same fixes as v0.1.6: PRY-068 service install path hardening, banner version sync, and the tool catalog audit guardrail.
+
 ## [0.1.6] - 2026-05-07
 
 Three operational polish fixes from the v0.1.5 production smoke (PRY-068).
