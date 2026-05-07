@@ -82,7 +82,7 @@ export interface WireConfig {
   readyzDbTimeoutMs?: number;
   /** Default 30 seconds. */
   shutdownDrainTimeoutSeconds?: number;
-  /** Default `'./keys'`. Where to find the signing keypairs. */
+  /** Default `'./var/keys'`. Where to find the signing keypairs. */
   keysDir?: string;
   /** Default 100. Hard cap server-side for `list_agents.pagination.limit` (PRY-029). */
   listAgentsMaxPageSize?: number;
@@ -129,7 +129,7 @@ export function resolveWireConfigFromEnv(
         name: 'HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS',
         min: 1,
       }),
-    keysDir: overrides.keysDir ?? env['HIVE_AUTH_KEYS_DIR'] ?? './keys',
+    keysDir: overrides.keysDir ?? env['HIVE_AUTH_KEYS_DIR'] ?? './var/keys',
     listAgentsMaxPageSize:
       overrides.listAgentsMaxPageSize ??
       parseIntEnv(env['HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE'], 100, {
