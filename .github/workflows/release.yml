@@ -376,6 +376,42 @@ jobs:
             console.log('  dependencies:', JSON.stringify(stagingPkg.dependencies));
             console.log('  bundleDependencies:', JSON.stringify(stagingPkg.bundleDependencies));
           "
+          # Place a backup copy of our Node 22 ABI binding OUTSIDE
+          # better-sqlite3's tree, at ${PKG_DIR}/native/. The platform
+          # package's postinstall script (declared in the staging package
+          # .json template) copies this backup back into
+          # node_modules/better-sqlite3/build/Release/ on user install,
+          # AFTER better-sqlite3's own install script (which we cannot
+          # disable: even when we strip scripts.{preinstall,install,
+          # postinstall} from the bundled package.json, npm restores them
+          # from the registry metadata before running them) has run
+          # `prebuild-install` and overwritten the binding with one
+          # matching the user's Node ABI. The SEA binary embeds Node 22
+          # (NODE_MODULE_VERSION 127); without this restore, on user
+          # machines with Node ≠ 22 the binding gets replaced with an ABI
+          # mismatch and SEA's dlopen fails at first DB-touching command.
+          # The backup at ${PKG_DIR}/native/ is outside any path that
+          # prebuild-install or node-gyp touch, so the original is always
+          # available for restoration.
+          mkdir -p "${PKG_DIR}/native"
+          cp "${PKG_DIR}/node_modules/better-sqlite3/build/Release/better_sqlite3.node" "${PKG_DIR}/native/better_sqlite3.node"
+          # Defense-in-depth: also strip the lifecycle scripts. npm seems to
+          # restore them from the registry on install, but if a future npm
+          # version respects the bundled package.json this saves us a
+          # round-trip through prebuild-install entirely.
+          node -e "
+            const fs = require('fs');
+            const p = '${PKG_DIR}/node_modules/better-sqlite3/package.json';
+            const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            pkg.scripts = pkg.scripts || {};
+            for (const hook of ['preinstall', 'install', 'postinstall']) {
+              if (pkg.scripts[hook]) {
+                console.log('Stripped scripts.' + hook + ': ' + pkg.scripts[hook]);
+                delete pkg.scripts[hook];
+              }
+            }
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+          "
           # Extend the bundled better-sqlite3's `files` field to include the
           # prebuilt native binding. better-sqlite3@11.x publishes with `files:
           # ["binding.gyp", "src/*.[ch]pp", "lib/**", "deps/**"]` — it does NOT
@@ -507,13 +543,29 @@ jobs:
           # arch per per-platform `file` arch assertion in the bundle
           # step).
           PKG_DIR="${GITHUB_WORKSPACE}/staging/@hivemine/hivectl-${PLATFORM_NAME}"
+          # Capture the IMMUTABLE backup binding's SHA. After the
+          # user-equivalent install (no --ignore-scripts), better-sqlite3's
+          # restored install script may have overwritten
+          # node_modules/.../build/Release/better_sqlite3.node with a
+          # different-ABI binding from prebuild-install. Our platform
+          # postinstall (declared in the staging package.json template)
+          # then restores the binding from native/ → the post-install
+          # SHA must match the native/ backup.
+          EXPECTED_SHA=$(sha256sum "${PKG_DIR}/native/better_sqlite3.node" | awk '{print $1}')
+          echo "Expected (native/ backup) binding SHA: ${EXPECTED_SHA}"
           cd "${PKG_DIR}"
           TARBALL=$(npm pack --silent)
           TEST_DIR=$(mktemp -d)
           pushd "${TEST_DIR}" > /dev/null
           npm init -y > /dev/null
-          echo "::group::npm install <staged-tarball>"
-          npm install "${PKG_DIR}/${TARBALL}" --no-save --ignore-scripts 2>&1 | tail -5
+          echo "::group::npm install <staged-tarball> (NO --ignore-scripts — simulates user)"
+          # Real users `npm install -g @hivemine/hivectl` without
+          # --ignore-scripts. If a bundled dep declares lifecycle scripts,
+          # they run on the user's machine. Our bundled package.json is
+          # patched to remove better-sqlite3's lifecycle hooks (PRY-067)
+          # so this install must produce a binding identical to what we
+          # shipped.
+          npm install "${PKG_DIR}/${TARBALL}" --no-save 2>&1 | tail -5
           echo "::endgroup::"
           BSQ_PATH="${TEST_DIR}/node_modules/@hivemine/hivectl-${PLATFORM_NAME}/node_modules/better-sqlite3"
           if [ ! -d "${BSQ_PATH}" ]; then
@@ -521,6 +573,27 @@ jobs:
             ls -la "${TEST_DIR}/node_modules/" 2>/dev/null || true
             exit 1
           fi
+          INSTALLED_BINDING="${BSQ_PATH}/build/Release/better_sqlite3.node"
+          if [ ! -f "${INSTALLED_BINDING}" ]; then
+            echo "FAIL: bundled binding not present after install at ${INSTALLED_BINDING}"
+            exit 1
+          fi
+          ACTUAL_SHA=$(sha256sum "${INSTALLED_BINDING}" | awk '{print $1}')
+          echo "Post-install binding SHA:              ${ACTUAL_SHA}"
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "FAIL: post-install binding does not match native/ backup."
+            echo "      Expected SHA: ${EXPECTED_SHA}"
+            echo "      Actual SHA:   ${ACTUAL_SHA}"
+            echo "Hint: the platform postinstall script that restores the"
+            echo "      Node 22 binding from native/ to node_modules/.../"
+            echo "      build/Release/ either did not run or wrote the wrong"
+            echo "      file. Verify the staging package.json includes the"
+            echo "      postinstall script (per package.json.template) and"
+            echo "      that native/better_sqlite3.node was placed by the"
+            echo "      Bundle step."
+            exit 1
+          fi
+          echo "OK: post-install binding matches native/ backup (postinstall restore worked)"
           echo "::group::Smoke — require + new Database + exec + close"
           node -e "
             const Db = require('${BSQ_PATH}');
@@ -532,7 +605,7 @@ jobs:
               process.exit(1);
             }
             db.close();
-            console.log('OK: better-sqlite3 loads, opens DB, exec, query, close — all runtime deps resolve');
+            console.log('OK: better-sqlite3 loads, opens DB, exec, query, close — bundled binding intact');
           "
           echo "::endgroup::"
           popd > /dev/null
