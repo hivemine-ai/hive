@@ -1,8 +1,10 @@
 import chalk from 'chalk';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { HiveStatusSnapshot } from '@hive/shared';
+import { HIVE_VERSION, type HiveStatusSnapshot } from '@hive/shared';
 
 import { formatBytes, formatRelative, renderColdStart } from './cold-start.js';
+
+const VLABEL = `v${HIVE_VERSION}`;
 
 // Anchor `now` so age-derived strings ("12s ago", "4m 12s ago") are
 // deterministic across runs. The snapshot fixtures below set `writtenAt`
@@ -127,7 +129,7 @@ describe('renderColdStart', () => {
     });
     const expected = [
       '',
-      '    ⬢ ⬢ ⬢    hivectl  ·  v0.1.0  ·  apache-2.0',
+      `    ⬢ ⬢ ⬢    hivectl  ·  ${VLABEL}  ·  apache-2.0`,
       '  ⬢ ⬢ ⬢ ⬢ ⬢  open-source MCP server for collaborative AI agents',
       '    ⬢ ⬢ ⬢    snapshot 12s ago · ~/.local/state/hive/status.json',
       '',
@@ -152,7 +154,7 @@ describe('renderColdStart', () => {
     const out = renderColdStart(null, { now: NOW_MS });
     const expected = [
       '',
-      '    ⬢ ⬢ ⬢    hivectl  ·  v0.1.0  ·  apache-2.0',
+      `    ⬢ ⬢ ⬢    hivectl  ·  ${VLABEL}  ·  apache-2.0`,
       '  ⬢ ⬢ ⬢ ⬢ ⬢  open-source MCP server for collaborative AI agents',
       '    ⬢ ⬢ ⬢    no snapshot yet',
       '',
@@ -172,7 +174,7 @@ describe('renderColdStart', () => {
     const out = renderColdStart(staleSnapshot(), { now: NOW_MS });
     const expected = [
       '',
-      '    ⬢ ⬢ ⬢    hivectl  ·  v0.1.0  ·  apache-2.0',
+      `    ⬢ ⬢ ⬢    hivectl  ·  ${VLABEL}  ·  apache-2.0`,
       '  ⬢ ⬢ ⬢ ⬢ ⬢  open-source MCP server for collaborative AI agents',
       '    ⬢ ⬢ ⬢    snapshot 4m 12s ago — stale',
       '',
