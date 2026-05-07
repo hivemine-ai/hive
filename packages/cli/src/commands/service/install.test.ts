@@ -372,22 +372,36 @@ describe('renderInstallSuccess', () => {
     expect(out).not.toContain('copied binary');
   });
 
-  it('emits state bootstrap instructions for systemd installs', () => {
+  it('emits a not-initialized hint when workingDir/var/keys is missing', () => {
+    // workDir is a fresh tmp dir without any var/keys → renderInstallSuccess
+    // should warn the operator to run `hivectl init` first.
     const out = renderInstallSuccess({
       unitPath: '/etc/systemd/system/hive.service',
-      workingDir: '/var/lib/hive',
-      user: 'hive',
+      workingDir: workDir,
+      user: 'leonardo',
       supervisor: 'systemd',
       execPath: '/usr/local/bin/hivectl',
     });
-    expect(out).toContain('bootstrap state in the working directory');
-    expect(out).toContain("sudo -u hive bash -c 'cd /var/lib/hive && hivectl init");
-    expect(out).toContain('sudo cp -r <init-cwd>/var/keys /var/lib/hive/var/keys');
-    expect(out).toContain('sudo cp -r <init-cwd>/var/db   /var/lib/hive/var/db');
-    expect(out).toContain('sudo chown -R hive:hive /var/lib/hive/var');
+    expect(out).toContain('State:       not yet initialized');
+    expect(out).toContain(`${workDir}/var/`);
+    expect(out).toContain("Run 'hivectl init");
   });
 
-  it('renders launchd post-install instructions (no User: line, no state bootstrap)', () => {
+  it('confirms state when workingDir/var/keys exists', () => {
+    // Pre-create var/keys in the tmp workdir.
+    mkdirSync(path.join(workDir, 'var', 'keys'), { recursive: true });
+    const out = renderInstallSuccess({
+      unitPath: '/etc/systemd/system/hive.service',
+      workingDir: workDir,
+      user: 'leonardo',
+      supervisor: 'systemd',
+      execPath: '/usr/local/bin/hivectl',
+    });
+    expect(out).toContain(`State:       found at ${path.join(workDir, 'var', 'keys')}`);
+    expect(out).not.toContain('not yet initialized');
+  });
+
+  it('renders launchd post-install instructions (no User: line, no state hint)', () => {
     const out = renderInstallSuccess({
       unitPath: '/Users/op/Library/LaunchAgents/com.hivemine.hivectl.plist',
       workingDir: '/Users/op/Library/Application Support/Hive',
@@ -397,7 +411,7 @@ describe('renderInstallSuccess', () => {
     });
     expect(out).toContain('launchctl load -w');
     expect(out).not.toContain('User:        ');
-    expect(out).not.toContain('bootstrap state');
+    expect(out).not.toContain('State:');
     expect(out).toContain('hivectl service start');
   });
 });

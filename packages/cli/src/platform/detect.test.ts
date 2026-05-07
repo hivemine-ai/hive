@@ -16,18 +16,21 @@ const linuxStub: PlatformLike = {
   platform: 'linux',
   homedir: () => '/root',
   env: {},
+  cwd: () => '/root/test',
 };
 
 const darwinStub: PlatformLike = {
   platform: 'darwin',
   homedir: () => '/Users/leonardo',
   env: { USER: 'leonardo' },
+  cwd: () => '/Users/leonardo/work/hive',
 };
 
 const windowsStub: PlatformLike = {
   platform: 'win32',
   homedir: () => 'C:\\Users\\op',
   env: {},
+  cwd: () => 'C:\\Users\\op\\hive',
 };
 
 describe('detectPlatform', () => {
@@ -54,15 +57,20 @@ describe('detectPlatform', () => {
 
   it('throws on freebsd / openbsd / sunos / aix (the other node platforms)', () => {
     for (const p of ['freebsd', 'openbsd', 'sunos', 'aix'] as const) {
-      const stub: PlatformLike = { platform: p, homedir: () => '/home/op', env: {} };
+      const stub: PlatformLike = {
+        platform: p,
+        homedir: () => '/home/op',
+        env: {},
+        cwd: () => '/home/op',
+      };
       expect(() => detectPlatform(stub)).toThrow(CliError);
     }
   });
 });
 
 describe('getDefaultWorkingDir', () => {
-  it('returns /var/lib/hive on linux', () => {
-    expect(getDefaultWorkingDir(linuxStub)).toBe('/var/lib/hive');
+  it('returns the invoking process cwd on linux (PRY-069)', () => {
+    expect(getDefaultWorkingDir(linuxStub)).toBe('/root/test');
   });
 
   it('returns ~/Library/Application Support/Hive on darwin', () => {
@@ -77,8 +85,38 @@ describe('getDefaultWorkingDir', () => {
 });
 
 describe('getDefaultUser', () => {
-  it('returns "hive" on linux (dedicated system user — closes FLAG-002)', () => {
-    expect(getDefaultUser(linuxStub)).toBe('hive');
+  it('returns SUDO_USER on linux when set (the operator who invoked sudo)', () => {
+    const stub: PlatformLike = {
+      platform: 'linux',
+      homedir: () => '/root',
+      env: { SUDO_USER: 'leonardo', USER: 'root' },
+      cwd: () => '/home/leonardo/hive',
+    };
+    expect(getDefaultUser(stub)).toBe('leonardo');
+  });
+
+  it('falls back to USER on linux when SUDO_USER is not set (e.g. logged in as root directly)', () => {
+    const stub: PlatformLike = {
+      platform: 'linux',
+      homedir: () => '/root',
+      env: { USER: 'root' },
+      cwd: () => '/root/test',
+    };
+    expect(getDefaultUser(stub)).toBe('root');
+  });
+
+  it('falls back to LOGNAME on linux when USER is also unset', () => {
+    const stub: PlatformLike = {
+      platform: 'linux',
+      homedir: () => '/root',
+      env: { LOGNAME: 'op' },
+      cwd: () => '/root/test',
+    };
+    expect(getDefaultUser(stub)).toBe('op');
+  });
+
+  it('falls back to "root" on linux when nothing is set (containers, init scripts)', () => {
+    expect(getDefaultUser(linuxStub)).toBe('root');
   });
 
   it('returns $USER on darwin', () => {
@@ -91,6 +129,7 @@ describe('getDefaultUser', () => {
         platform: 'darwin',
         homedir: () => '/Users/op',
         env: { LOGNAME: 'op' },
+        cwd: () => '/Users/op',
       }),
     ).toBe('op');
   });
@@ -101,14 +140,15 @@ describe('getDefaultUser', () => {
         platform: 'darwin',
         homedir: () => '/Users/op',
         env: {},
+        cwd: () => '/Users/op',
       }),
     ).toBe('unknown');
   });
 });
 
 describe('getDefaultConfigPath', () => {
-  it('returns /var/lib/hive/config.json on linux', () => {
-    expect(getDefaultConfigPath(linuxStub)).toBe('/var/lib/hive/config.json');
+  it('returns <cwd>/config.json on linux (sibling of the working dir)', () => {
+    expect(getDefaultConfigPath(linuxStub)).toBe('/root/test/config.json');
   });
 
   it('returns ~/Library/Application Support/Hive/config.json on darwin', () => {
