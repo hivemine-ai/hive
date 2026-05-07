@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-05-07
+
+Fixes a config default mismatch that broke `hivectl serve` after a successful `hivectl init`. `init` writes the signing keypair to `./var/keys/` (matching the `--keys-dir` flag default and the `docs/auth.md` + `docs/hivectl.md` documentation), but the server runtime config used by `serve` defaulted to `./keys`. Result: `init` succeeded, `serve` immediately failed with `No signing keypairs found in ./keys`. The server default is now aligned to `./var/keys`. Workaround for v0.1.4 installs: `HIVE_AUTH_KEYS_DIR=./var/keys hivectl serve`.
+
 ## [0.1.4] - 2026-05-07
 
 Third runnable v0.1.x publish attempt. v0.1.3 reached npm but the binaries crashed on the first DB-touching command (`hivectl init`) on any Node version other than 22 with `NODE_MODULE_VERSION 115 vs 127` mismatch — better-sqlite3's `install` script (`prebuild-install || node-gyp rebuild --release`) runs on user install and overwrites our bundled Node 22 binding with one matching the user's Node ABI; the SEA binary embeds Node 22 and fails to dlopen the replaced binding. Stripping the lifecycle hooks from the bundled `package.json` does not help — npm restores them from the registry metadata after extracting the tarball. PRY-067 fixes this by shipping an immutable backup of the Node 22 binding at `<pkg>/native/better_sqlite3.node` (outside any path `prebuild-install` or `node-gyp` writes to) and adding a `postinstall` script to OUR platform package — whose `package.json` IS authoritative and is not restored by npm — that copies the backup back into `node_modules/better-sqlite3/build/Release/` AFTER better-sqlite3's install ran. Test layer 4 now runs `npm install` WITHOUT `--ignore-scripts` (real user behavior) and asserts the post-install binding SHA matches the `native/` backup, catching this exact class of bug. Same payload as the unreleased v0.1.3 attempt.
