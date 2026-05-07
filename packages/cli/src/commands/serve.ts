@@ -20,6 +20,7 @@
 
 import { buildWire, createLogger } from '@hive/server';
 import type { LoggerOptions, Wire, WireConfig } from '@hive/server';
+import { HIVE_DEFAULT_HTTP_HOST, HIVE_DEFAULT_HTTP_PORT } from '@hive/shared';
 import type { DestinationStream } from 'pino';
 
 import { getDefaultConfigPath } from '#platform/detect.js';
@@ -314,7 +315,7 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
       // future change starts throwing.
       hiveName = null;
     }
-    const bind = `${wireOverrides.httpHost ?? '127.0.0.1'}:${wireOverrides.httpPort !== undefined ? String(wireOverrides.httpPort) : String(env['HIVE_MCP_HTTP_PORT'] ?? '7700')}`;
+    const bind = `${wireOverrides.httpHost ?? HIVE_DEFAULT_HTTP_HOST}:${wireOverrides.httpPort !== undefined ? String(wireOverrides.httpPort) : String(env['HIVE_MCP_HTTP_PORT'] ?? HIVE_DEFAULT_HTTP_PORT)}`;
     const database = formatDbLocation(env['HIVE_DB_URL']);
     const logLevel = loggerOpts.level ?? env['HIVE_LOG_LEVEL'] ?? 'info';
     outSink(renderBootBanner({ hiveName, bind, database, logLevel }));

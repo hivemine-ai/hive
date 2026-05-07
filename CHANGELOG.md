@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- The boot banner reported the wrong listening port when no override was set — `bind 127.0.0.1:7700` while the server was actually bound to `8443` (PRY-071, post-v0.1.9 polish). The CLI banner used a stale literal `'7700'` as the fallback for `HIVE_MCP_HTTP_PORT`, while the wire and the http-host both default to `8443`. The default port is now lifted to a single shared constant `HIVE_DEFAULT_HTTP_PORT` in `@hive/shared` (sibling pattern to `HIVE_VERSION`), so the banner and the server bind read the same value. Same class of bug previously fixed for the version literal in PRY-068. The fallback for `HIVE_MCP_HTTP_HOST` in the banner also lifts to `HIVE_DEFAULT_HTTP_HOST` for symmetry — kept distinct from the wire's `'0.0.0.0'` programmatic default by design (the CLI value is the operator-facing safe loopback default; bind-all still requires the explicit `hivectl config network bind-all` opt-in). No behavior change for operators who already set `HIVE_MCP_HTTP_PORT` or `--port`.
+
 ## [0.1.9] - 2026-05-07
 
 ### Fixed (regression introduced in v0.1.6 by PRY-068)
