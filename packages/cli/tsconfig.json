@@ -5,5 +5,5 @@
     "rootDir": "./src"
   },
   "include": ["src/**/*"],
-  "references": [{ "path": "../shared" }, { "path": "../server" }]
+  "references": [{ "path": "../shared" }, { "path": "../client" }, { "path": "../server" }]
 }
