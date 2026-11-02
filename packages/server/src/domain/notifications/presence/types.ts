@@ -3,39 +3,47 @@
 
 import type { IdentityContext, UUIDv7 } from '#domain/auth/types.js';
 
-import type { SubscriberHandle } from './subscriber-handle.js';
+import type { StreamCloseReason, SubscriberHandle } from './subscriber-handle.js';
 
 export interface SubscribeInput {
   callerContext: IdentityContext;
   /**
-   * Handle provided by the MCP transport. Its lifecycle is bound to the MCP
-   * session that created it: when the session closes (graceful or disconnect),
-   * the handle invokes its `onClose()` and the registry deregisters it.
+   * Handle provided by the MCP transport. Its lifecycle is bound to the stream
+   * that created it: when the stream ends (graceful, disconnect, stall or a
+   * forced `close()`), the handle invokes its `onClose()` and the registry
+   * deregisters it.
    */
   handle: SubscriberHandle;
-  /** Optional: requestId for cross-component log correlation. */
+  /** Optional: requestId of the POST that opened the stream, for log correlation. */
   requestId?: string;
 }
 
 export interface Subscription {
-  /**
-   * ID of this subscription. Distinct from the handle's `connectionId` —
-   * a handle may resubscribe (e.g. after a resume) and obtain a new
-   * subscriptionId.
-   */
+  /** ID of this subscription. Distinct from the handle's `connectionId`. */
   readonly id: UUIDv7;
   readonly participantId: UUIDv7;
   readonly subscribedAt: Date;
-  /** Idempotent: closing twice is a no-op. */
-  close(): void;
+  /**
+   * The transport calls this ONCE right after writing the `subscriptions/listen`
+   * acknowledgment. It flips the entry from `pending` to `open` (counts as
+   * online, receives fan-out) and triggers the replay. Idempotent.
+   */
+  ready(): void;
+  /**
+   * Removes the entry with `reason` (default `client_closed`). Does NOT close
+   * the physical stream. Idempotent.
+   */
+  close(reason?: StreamCloseReason): void;
 }
 
 export interface PresenceSnapshot {
+  /** Reachable by push: at least one `open` stream that subscribes the own mailbox. */
   online: boolean;
-  sessionCount: number;
+  /** Number of `open` streams. */
+  streamCount: number;
   /**
-   * Timestamps of when each active session established its subscribe. The
-   * decision of whether to expose these on the wire belongs to API MCP — Tools.
+   * When each open stream registered. Provided internally; the wire tool
+   * `get_agent_status` intentionally does not expose these timestamps.
    */
-  sessionsSubscribedAt: readonly Date[];
+  streamsSubscribedAt: readonly Date[];
 }

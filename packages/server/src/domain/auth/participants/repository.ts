@@ -172,10 +172,10 @@ export interface ParticipantsReadRepo {
   listAgents(filter: ListAgentsFilter): Promise<ListAgentsResult>;
   /**
    * Stamps `agents.last_connected_at` with `timestamp` for the given agent. Invoked
-   * as a non-blocking side effect of `presenceRegistry.subscribe` for `worker` and
-   * `scout` participants — never for `hivekeeper`. Silent no-op (logger.warn) when
+   * by `auth-binding` as a non-blocking side effect of each authenticated request for
+   * `worker` and `scout` participants — never for `hivekeeper`. Silent no-op (logger.warn) when
    * `agentId` does not resolve to a row, so a deleted-agent race never aborts the
-   * subscribe path. Idempotent: repeat calls overwrite the value with the latest.
+   * request. Idempotent: repeat calls overwrite the value with the latest.
    */
   updateAgentLastConnectedAt(agentId: UUIDv7, timestamp: Date): Promise<void>;
 }

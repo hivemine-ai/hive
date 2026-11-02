@@ -48,6 +48,7 @@ function fakeHandle(): SubscriberHandle & { captured: WaggleNotification[] } {
       captured.push(n);
       return Promise.resolve();
     },
+    close() {},
     onClose() {},
   };
 }
@@ -242,6 +243,7 @@ describe('createReplay', () => {
       connectionId: uuidv7(),
       callerContext: {} as SubscriberHandle['callerContext'],
       deliver: () => Promise.reject(new Error('socket dead')),
+      close() {},
       onClose() {},
     };
 

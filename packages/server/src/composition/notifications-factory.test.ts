@@ -1,7 +1,7 @@
 // Unit tests for `createNotificationsForProduction` — verifies the wiring
 // (subscribe to cellEvents, hook the replay scheduler) and env var resolution.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { ParticipantsReadRepo } from '#domain/auth/index.js';
 import { createCellEvents } from '#domain/cells/index.js';
@@ -46,9 +46,6 @@ describe('resolveNotificationsConfig', () => {
     expect(config.quietWindowMs).toBe(500);
     expect(config.replayDelayMs).toBe(0);
     expect(config.maxSessionsPerParticipant).toBe(16);
-    expect(config.idleTimeoutMs).toBe(30 * 60 * 1000);
-    expect(config.sweepIntervalMs).toBe(5 * 60 * 1000);
-    expect(config.lruEvictThresholdMs).toBe(15 * 60 * 1000);
   });
 
   it('options.quietWindowMs overrides env', () => {
@@ -80,37 +77,18 @@ describe('resolveNotificationsConfig', () => {
     ).toThrow(/must be >= 1/);
   });
 
-  it('HIVE_PRESENCE_IDLE_TIMEOUT_MS=0 disables the sweep (null)', () => {
-    const config = resolveNotificationsConfig({ HIVE_PRESENCE_IDLE_TIMEOUT_MS: '0' });
-    expect(config.idleTimeoutMs).toBeNull();
-  });
-
-  it('HIVE_PRESENCE_IDLE_TIMEOUT_MS numeric override → number', () => {
-    const config = resolveNotificationsConfig({ HIVE_PRESENCE_IDLE_TIMEOUT_MS: '60000' });
-    expect(config.idleTimeoutMs).toBe(60_000);
-  });
-
-  it('HIVE_PRESENCE_SWEEP_INTERVAL_MS override applies', () => {
-    const config = resolveNotificationsConfig({ HIVE_PRESENCE_SWEEP_INTERVAL_MS: '30000' });
-    expect(config.sweepIntervalMs).toBe(30_000);
-  });
-
-  it('HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS=0 disables LRU eviction (null)', () => {
-    const config = resolveNotificationsConfig({ HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS: '0' });
-    expect(config.lruEvictThresholdMs).toBeNull();
-  });
-
-  it('HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS numeric override → number', () => {
-    const config = resolveNotificationsConfig({ HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS: '60000' });
-    expect(config.lruEvictThresholdMs).toBe(60_000);
-  });
-
-  it('options.idleTimeoutMs=null wins over env (explicit disable)', () => {
-    const config = resolveNotificationsConfig(
-      { HIVE_PRESENCE_IDLE_TIMEOUT_MS: '60000' },
-      { idleTimeoutMs: null },
-    );
-    expect(config.idleTimeoutMs).toBeNull();
+  it('ignores the retired sweep / idle / LRU-threshold env vars', () => {
+    const config = resolveNotificationsConfig({
+      HIVE_PRESENCE_IDLE_TIMEOUT_MS: '60000',
+      HIVE_PRESENCE_SWEEP_INTERVAL_MS: '30000',
+      HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS: '60000',
+      HIVE_PRESENCE_HEARTBEAT_TIMEOUT_MS: '1000',
+    });
+    expect(Object.keys(config).sort()).toEqual([
+      'maxSessionsPerParticipant',
+      'quietWindowMs',
+      'replayDelayMs',
+    ]);
   });
 });
 
@@ -189,5 +167,38 @@ describe('createNotificationsForProduction wiring', () => {
     );
 
     expect(result.presenceRegistry).toBeDefined();
+  });
+
+  it('Subscription.ready() schedules the replay for that stream; subscribe alone does not', async () => {
+    const participantId = '01900000-0000-7000-8000-000000000001';
+    const result = createNotificationsForProduction({
+      cellEvents: createCellEvents(),
+      cellsRepo: fakeCellsRepo(),
+      participantsRepo: {
+        getParticipantState: () => Promise.resolve({ state: 'active' }),
+      } as unknown as ParticipantsReadRepo,
+      logger: silentLogger(),
+    });
+    const scheduleSpy = vi.spyOn(result.replay, 'scheduleReplayFor').mockImplementation(() => {});
+    const handle = {
+      connectionId: '01900000-0000-7000-8000-0000000000aa',
+      callerContext: {} as never,
+      deliver: () => Promise.resolve(),
+      close: () => {},
+      onClose: () => {},
+    };
+
+    const sub = await result.presenceRegistry.subscribe({
+      callerContext: {
+        participantId,
+        kind: 'worker',
+        current: { state: 'active', type: 'worker' },
+      } as never,
+      handle,
+    });
+    expect(scheduleSpy).not.toHaveBeenCalled();
+
+    sub.ready();
+    expect(scheduleSpy).toHaveBeenCalledWith(participantId, handle, sub.id);
   });
 });
