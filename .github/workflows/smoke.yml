@@ -61,6 +61,14 @@ jobs:
           ADMIN_PARTICIPANT_ID=$(node packages/cli/dist/main.js hive list-keepers --output json \
             | node -e 'const a=JSON.parse(require("fs").readFileSync(0,"utf8")); const k=Array.isArray(a)?a.find(k=>k.email==="ci@hive.test"):null; if(!k){console.error("ci@hive.test keeper not found",JSON.stringify(a)); process.exit(1)} console.log(k.id)')
           echo "admin_participant_id=$ADMIN_PARTICIPANT_ID" >> "$GITHUB_OUTPUT"
+          # A second keeper with a worker: the admin cannot see another owner's
+          # worker, which gives the smoke a deterministic, audited denial.
+          node packages/cli/dist/main.js hivekeeper create \
+            --email other@hive.test --display-name 'CI Other Keeper' --output json > /dev/null
+          DENIED_RECIPIENT_ID=$(node packages/cli/dist/main.js agent create \
+            --owner other@hive.test --name denied-worker --type worker --output json \
+            | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).agentId)')
+          echo "denied_recipient_id=$DENIED_RECIPIENT_ID" >> "$GITHUB_OUTPUT"
           echo "Bootstrapped Hive — admin participantId=$ADMIN_PARTICIPANT_ID"
 
       - name: Start hive-server in the background
@@ -77,6 +85,9 @@ jobs:
           # `HIVE_MCP_LOG_PRETTY=false` is the canonical log-shipper opt-out
           # (equivalent to `--output=json` — see docs/hivectl.md § serve).
           HIVE_MCP_LOG_PRETTY: 'false'
+          # Audit canSee denials, so the denial the smoke provokes leaves an
+          # `audit_recorded` line and an `audit_log` row (verified as AC3).
+          HIVE_VISIBILITY_AUDIT_CANSEE_DENIALS: 'true'
         run: |
           set -euo pipefail
           # nohup + disown keeps the process alive after this step ends. PID
@@ -122,7 +133,8 @@ jobs:
           node deployment/smoke-mcp-client.mjs \
             http://127.0.0.1:8443 \
             "$JWT" \
-            "${{ steps.init.outputs.admin_participant_id }}"
+            "${{ steps.init.outputs.admin_participant_id }}" \
+            "${{ steps.init.outputs.denied_recipient_id }}"
 
       - name: Protocol contract — modern only (ADR-024)
         run: |
@@ -165,24 +177,25 @@ jobs:
           ' "$LOG"
           echo "AC2 ✓ — required fields present + level=30"
 
-          # AC3: audit_log row request_id matches the audit_recorded log line requestId.
+          # AC3: the denial the smoke provoked left exactly one audit_recorded line, and
+          # its requestId is the request_id of an audit_log row.
           AUDIT_RECORDED_COUNT=$(grep -c '"event":"audit_recorded"' "$LOG" || true)
-          if [ "$AUDIT_RECORDED_COUNT" -ge 1 ]; then
-            LOG_ID=$(grep '"event":"audit_recorded"' "$LOG" | head -1 \
-              | node -e 'const o=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log(o.requestId ?? "")')
-            if [ -z "$LOG_ID" ] || [ "$LOG_ID" = "null" ]; then
-              echo "AC3 ✓ — audit_recorded carries a requestId field (null is valid for CLI-driven events)"
-            else
-              DB_ID=$(sqlite3 "${{ runner.temp }}/hive.sqlite" "SELECT request_id FROM audit_log WHERE request_id IS NOT NULL LIMIT 1;" || true)
-              if [ "$LOG_ID" != "$DB_ID" ]; then
-                echo "::error::AC3 — log requestId ($LOG_ID) ≠ audit_log.request_id ($DB_ID)"
-                exit 1
-              fi
-              echo "AC3 ✓ — audit_log.request_id matches log stream ($LOG_ID)"
-            fi
-          else
-            echo "AC3 ⚠️ — no audit_recorded events in this run (admin operations are CLI-only and the log started fresh after init)"
+          if [ "$AUDIT_RECORDED_COUNT" -lt 1 ]; then
+            echo "::error::AC3 — expected ≥ 1 audit_recorded event, got $AUDIT_RECORDED_COUNT"
+            exit 1
           fi
+          LOG_ID=$(grep '"event":"audit_recorded"' "$LOG" | head -1 \
+            | node -e 'const o=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log(o.requestId ?? "")')
+          if ! echo "$LOG_ID" | grep -qE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+            echo "::error::AC3 — audit_recorded carries no valid requestId ('$LOG_ID')"
+            exit 1
+          fi
+          DB_COUNT=$(sqlite3 "${{ runner.temp }}/hive.sqlite" "SELECT COUNT(*) FROM audit_log WHERE request_id = '$LOG_ID';")
+          if [ "$DB_COUNT" -lt 1 ]; then
+            echo "::error::AC3 — no audit_log row with request_id $LOG_ID"
+            exit 1
+          fi
+          echo "AC3 ✓ — audit_log.request_id matches log stream ($LOG_ID)"
 
           # AC5: Authorization is masked — JWT prefix `eyJ` MUST NOT appear.
           if grep -E '"authorization":"Bearer eyJ' "$LOG" > /dev/null 2>&1; then
@@ -301,9 +314,14 @@ jobs:
         run: |
           set -euo pipefail
           pnpm --filter @hive/cli exec vitest run src/commands/watch/sea.test.ts --reporter=verbose | tee "${{ runner.temp }}/sea-test.log"
-          # `describe.skipIf` turns a missing binary into a green, empty run.
-          if grep -qE '(↓|skipped)' "${{ runner.temp }}/sea-test.log"; then
+          # `describe.skipIf` turns a missing binary into a green, empty run, so
+          # require passed tests and no skipped ones.
+          if grep -qE '[0-9]+ skipped' "${{ runner.temp }}/sea-test.log"; then
             echo "::error::the SEA watch test was skipped"
+            exit 1
+          fi
+          if ! grep -qE 'Tests +[0-9]+ passed' "${{ runner.temp }}/sea-test.log"; then
+            echo "::error::the SEA watch test reported no passed tests"
             exit 1
           fi
 

@@ -5,24 +5,30 @@
 // endpoint on revision 2026-07-28 (no SDK dependency, no session handshake).
 //
 // Usage:
-//   node deployment/smoke-mcp-client.mjs <baseUrl> <jwt> <expectedParticipantId>
+//   node deployment/smoke-mcp-client.mjs <baseUrl> <jwt> <expectedParticipantId> <deniedRecipientId>
 //
 // Exits 0 when:
 //   1. `server/discover` answers 200 and lists 2026-07-28 as a supported version.
 //   2. `tools/call get_agent_config` returns participant_id === expected.
-//   3. `tools/call send_message` to self succeeds, so the run leaves an audit row.
+//   3. `tools/call send_message` to self succeeds.
+//   4. `tools/call get_agent_status` on a worker of another owner is denied with -32004.
+//      The server must run with HIVE_VISIBILITY_AUDIT_CANSEE_DENIALS=true, so the
+//      denial leaves a `visibility_denial` audit row for the workflow to check.
 //
 // Exits 1 with a diagnostic on stderr otherwise.
 
 import { PROTOCOL_VERSION, envelope, rpc } from './mcp-wire.mjs';
 
-const [, , baseUrl, jwt, expectedParticipantId] = process.argv;
-if (!baseUrl || !jwt || !expectedParticipantId) {
-  console.error('usage: smoke-mcp-client.mjs <baseUrl> <jwt> <expectedParticipantId>');
+const [, , baseUrl, jwt, expectedParticipantId, deniedRecipientId] = process.argv;
+if (!baseUrl || !jwt || !expectedParticipantId || !deniedRecipientId) {
+  console.error(
+    'usage: smoke-mcp-client.mjs <baseUrl> <jwt> <expectedParticipantId> <deniedRecipientId>',
+  );
   process.exit(2);
 }
 
 const url = `${baseUrl}/mcp`;
+const RECIPIENT_UNREACHABLE = -32004;
 
 function fail(msg, extra) {
   console.error(`smoke-mcp-client: FAIL — ${msg}`);
@@ -90,6 +96,26 @@ async function main() {
   });
   if (typeof sent.message_id !== 'string') fail('send_message returned no message_id', sent);
   console.log(`smoke-mcp-client: send_message ok (message_id=${sent.message_id})`);
+
+  // ── 4. get_agent_status on another owner's worker: denied, and audited ──
+  const denied = await rpc({
+    url,
+    jwt,
+    id: 4,
+    method: 'tools/call',
+    params: {
+      name: 'get_agent_status',
+      arguments: { participant: deniedRecipientId },
+      _meta: envelope(),
+    },
+  });
+  if (denied.body?.error?.code !== RECIPIENT_UNREACHABLE) {
+    fail(
+      `get_agent_status on another owner's worker not denied with ${RECIPIENT_UNREACHABLE}`,
+      denied,
+    );
+  }
+  console.log('smoke-mcp-client: visibility denial ok (-32004)');
 
   console.log('smoke-mcp-client: PASS');
 }

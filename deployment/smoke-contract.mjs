@@ -9,6 +9,8 @@
 //
 // Exits 0 when every check passes; otherwise prints each failure and exits 1.
 
+import { isDeepStrictEqual } from 'node:util';
+
 import { PROTOCOL_VERSION, envelope, plain, rpc } from './mcp-wire.mjs';
 
 const [, , baseUrl, jwt] = process.argv;
@@ -32,10 +34,6 @@ async function check(name, fn) {
 
 function expect(cond, message) {
   if (!cond) throw new Error(message);
-}
-
-function sameJson(a, b) {
-  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 const legacyInitialize = {
@@ -71,6 +69,7 @@ await check('legacy protocol version header is rejected', async () => {
 await check('initialize under the modern header is rejected', async () => {
   const res = await rpc({ url, jwt, method: 'initialize', params: legacyInitialize });
   expect(res.status === 400, `expected 400, got ${res.status}`);
+  expect(res.body?.error?.code === -32020, `expected -32020, got ${res.body?.error?.code}`);
   expect(!res.body?.result, 'initialize returned a result');
   expect(!res.headers.get('mcp-session-id'), 'a rejected initialize opened a session');
 });
@@ -93,6 +92,7 @@ await check('request without a Bearer answers 401', async () => {
 await check('request without the per-request envelope is rejected', async () => {
   const res = await rpc({ url, jwt, method: 'server/discover', params: {} });
   expect(res.status === 400, `expected 400, got ${res.status}`);
+  expect(res.body?.error?.code === -32602, `expected -32602, got ${res.body?.error?.code}`);
 });
 
 await check('Mcp-Session-Id is ignored and never issued', async () => {
@@ -112,13 +112,13 @@ await check('server/discover advertises exactly the 2026-07-28 surface', async (
   expect(res.status === 200, `expected 200, got ${res.status}`);
   const result = res.body?.result;
   expect(
-    sameJson(result?.supportedVersions, [PROTOCOL_VERSION]),
+    isDeepStrictEqual(result?.supportedVersions, [PROTOCOL_VERSION]),
     `supportedVersions is ${JSON.stringify(result?.supportedVersions)}`,
   );
   // Declaring `prompts` without serving them, or `experimental['claude/channel']`,
   // would promise behaviour Hive does not have.
   expect(
-    sameJson(result?.capabilities, { tools: {}, resources: { subscribe: true } }),
+    isDeepStrictEqual(result?.capabilities, { tools: {}, resources: { subscribe: true } }),
     `capabilities is ${JSON.stringify(result?.capabilities)}`,
   );
 });
@@ -128,7 +128,10 @@ await check('tools/list serves the catalog and prompts/list is not served', asyn
   expect(tools.status === 200, `tools/list returned ${tools.status}`);
   expect(Array.isArray(tools.body?.result?.tools), 'tools/list has no tools array');
   const prompts = await rpc({ url, jwt, method: 'prompts/list', params: { _meta: envelope() } });
-  expect(prompts.body?.error, 'prompts/list did not return an error');
+  expect(
+    prompts.body?.error?.code === -32601,
+    `prompts/list: expected -32601, got ${prompts.body?.error?.code}`,
+  );
   expect(!prompts.body?.result, 'prompts/list returned a result');
 });
 
