@@ -3,7 +3,7 @@ name: Smoke
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'integration/**']
   workflow_dispatch:
 
 concurrency:
@@ -95,7 +95,7 @@ jobs:
           # failing while the server starts. Each curl is checked via `if`,
           # so an early failure is not an error condition.
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8443/readyz > /dev/null; then
+            if curl --max-time 2 -fsS http://127.0.0.1:8443/readyz > /dev/null; then
               echo "/readyz is 200 (after ${i}s)"
               exit 0
             fi
@@ -109,13 +109,13 @@ jobs:
       - name: Verify /healthz, /readyz, /.well-known/jwks.json
         run: |
           set -euo pipefail
-          curl -fsS http://127.0.0.1:8443/healthz > /dev/null
-          curl -fsS http://127.0.0.1:8443/readyz > /dev/null
-          KEYS=$(curl -fsS http://127.0.0.1:8443/.well-known/jwks.json | node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log((j.keys||[]).length)')
+          curl --max-time 5 -fsS http://127.0.0.1:8443/healthz > /dev/null
+          curl --max-time 5 -fsS http://127.0.0.1:8443/readyz > /dev/null
+          KEYS=$(curl --max-time 5 -fsS http://127.0.0.1:8443/.well-known/jwks.json | node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log((j.keys||[]).length)')
           if [ "$KEYS" -lt 1 ]; then echo "::error::JWKS has 0 keys"; exit 1; fi
           echo "Endpoints ok (jwks has $KEYS key(s))"
 
-      - name: MCP roundtrip — initialize + tools/call get_agent_config
+      - name: MCP roundtrip — server/discover + tools/call (revision 2026-07-28)
         run: |
           set -euo pipefail
           JWT=$(cat "${{ runner.temp }}/admin.jwt")
@@ -123,6 +123,12 @@ jobs:
             http://127.0.0.1:8443 \
             "$JWT" \
             "${{ steps.init.outputs.admin_participant_id }}"
+
+      - name: Protocol contract — modern only (ADR-024)
+        run: |
+          set -euo pipefail
+          JWT=$(cat "${{ runner.temp }}/admin.jwt")
+          node deployment/smoke-contract.mjs http://127.0.0.1:8443 "$JWT"
 
       - name: Verify observability ACs against server.log (PRY-018)
         run: |
@@ -186,8 +192,9 @@ jobs:
           fi
           echo "AC5 ✓ — no bearer token leaked"
 
-          # AC6: happy-path info events emitted.
-          for EV in mcp_session_opened auth_credential_verified mcp_tool_dispatch_success wire_started; do
+          # AC6: happy-path info events emitted. `mcp_session_opened` is gone: the
+          # 2026-07-28 revision has no sessions, so there is no session to open.
+          for EV in auth_credential_verified mcp_tool_dispatch_success wire_started; do
             COUNT=$(grep -c "\"event\":\"$EV\"" "$LOG" || true)
             if [ "$COUNT" -lt 1 ]; then
               echo "::error::AC6 — expected ≥ 1 '$EV' event, got $COUNT"
@@ -237,6 +244,67 @@ jobs:
             if ! grep -q '"event":"wire_stopped"' "$LOG"; then
               echo "::warning::wire_stopped not found in server.log (graceful drain may have failed)"
             fi
+          fi
+
+  # Not a required check yet: it proves `hivectl watch` runs inside the single
+  # executable that release.yml ships, on the two platforms it ships for.
+  sea-watch:
+    name: sea watch (${{ matrix.sea_target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            sea_target: linux
+          - os: macos-14
+            sea_target: darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Build SEA binary
+        run: pnpm --filter @hive/cli sea:build:${{ matrix.sea_target }}
+
+      # The binary leaves better-sqlite3 external, as release.yml does. Link the
+      # copy pnpm resolved next to it so the SEA's require finds the native module.
+      - name: Link better-sqlite3 next to the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x packages/cli/dist-sea/hivectl
+          SQLITE_DIR=$(pnpm --filter @hive/server exec node -p "require('node:path').dirname(require.resolve('better-sqlite3/package.json'))")
+          mkdir -p packages/cli/dist-sea/node_modules
+          ln -s "$SQLITE_DIR" packages/cli/dist-sea/node_modules/better-sqlite3
+          packages/cli/dist-sea/hivectl --version
+
+      - name: Run the SEA watch test (not skipped)
+        shell: bash
+        env:
+          HIVECTL_SEA_BINARY: ${{ github.workspace }}/packages/cli/dist-sea/hivectl
+        run: |
+          set -euo pipefail
+          pnpm --filter @hive/cli exec vitest run src/commands/watch/sea.test.ts --reporter=verbose | tee "${{ runner.temp }}/sea-test.log"
+          # `describe.skipIf` turns a missing binary into a green, empty run.
+          if grep -qE '(↓|skipped)' "${{ runner.temp }}/sea-test.log"; then
+            echo "::error::the SEA watch test was skipped"
+            exit 1
           fi
 
   docker-build:
