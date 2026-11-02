@@ -430,7 +430,7 @@ describe('cells repository', () => {
       expect(result).toEqual({ unreadCount: 0, distinctSenderIds: [] });
     });
 
-    it('counts all delivered messages and orders distinct senders by MAX(stored_at) DESC, sender ASC', async () => {
+    it('counts all stored messages and orders distinct senders by MAX(stored_at) DESC, sender ASC', async () => {
       const repo = createCellsRepo(world.db);
       const cell = await repo.createCell({
         ownerId: world.agentA,
@@ -487,7 +487,7 @@ describe('cells repository', () => {
         ownerKind: 'agent',
         hiveId: world.hiveId,
       });
-      const senderD = uuidv7(); // delivered (×2)
+      const senderD = uuidv7(); // stored (×2)
       const senderR = uuidv7(); // read     (×2)
       const senderE = uuidv7(); // expired  (×1)
       const baseTime = new Date('2026-04-26T10:00:00.000Z').getTime();
@@ -525,7 +525,7 @@ describe('cells repository', () => {
       expect(result.distinctSenderIds).toEqual([senderD]);
     });
 
-    it('returns { 0, [] } silently when the cell is closed and has no delivered messages', async () => {
+    it('returns { 0, [] } silently when the cell is closed and has no stored messages', async () => {
       const repo = createCellsRepo(world.db);
       const cell = await repo.createCell({
         ownerId: world.agentA,
@@ -537,7 +537,7 @@ describe('cells repository', () => {
       expect(result).toEqual({ unreadCount: 0, distinctSenderIds: [] });
     });
 
-    it('reports delivered messages even if the cell was later closed (query is not gated by cell state)', async () => {
+    it('reports stored messages even if the cell was later closed (query is not gated by cell state)', async () => {
       // Edge case: per tech spec line 139, no normal caller invokes summarizeUnreadForCell
       // on a closed Cell (Waggle suppresses push beforehand). The query is not cell-state-gated;
       // it simply reports what the index sees. This test pins that behavior.

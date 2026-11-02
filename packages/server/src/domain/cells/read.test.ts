@@ -300,7 +300,7 @@ describe('createReader / markRead', () => {
     await world.db.destroy();
   });
 
-  it('marks a delivered message as read and returns it in marked', async () => {
+  it('marks a stored message as read and returns it in marked', async () => {
     const reader = buildReader(world);
     const [m] = await insertStoredMessages(world, world.cellB, 1);
 
@@ -564,8 +564,8 @@ describe('readMailbox — filter.from (PRY-020, INC-2026-001 #1)', () => {
   });
 
   it('combines filter.from with filter.state (AND semantics)', async () => {
-    // 2 from workerA: 1 delivered, 1 read.
-    // 1 from hkA: delivered.
+    // 2 from workerA: 1 stored, 1 read.
+    // 1 from hkA: stored.
     const fromAStored = await insertFrom(world.cellB, world.workerA, world.workerB, 'a-d', 0);
     const fromARead = uuidv7();
     const ts = new Date('2026-04-26T10:00:01.000Z');
@@ -615,7 +615,7 @@ describe('TTL deferral lock-in (PRY-025, ADR-016, INC-2026-001 #3)', () => {
   });
 
   /**
-   * Inserts a delivered message with `ttl: 1` (1 ms) and a `sentAt` far in the
+   * Inserts a stored message with `ttl: 1` (1 ms) and a `sentAt` far in the
    * past, so that under any v0.2+ enforcement semantics the message would be
    * unambiguously expired by the time the assertion runs. The v0.1 contract is
    * the opposite: the message stays visible regardless of how long ago `sentAt`
@@ -667,7 +667,7 @@ describe('TTL deferral lock-in (PRY-025, ADR-016, INC-2026-001 #3)', () => {
       .where('id', '=', id)
       .executeTakeFirstOrThrow();
 
-    // The set of states reachable in v0.1 OSS is exactly {sent, delivered, read}.
+    // The set of states reachable in v0.1 OSS is exactly {sent, stored, read}.
     // `expired` is a sentinel of the schema, written to the wire shape only by
     // the v0.2+ sweep job (deferred). If a future commit ever flips this row
     // to `expired`, this test fails — surfacing the contract drift.

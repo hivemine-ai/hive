@@ -279,8 +279,8 @@ describe('PRY-003 Cell Store Slice 0 — smoke E2E', () => {
     expect(result.storedAt).toBeInstanceOf(Date);
   });
 
-  // ── AC-1 step 5: workerB readMailbox returns the delivered message ──
-  it('14d. workerB readMailbox shows the delivered message from workerA', async () => {
+  // ── AC-1 step 5: workerB readMailbox returns the stored message ──
+  it('14d. workerB readMailbox shows the stored message from workerA', async () => {
     await world.sender.sendMessage({
       callerContext: world.ctxA,
       recipientId: world.workerB.id,
@@ -317,7 +317,7 @@ describe('PRY-003 Cell Store Slice 0 — smoke E2E', () => {
   });
 
   // ── AC-5: summarizeUnreadForCell — workerA msg is read, workerC sends two ──
-  it('14f. summarizeUnreadForCell — counts only delivered, groups by sender', async () => {
+  it('14f. summarizeUnreadForCell — counts only stored, groups by sender', async () => {
     // workerA's message → mark read so it doesn't count.
     const aMsg = await world.sender.sendMessage({
       callerContext: world.ctxA,

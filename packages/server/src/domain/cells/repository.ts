@@ -177,7 +177,7 @@ export interface CellsRepo {
 
   /**
    * Mark a single message as read. Returns the number of rows affected:
-   *   1 — transitioned from {sent, delivered} → read
+   *   1 — transitioned from {sent, stored} → read
    *   0 — already read, expired, or unknown id (idempotent for caller)
    */
   markMessageRead(
@@ -199,12 +199,12 @@ export interface CellsRepo {
    * Aggregated unread summary for a Cell — consumed by Waggle (PRY-004) push pipeline.
    *
    * Single aggregated query filtered by materialized `state = 'stored'`. Returns:
-   *   - `unreadCount`: total count across delivered messages.
+   *   - `unreadCount`: total count across stored messages.
    *   - `distinctSenderIds`: distinct `from_participant_id`s, ordered by
    *     `MAX(stored_at) DESC` with `from_participant_id ASC` tiebreaker
    *     (per tech spec — deterministic across SQLite/Postgres).
    *
-   * Defense-in-depth: if there are no rows (e.g. closed Cell with no delivered messages),
+   * Defense-in-depth: if there are no rows (e.g. closed Cell with no stored messages),
    * returns `{ unreadCount: 0, distinctSenderIds: [] }` silently — no error. The query
    * is NOT cell-state-gated; per the tech spec, no normal caller invokes this on a
    * closed Cell (Waggle suppresses push beforehand), so the contract simply reports

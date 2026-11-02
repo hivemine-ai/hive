@@ -153,7 +153,7 @@ export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
     {
       name: 'check_unread_messages',
       title: 'Check unread messages',
-      description: 'Returns the count of delivered (unread) messages and the distinct senders.',
+      description: 'Returns the count of stored (unread) messages and the distinct senders.',
       inputSchema: CheckUnreadMessagesInputSchema,
       handler: async (input, ctx) =>
         checkUnreadMessages(CheckUnreadMessagesInputSchema.parse(input), ctx),
