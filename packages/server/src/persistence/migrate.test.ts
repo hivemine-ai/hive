@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createDb } from './db.js';
 import { migrateDown, migrateToLatest } from './migrate.js';
+import { ALL_MIGRATIONS } from './migrations/index.js';
+import * as renameDeliveredToStored from './migrations/20261102120000_rename-delivered-to-stored.js';
 import type { Database } from './schema.js';
 import type { Kysely } from 'kysely';
 
@@ -60,10 +62,8 @@ describe('migrateToLatest', () => {
     const downResult = await migrateDown(db);
     expect(downResult.results?.[0]?.status).toBe('Success');
 
-    // `migrateDown` only rolls back the most recent migration. With PRY-030 in
-    // the catalog, the latest migration is `20260501120000_add-last-connected-at-to-agents`,
-    // whose DOWN drops the `last_connected_at` column from `agents`. All tables
-    // remain present; only that one column is removed.
+    // `migrateDown` only rolls back the most recent migration: the rebuild of
+    // `messages` that renames `stored_at` back to `delivered_at`. All tables remain.
     const tables = await sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'kysely_%'
       ORDER BY name
@@ -71,13 +71,12 @@ describe('migrateToLatest', () => {
     const remaining = tables.rows.map((r) => r.name).sort();
     expect(remaining).toEqual(EXPECTED_TABLES);
 
-    // Schema rollback assertion: the `last_connected_at` column added by the
-    // latest migration is gone after DOWN.
-    const agentCols = await sql<{ name: string }>`
-      PRAGMA table_info(agents)
+    const messageCols = await sql<{ name: string }>`
+      PRAGMA table_info(messages)
     `.execute(db);
-    const agentColNames = agentCols.rows.map((r) => r.name);
-    expect(agentColNames).not.toContain('last_connected_at');
+    const messageColNames = messageCols.rows.map((r) => r.name);
+    expect(messageColNames).toContain('delivered_at');
+    expect(messageColNames).not.toContain('stored_at');
   });
 
   it('inserts a default state row with CURRENT_TIMESTAMP working in SQLite', async () => {
@@ -242,5 +241,142 @@ describe('migrateToLatest', () => {
         })
         .execute(),
     ).rejects.toThrow(/CHECK/i);
+  });
+});
+
+describe('20261102120000_rename-delivered-to-stored', () => {
+  const LATEST = '20261102120000_rename-delivered-to-stored';
+  const V01_MIGRATIONS = Object.fromEntries(
+    Object.entries(ALL_MIGRATIONS).filter(([name]) => name !== LATEST),
+  );
+
+  let db: Kysely<Database>;
+
+  async function seedV01Messages(): Promise<void> {
+    await sql`INSERT INTO hives (id, name) VALUES ('h', 'h')`.execute(db);
+    await sql`INSERT INTO colonies (id, hive_id, name) VALUES ('c', 'h', 'c')`.execute(db);
+    await sql`
+      INSERT INTO cells (id, hive_id, owner_id, owner_kind)
+      VALUES ('cell-1', 'h', 'p-1', 'agent')
+    `.execute(db);
+    for (const [id, state] of [
+      ['m-delivered', 'delivered'],
+      ['m-read', 'read'],
+      ['m-expired', 'expired'],
+    ] as const) {
+      await sql`
+        INSERT INTO messages (
+          id, cell_id, from_participant_id, to_participant_id, type, body, delivered_at, state
+        ) VALUES (
+          ${id}, 'cell-1', 'p-2', 'p-1', 'notification', 'hello',
+          '2026-05-01T00:00:00.000Z', ${state}
+        )
+      `.execute(db);
+    }
+  }
+
+  async function messageRows(timestamp: 'stored_at' | 'delivered_at') {
+    const rows = await sql<{ id: string; state: string; at: string }>`
+      SELECT id, state, ${sql.ref(timestamp)} AS at FROM messages ORDER BY id
+    `.execute(db);
+    return rows.rows;
+  }
+
+  async function indexes(): Promise<{ name: string; sql: string }[]> {
+    const rows = await sql<{ name: string; sql: string }>`
+      SELECT name, sql FROM sqlite_master
+      WHERE type = 'index' AND tbl_name = 'messages' AND sql IS NOT NULL
+      ORDER BY name
+    `.execute(db);
+    return rows.rows;
+  }
+
+  beforeEach(async () => {
+    db = createDb({ dialect: 'sqlite', url: 'sqlite::memory:' });
+    await migrateToLatest(db, { migrations: V01_MIGRATIONS });
+    await seedV01Messages();
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+  });
+
+  it('rewrites delivered rows to stored and keeps read and expired on a v0.1 database', async () => {
+    await migrateToLatest(db);
+
+    expect(await messageRows('stored_at')).toEqual([
+      { id: 'm-delivered', state: 'stored', at: '2026-05-01T00:00:00.000Z' },
+      { id: 'm-expired', state: 'expired', at: '2026-05-01T00:00:00.000Z' },
+      { id: 'm-read', state: 'read', at: '2026-05-01T00:00:00.000Z' },
+    ]);
+  });
+
+  it('replaces the CHECK: stored is accepted and delivered is rejected', async () => {
+    await migrateToLatest(db);
+
+    const insert = (id: string, state: string) => sql`
+      INSERT INTO messages (id, cell_id, from_participant_id, to_participant_id, type, body, state)
+      VALUES (${id}, 'cell-1', 'p-2', 'p-1', 'notification', 'hello', ${state})
+    `;
+
+    await expect(insert('m-new', 'stored').execute(db)).resolves.toBeDefined();
+    await expect(insert('m-old', 'delivered').execute(db)).rejects.toThrow(/CHECK/i);
+  });
+
+  it('defaults new rows to the stored state', async () => {
+    await migrateToLatest(db);
+
+    await sql`
+      INSERT INTO messages (id, cell_id, from_participant_id, to_participant_id, type, body)
+      VALUES ('m-default', 'cell-1', 'p-2', 'p-1', 'notification', 'hello')
+    `.execute(db);
+
+    const rows = await messageRows('stored_at');
+    expect(rows.find((r) => r.id === 'm-default')?.state).toBe('stored');
+  });
+
+  it('recreates the indexes against stored_at and the partial index on stored', async () => {
+    await migrateToLatest(db);
+
+    const all = await indexes();
+    expect(all.map((i) => i.name)).toEqual([
+      'idx_messages_cell_stored',
+      'idx_messages_cell_unread',
+      'idx_messages_expired',
+      'idx_messages_reply_to',
+      'idx_messages_sent_at',
+    ]);
+    const unread = all.find((i) => i.name === 'idx_messages_cell_unread');
+    expect(unread?.sql).toMatch(/stored_at/);
+    expect(unread?.sql).toMatch(/WHERE state = 'stored'/);
+    expect(all.map((i) => i.sql).join(' ')).not.toMatch(/delivered/);
+  });
+
+  it('is idempotent when up runs on an already migrated database', async () => {
+    await migrateToLatest(db);
+    const before = await messageRows('stored_at');
+
+    await renameDeliveredToStored.up(db);
+
+    expect(await messageRows('stored_at')).toEqual(before);
+  });
+
+  it('is reversible: down restores delivered_at, the delivered state and the old indexes', async () => {
+    await migrateToLatest(db);
+    await migrateDown(db);
+
+    expect(await messageRows('delivered_at')).toEqual([
+      { id: 'm-delivered', state: 'delivered', at: '2026-05-01T00:00:00.000Z' },
+      { id: 'm-expired', state: 'expired', at: '2026-05-01T00:00:00.000Z' },
+      { id: 'm-read', state: 'read', at: '2026-05-01T00:00:00.000Z' },
+    ]);
+    expect((await indexes()).map((i) => i.name)).toContain('idx_messages_cell_delivered');
+
+    await migrateToLatest(db);
+    expect((await messageRows('stored_at')).map((r) => r.state)).toEqual([
+      'stored',
+      'expired',
+      'read',
+    ]);
   });
 });

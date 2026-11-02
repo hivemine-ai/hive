@@ -54,7 +54,7 @@ function rowToMessage(row: Selectable<MessagesTable>): Message {
     replyTo: row.reply_to,
     ttl: row.ttl_ms,
     sentAt: isoToDate(row.sent_at),
-    deliveredAt: isoToDate(row.delivered_at),
+    storedAt: isoToDate(row.stored_at),
     readAt: row.read_at ? isoToDate(row.read_at) : null,
     state: row.state,
     expiredAt: row.expired_at ? isoToDate(row.expired_at) : null,
@@ -72,7 +72,7 @@ function rowToMessageView(row: Selectable<MessagesTable>): MessageView {
     replyTo: row.reply_to,
     ttl: row.ttl_ms,
     sentAt: isoToDate(row.sent_at),
-    deliveredAt: isoToDate(row.delivered_at),
+    storedAt: isoToDate(row.stored_at),
     readAt: row.read_at ? isoToDate(row.read_at) : null,
     state: row.state,
   };
@@ -133,7 +133,7 @@ export interface ListMessagesFilter {
 }
 
 export interface ListMessagesPagination {
-  cursor: { deliveredAt: Date; messageId: UUIDv7 } | null;
+  cursor: { storedAt: Date; messageId: UUIDv7 } | null;
   limit: number;
 }
 
@@ -198,10 +198,10 @@ export interface CellsRepo {
   /**
    * Aggregated unread summary for a Cell — consumed by Waggle (PRY-004) push pipeline.
    *
-   * Single aggregated query filtered by materialized `state = 'delivered'`. Returns:
+   * Single aggregated query filtered by materialized `state = 'stored'`. Returns:
    *   - `unreadCount`: total count across delivered messages.
    *   - `distinctSenderIds`: distinct `from_participant_id`s, ordered by
-   *     `MAX(delivered_at) DESC` with `from_participant_id ASC` tiebreaker
+   *     `MAX(stored_at) DESC` with `from_participant_id ASC` tiebreaker
    *     (per tech spec — deterministic across SQLite/Postgres).
    *
    * Defense-in-depth: if there are no rows (e.g. closed Cell with no delivered messages),
@@ -348,7 +348,7 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
             reply_to: message.replyTo,
             ttl_ms: message.ttl,
             sent_at: dateToIso(message.sentAt),
-            delivered_at: dateToIso(message.deliveredAt),
+            stored_at: dateToIso(message.storedAt),
             read_at: message.readAt ? dateToIso(message.readAt) : null,
             state: message.state,
             expired_at: message.expiredAt ? dateToIso(message.expiredAt) : null,
@@ -367,7 +367,7 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
         .where('id', '=', messageId)
         .where('cell_id', '=', cellId)
         .where('read_at', 'is', null)
-        .where('state', 'in', ['sent', 'delivered'])
+        .where('state', 'in', ['sent', 'stored'])
         .executeTakeFirst();
       return { affected: Number(result.numUpdatedRows ?? 0n) };
     },
@@ -382,11 +382,11 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
         .where('state', '!=', 'expired');
 
       // Per the public type contract, when both `state` and `unreadOnly` are set
-      // `state` wins. Otherwise `unreadOnly === true` collapses to `state='delivered'`.
+      // `state` wins. Otherwise `unreadOnly === true` collapses to `state='stored'`.
       if (filter.state !== undefined) {
         query = query.where('state', '=', filter.state);
       } else if (filter.unreadOnly === true) {
-        query = query.where('state', '=', 'delivered');
+        query = query.where('state', '=', 'stored');
       }
       if (filter.types && filter.types.length > 0) {
         query = query.where('type', 'in', filter.types);
@@ -398,17 +398,17 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
         query = query.where('from_participant_id', '=', filter.from);
       }
       if (pagination.cursor) {
-        const cursorIso = dateToIso(pagination.cursor.deliveredAt);
+        const cursorIso = dateToIso(pagination.cursor.storedAt);
         const cursorId = pagination.cursor.messageId;
-        // Keyset: rows strictly older than the cursor's (delivered_at, id).
+        // Keyset: rows strictly older than the cursor's (stored_at, id).
         query = query.where((eb) =>
           eb.or([
-            eb('delivered_at', '<', cursorIso),
-            eb.and([eb('delivered_at', '=', cursorIso), eb('id', '<', cursorId)]),
+            eb('stored_at', '<', cursorIso),
+            eb.and([eb('stored_at', '=', cursorIso), eb('id', '<', cursorId)]),
           ]),
         );
       }
-      query = query.orderBy('delivered_at', 'desc').orderBy('id', 'desc').limit(pagination.limit);
+      query = query.orderBy('stored_at', 'desc').orderBy('id', 'desc').limit(pagination.limit);
 
       const rows = await query.execute();
       return rows.map(rowToMessageView);
@@ -416,9 +416,9 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
 
     async summarizeUnreadForCell(cellId, executor) {
       const exec = executor ?? db;
-      // Single aggregated query: GROUP BY sender, count + MAX(delivered_at) for ordering.
+      // Single aggregated query: GROUP BY sender, count + MAX(stored_at) for ordering.
       // The JS-side reduce/map is trivial and respects the spec ordering
-      // (MAX(delivered_at) DESC, from_participant_id ASC).
+      // (MAX(stored_at) DESC, from_participant_id ASC).
       const rows = await exec
         .selectFrom('messages')
         .select((eb) => [
@@ -427,12 +427,12 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
           // node-postgres returns `string` (sometimes `bigint`). The runtime
           // coercion below handles all three; the generic stays honest.
           eb.fn.countAll<string | number | bigint>().as('cnt'),
-          eb.fn.max('delivered_at').as('max_delivered'),
+          eb.fn.max('stored_at').as('max_stored'),
         ])
         .where('cell_id', '=', cellId)
-        .where('state', '=', 'delivered')
+        .where('state', '=', 'stored')
         .groupBy('from_participant_id')
-        .orderBy('max_delivered', 'desc')
+        .orderBy('max_stored', 'desc')
         .orderBy('from_participant_id', 'asc')
         .execute();
 

@@ -6,7 +6,7 @@
 
 import type { UUIDv7 } from '#domain/auth/types.js';
 
-import type { MessageDeliveredEvent } from '#domain/cells/index.js';
+import type { MessageStoredEvent } from '#domain/cells/index.js';
 
 interface WindowEntry {
   cellId: UUIDv7;
@@ -25,7 +25,7 @@ export type FlushCallback = (cellId: UUIDv7) => Promise<void>;
 export interface Consolidator {
   /** Idempotent within a window — extra absorbs while a window is open are
    *  silently discarded; the eventual flush queries the live Cell state. */
-  absorb(event: MessageDeliveredEvent): void;
+  absorb(event: MessageStoredEvent): void;
   /** Synchronous cancellation — `clearTimeout` + map delete. Used by
    *  `handleCellClosed`. No flush occurs after cancel. */
   cancelWindow(cellId: UUIDv7): void;

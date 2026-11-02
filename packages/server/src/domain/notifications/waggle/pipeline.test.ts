@@ -6,7 +6,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ParticipantsReadRepo, ParticipantStateSummary } from '#domain/auth/index.js';
-import type { Cell, CellsRepo, MessageDeliveredEvent } from '#domain/cells/index.js';
+import type { Cell, CellsRepo, MessageStoredEvent } from '#domain/cells/index.js';
 import type { Logger } from '#observability/logger.js';
 
 import type { Builder } from './builder.js';
@@ -54,14 +54,14 @@ function activeCell(id?: string, ownerId?: string): Cell {
   };
 }
 
-function makeEvent(cellId: string, recipientId: string): MessageDeliveredEvent {
+function makeEvent(cellId: string, recipientId: string): MessageStoredEvent {
   return {
     messageId: uuidv7(),
     cellId,
     recipientId,
     fromParticipantId: uuidv7(),
     type: 'notification',
-    deliveredAt: new Date(),
+    storedAt: new Date(),
   };
 }
 
@@ -81,7 +81,7 @@ interface PipelineRig {
   participantState: ParticipantStateSummary | null;
   cellById: Cell | null;
   buildResult: WaggleNotification | null;
-  absorbedEvents: MessageDeliveredEvent[];
+  absorbedEvents: MessageStoredEvent[];
   cancelled: string[];
   delivered: WaggleNotification[];
   log: ReturnType<typeof silentLogger>;
@@ -140,7 +140,7 @@ function buildPipelineRig(initial: Partial<PipelineRig> = {}): {
   };
 
   const consolidator = {
-    absorb: (event: MessageDeliveredEvent) => rig.absorbedEvents.push(event),
+    absorb: (event: MessageStoredEvent) => rig.absorbedEvents.push(event),
     cancelWindow: (cellId: string) => rig.cancelled.push(cellId),
     __activeWindowCount: () => 0,
   } as unknown as Consolidator;
@@ -161,12 +161,12 @@ async function flushMicrotasks(): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-describe('createPipeline.handleMessageDelivered', () => {
+describe('createPipeline.handleMessageStored', () => {
   it('online path: presence online + state active → consolidator.absorb', async () => {
     const { rig, pipeline } = buildPipelineRig({ presenceOnline: true });
     const event = makeEvent(uuidv7(), uuidv7());
 
-    pipeline.handleMessageDelivered(event);
+    pipeline.handleMessageStored(event);
     await flushMicrotasks();
 
     expect(rig.absorbedEvents).toHaveLength(1);
@@ -177,7 +177,7 @@ describe('createPipeline.handleMessageDelivered', () => {
     const { rig, pipeline } = buildPipelineRig({ presenceOnline: false });
     const event = makeEvent(uuidv7(), uuidv7());
 
-    pipeline.handleMessageDelivered(event);
+    pipeline.handleMessageStored(event);
     await flushMicrotasks();
 
     expect(rig.absorbedEvents).toHaveLength(0);
@@ -190,7 +190,7 @@ describe('createPipeline.handleMessageDelivered', () => {
     });
     const event = makeEvent(uuidv7(), uuidv7());
 
-    pipeline.handleMessageDelivered(event);
+    pipeline.handleMessageStored(event);
     await flushMicrotasks();
 
     expect(rig.absorbedEvents).toHaveLength(0);
@@ -208,7 +208,7 @@ describe('createPipeline.handleMessageDelivered', () => {
     });
     const event = makeEvent(uuidv7(), uuidv7());
 
-    pipeline.handleMessageDelivered(event);
+    pipeline.handleMessageStored(event);
     await flushMicrotasks();
 
     const log = rig.log.entries.find(
@@ -225,7 +225,7 @@ describe('createPipeline.handleMessageDelivered', () => {
     });
     const event = makeEvent(uuidv7(), uuidv7());
 
-    pipeline.handleMessageDelivered(event);
+    pipeline.handleMessageStored(event);
     await flushMicrotasks();
 
     expect(rig.absorbedEvents).toHaveLength(0);
@@ -247,9 +247,9 @@ describe('createPipeline.handleMessageDelivered', () => {
       buildOnlineWaggle: () => Promise.resolve(null),
       buildReplayWaggle: () => Promise.resolve(null),
     };
-    const absorbedEvents: MessageDeliveredEvent[] = [];
+    const absorbedEvents: MessageStoredEvent[] = [];
     const consolidator = {
-      absorb: (event: MessageDeliveredEvent) => absorbedEvents.push(event),
+      absorb: (event: MessageStoredEvent) => absorbedEvents.push(event),
       cancelWindow: () => {},
       __activeWindowCount: () => 0,
     } as unknown as Consolidator;
@@ -263,7 +263,7 @@ describe('createPipeline.handleMessageDelivered', () => {
     });
     const event = makeEvent(uuidv7(), uuidv7());
 
-    expect(() => pipeline.handleMessageDelivered(event)).not.toThrow();
+    expect(() => pipeline.handleMessageStored(event)).not.toThrow();
     await flushMicrotasks();
 
     expect(absorbedEvents).toHaveLength(0);
@@ -416,9 +416,9 @@ describe('createPipeline integration with real rig flow', () => {
     const cellId = uuidv7();
     const recipientId = uuidv7();
 
-    pipeline.handleMessageDelivered(makeEvent(cellId, recipientId));
-    pipeline.handleMessageDelivered(makeEvent(cellId, recipientId));
-    pipeline.handleMessageDelivered(makeEvent(cellId, recipientId));
+    pipeline.handleMessageStored(makeEvent(cellId, recipientId));
+    pipeline.handleMessageStored(makeEvent(cellId, recipientId));
+    pipeline.handleMessageStored(makeEvent(cellId, recipientId));
     await flushMicrotasks();
 
     // Pipeline does not dedup — that's the consolidator's job. We verify the

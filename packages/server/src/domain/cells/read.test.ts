@@ -130,7 +130,7 @@ function buildReader(
   });
 }
 
-async function insertDeliveredMessages(
+async function insertStoredMessages(
   world: ReadWorld,
   cellId: UUIDv7,
   count: number,
@@ -150,9 +150,9 @@ async function insertDeliveredMessages(
       replyTo: null,
       ttl: null,
       sentAt: new Date(baseTime + i * 1000),
-      deliveredAt: new Date(baseTime + i * 1000),
+      storedAt: new Date(baseTime + i * 1000),
       readAt: null,
-      state: 'delivered',
+      state: 'stored',
       expiredAt: null,
     };
     await world.cellsRepo.insertMessage(m);
@@ -174,7 +174,7 @@ describe('createReader / readMailbox', () => {
 
   it('returns the caller cell messages newest-first as MessageView', async () => {
     const reader = buildReader(world);
-    const seeded = await insertDeliveredMessages(world, world.cellB, 3);
+    const seeded = await insertStoredMessages(world, world.cellB, 3);
 
     const result = await reader.readMailbox({
       callerContext: buildContext(world, world.workerB),
@@ -185,14 +185,14 @@ describe('createReader / readMailbox', () => {
     // Verify the projection shape (consumer-facing fields).
     expect(result[0]?.from).toBe(world.workerA);
     expect(result[0]?.to).toBe(world.workerB);
-    expect(result[0]?.state).toBe('delivered');
+    expect(result[0]?.state).toBe('stored');
     expect(result[0]?.readAt).toBeNull();
-    expect(result[0]?.deliveredAt).toBeInstanceOf(Date);
+    expect(result[0]?.storedAt).toBeInstanceOf(Date);
   });
 
   it('applies the unreadOnly filter', async () => {
     const reader = buildReader(world);
-    const seeded = await insertDeliveredMessages(world, world.cellB, 2);
+    const seeded = await insertStoredMessages(world, world.cellB, 2);
     // Mark the first as read directly via the repo.
     await world.cellsRepo.markMessageRead(
       seeded[0]!.id,
@@ -210,7 +210,7 @@ describe('createReader / readMailbox', () => {
 
   it('forwards the types filter', async () => {
     const reader = buildReader(world);
-    await insertDeliveredMessages(world, world.cellB, 4);
+    await insertStoredMessages(world, world.cellB, 4);
     const onlyNotifications = await reader.readMailbox({
       callerContext: buildContext(world, world.workerB),
       filter: { types: ['notification'] },
@@ -221,7 +221,7 @@ describe('createReader / readMailbox', () => {
 
   it('paginates deterministically across pages via the keyset cursor', async () => {
     const reader = buildReader(world);
-    const seeded = await insertDeliveredMessages(world, world.cellB, 5);
+    const seeded = await insertStoredMessages(world, world.cellB, 5);
     const seenIds = new Set<string>();
 
     const ctx = buildContext(world, world.workerB);
@@ -236,7 +236,7 @@ describe('createReader / readMailbox', () => {
     const page2 = await reader.readMailbox({
       callerContext: ctx,
       pagination: {
-        cursor: { deliveredAt: cursor1.deliveredAt, messageId: cursor1.id },
+        cursor: { storedAt: cursor1.storedAt, messageId: cursor1.id },
         limit: 2,
       },
     });
@@ -247,7 +247,7 @@ describe('createReader / readMailbox', () => {
     const page3 = await reader.readMailbox({
       callerContext: ctx,
       pagination: {
-        cursor: { deliveredAt: cursor2.deliveredAt, messageId: cursor2.id },
+        cursor: { storedAt: cursor2.storedAt, messageId: cursor2.id },
         limit: 2,
       },
     });
@@ -259,7 +259,7 @@ describe('createReader / readMailbox', () => {
 
   it('caps the limit at config.readMaxPageSize', async () => {
     const reader = buildReader(world, { config: { readMaxPageSize: 2 } });
-    await insertDeliveredMessages(world, world.cellB, 5);
+    await insertStoredMessages(world, world.cellB, 5);
     const result = await reader.readMailbox({
       callerContext: buildContext(world, world.workerB),
       pagination: { cursor: null, limit: 1000 },
@@ -269,7 +269,7 @@ describe('createReader / readMailbox', () => {
 
   it('uses readDefaultPageSize when no limit is given', async () => {
     const reader = buildReader(world, { config: { readDefaultPageSize: 1 } });
-    await insertDeliveredMessages(world, world.cellB, 3);
+    await insertStoredMessages(world, world.cellB, 3);
     const result = await reader.readMailbox({
       callerContext: buildContext(world, world.workerB),
     });
@@ -302,7 +302,7 @@ describe('createReader / markRead', () => {
 
   it('marks a delivered message as read and returns it in marked', async () => {
     const reader = buildReader(world);
-    const [m] = await insertDeliveredMessages(world, world.cellB, 1);
+    const [m] = await insertStoredMessages(world, world.cellB, 1);
 
     const result = await reader.markRead({
       callerContext: buildContext(world, world.workerB),
@@ -320,7 +320,7 @@ describe('createReader / markRead', () => {
 
   it('is idempotent: re-marking a read message returns it in ignored', async () => {
     const reader = buildReader(world);
-    const [m] = await insertDeliveredMessages(world, world.cellB, 1);
+    const [m] = await insertStoredMessages(world, world.cellB, 1);
     const ctx = buildContext(world, world.workerB);
 
     const first = await reader.markRead({ callerContext: ctx, messageIds: [m!.id] });
@@ -333,7 +333,7 @@ describe('createReader / markRead', () => {
   it('uniform privacy: messages from another Cell collapse to ignored (no error)', async () => {
     const reader = buildReader(world);
     // Deliver a message into workerA's cell, then have workerB try to mark it.
-    const [foreign] = await insertDeliveredMessages(world, world.cellA, 1);
+    const [foreign] = await insertStoredMessages(world, world.cellA, 1);
 
     const result = await reader.markRead({
       callerContext: buildContext(world, world.workerB),
@@ -345,13 +345,8 @@ describe('createReader / markRead', () => {
 
   it('mixes marked and ignored in the same call', async () => {
     const reader = buildReader(world);
-    const ours = await insertDeliveredMessages(world, world.cellB, 1);
-    const foreign = await insertDeliveredMessages(
-      world,
-      world.cellA,
-      1,
-      '2026-04-26T12:00:00.000Z',
-    );
+    const ours = await insertStoredMessages(world, world.cellB, 1);
+    const foreign = await insertStoredMessages(world, world.cellA, 1, '2026-04-26T12:00:00.000Z');
     const unknownId = uuidv7();
 
     const result = await reader.markRead({
@@ -416,7 +411,7 @@ describe('readMailbox — additional filter and pagination contracts', () => {
 
   it('filter.state pins messages to a specific state', async () => {
     const reader = buildReader(world);
-    const [m1, m2] = await insertDeliveredMessages(world, world.cellB, 2);
+    const [m1, m2] = await insertStoredMessages(world, world.cellB, 2);
     // Mark one as read directly via the repo.
     await world.cellsRepo.markMessageRead(m1!.id, world.cellB, new Date());
 
@@ -426,11 +421,11 @@ describe('readMailbox — additional filter and pagination contracts', () => {
     });
     expect(onlyRead.map((mv) => mv.id)).toEqual([m1!.id]);
 
-    const onlyDelivered = await reader.readMailbox({
+    const onlyStored = await reader.readMailbox({
       callerContext: buildContext(world, world.workerB),
-      filter: { state: 'delivered' },
+      filter: { state: 'stored' },
     });
-    expect(onlyDelivered.map((mv) => mv.id)).toEqual([m2!.id]);
+    expect(onlyStored.map((mv) => mv.id)).toEqual([m2!.id]);
   });
 
   it('filter.inReplyTo restricts results to replies of a specific message', async () => {
@@ -447,9 +442,9 @@ describe('readMailbox — additional filter and pagination contracts', () => {
       replyTo: null,
       ttl: null,
       sentAt: new Date('2026-04-26T11:00:00.000Z'),
-      deliveredAt: new Date('2026-04-26T11:00:00.000Z'),
+      storedAt: new Date('2026-04-26T11:00:00.000Z'),
       readAt: null,
-      state: 'delivered',
+      state: 'stored',
       expiredAt: null,
     });
     const replyId = uuidv7();
@@ -464,9 +459,9 @@ describe('readMailbox — additional filter and pagination contracts', () => {
       replyTo: originalId,
       ttl: null,
       sentAt: new Date('2026-04-26T11:00:01.000Z'),
-      deliveredAt: new Date('2026-04-26T11:00:01.000Z'),
+      storedAt: new Date('2026-04-26T11:00:01.000Z'),
       readAt: null,
-      state: 'delivered',
+      state: 'stored',
       expiredAt: null,
     });
 
@@ -514,9 +509,9 @@ describe('readMailbox — filter.from (PRY-020, INC-2026-001 #1)', () => {
       replyTo: null,
       ttl: null,
       sentAt: new Date(ts),
-      deliveredAt: new Date(ts),
+      storedAt: new Date(ts),
       readAt: null,
-      state: 'delivered',
+      state: 'stored',
       expiredAt: null,
     });
     return id;
@@ -571,7 +566,7 @@ describe('readMailbox — filter.from (PRY-020, INC-2026-001 #1)', () => {
   it('combines filter.from with filter.state (AND semantics)', async () => {
     // 2 from workerA: 1 delivered, 1 read.
     // 1 from hkA: delivered.
-    const fromADelivered = await insertFrom(world.cellB, world.workerA, world.workerB, 'a-d', 0);
+    const fromAStored = await insertFrom(world.cellB, world.workerA, world.workerB, 'a-d', 0);
     const fromARead = uuidv7();
     const ts = new Date('2026-04-26T10:00:01.000Z');
     await world.cellsRepo.insertMessage({
@@ -585,7 +580,7 @@ describe('readMailbox — filter.from (PRY-020, INC-2026-001 #1)', () => {
       replyTo: null,
       ttl: null,
       sentAt: ts,
-      deliveredAt: ts,
+      storedAt: ts,
       readAt: ts,
       state: 'read',
       expiredAt: null,
@@ -593,11 +588,11 @@ describe('readMailbox — filter.from (PRY-020, INC-2026-001 #1)', () => {
     await insertFrom(world.cellB, world.hkA, world.workerB, 'hk-d', 2000);
 
     const reader = buildReader(world);
-    const onlyDeliveredFromA = await reader.readMailbox({
+    const onlyStoredFromA = await reader.readMailbox({
       callerContext: buildContext(world, world.workerB),
-      filter: { from: world.workerA, state: 'delivered' },
+      filter: { from: world.workerA, state: 'stored' },
     });
-    expect(onlyDeliveredFromA.map((mv) => mv.id)).toEqual([fromADelivered]);
+    expect(onlyStoredFromA.map((mv) => mv.id)).toEqual([fromAStored]);
   });
 });
 
@@ -644,9 +639,9 @@ describe('TTL deferral lock-in (PRY-025, ADR-016, INC-2026-001 #3)', () => {
       replyTo: null,
       ttl: 1,
       sentAt: farPast,
-      deliveredAt: farPast,
+      storedAt: farPast,
       readAt: null,
-      state: 'delivered',
+      state: 'stored',
       expiredAt: null,
     });
     return id;
@@ -676,7 +671,7 @@ describe('TTL deferral lock-in (PRY-025, ADR-016, INC-2026-001 #3)', () => {
     // `expired` is a sentinel of the schema, written to the wire shape only by
     // the v0.2+ sweep job (deferred). If a future commit ever flips this row
     // to `expired`, this test fails — surfacing the contract drift.
-    expect(['sent', 'delivered', 'read']).toContain(row.state);
+    expect(['sent', 'stored', 'read']).toContain(row.state);
     expect(row.state).not.toBe('expired');
     expect(row.expired_at).toBeNull();
   });

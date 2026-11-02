@@ -17,7 +17,7 @@ export const ReadMailboxInputSchema = z
   .object({
     filter: z
       .object({
-        state: z.enum(['delivered', 'read', 'unread']).optional(),
+        state: z.enum(['stored', 'read', 'unread']).optional(),
         from: z.string().optional(),
         type: z.enum(['request', 'response', 'notification']).optional(),
       })
@@ -26,7 +26,7 @@ export const ReadMailboxInputSchema = z
       .object({
         cursor: z
           .object({
-            delivered_at: z.string().datetime(),
+            stored_at: z.string().datetime(),
             message_id: z.string(),
           })
           .optional(),
@@ -52,11 +52,11 @@ export function createReadMailboxHandler(deps: ReadMailboxDeps) {
     let pageLimit = DEFAULT_PAGE_LIMIT;
 
     if (input.filter !== undefined) {
-      // 'unread' (product) maps to 'delivered' state-side; both 'unread' and
-      // 'delivered' values from the wire produce { state: 'delivered' } per the
+      // 'unread' (product) maps to 'stored' state-side; both 'unread' and
+      // 'stored' values from the wire produce { state: 'stored' } per the
       // tech spec § Tool 3 read_mailbox mapping.
-      if (input.filter.state === 'unread' || input.filter.state === 'delivered') {
-        filter.state = 'delivered';
+      if (input.filter.state === 'unread' || input.filter.state === 'stored') {
+        filter.state = 'stored';
       } else if (input.filter.state === 'read') {
         filter.state = 'read';
       }
@@ -87,13 +87,13 @@ export function createReadMailboxHandler(deps: ReadMailboxDeps) {
       if (input.pagination.limit !== undefined) pageLimit = input.pagination.limit;
 
       if (input.pagination.cursor !== undefined) {
-        const parsedDate = new Date(input.pagination.cursor.delivered_at);
+        const parsedDate = new Date(input.pagination.cursor.stored_at);
         if (Number.isNaN(parsedDate.getTime())) {
-          throw new CellError('INVALID_INPUT', { subCode: 'cursor_delivered_at_invalid' });
+          throw new CellError('INVALID_INPUT', { subCode: 'cursor_stored_at_invalid' });
         }
         readInput.pagination = {
           cursor: {
-            deliveredAt: parsedDate,
+            storedAt: parsedDate,
             messageId: input.pagination.cursor.message_id,
           },
           limit: pageLimit,

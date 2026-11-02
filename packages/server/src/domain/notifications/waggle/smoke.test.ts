@@ -7,7 +7,7 @@
 //   - Real participants write repo with the real cells hook (cell row created
 //     atomically with each createAgent / createHivekeeper).
 //   - Real Issuer + Verifier (Ed25519) producing real `IdentityContext`s.
-//   - Real Sender (PRY-003) firing real `messageDelivered` events.
+//   - Real Sender (PRY-003) firing real `messageStored` events.
 //   - Real Waggle Pipeline + Presence Registry constructed via the production
 //     factory (`createNotificationsForProduction`).
 //   - Visibility STUB (`stubVisibilityEngine`) — sufficient: the visibility

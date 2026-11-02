@@ -4,18 +4,18 @@
 import { v7 as uuidv7 } from 'uuid';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { MessageDeliveredEvent } from '#domain/cells/index.js';
+import type { MessageStoredEvent } from '#domain/cells/index.js';
 
 import { createConsolidator, type FlushCallback } from './consolidator.js';
 
-function event(cellId = uuidv7()): MessageDeliveredEvent {
+function event(cellId = uuidv7()): MessageStoredEvent {
   return {
     messageId: uuidv7(),
     cellId,
     recipientId: uuidv7(),
     fromParticipantId: uuidv7(),
     type: 'notification',
-    deliveredAt: new Date(),
+    storedAt: new Date(),
   };
 }
 

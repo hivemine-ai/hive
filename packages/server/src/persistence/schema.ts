@@ -116,9 +116,9 @@ export interface MessagesTable {
   reply_to: UUIDv7 | null;
   ttl_ms: number | null;
   sent_at: Generated<IsoTimestamp>;
-  delivered_at: Generated<IsoTimestamp>;
+  stored_at: Generated<IsoTimestamp>;
   read_at: IsoTimestamp | null;
-  state: Generated<'sent' | 'delivered' | 'read' | 'expired'>;
+  state: Generated<'sent' | 'stored' | 'read' | 'expired'>;
   expired_at: IsoTimestamp | null;
 }
 

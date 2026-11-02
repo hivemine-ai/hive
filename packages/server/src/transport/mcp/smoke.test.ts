@@ -572,7 +572,7 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     const sendResult = parseToolResult<{
       message_id: string;
       sent_at: string;
-      delivered_at: string;
+      stored_at: string;
       replayed: boolean;
     }>(sendRpc);
     expect(sendResult.message_id).toMatch(/^[0-9a-f]{8}-/);
@@ -594,7 +594,7 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     expect(summary.unread_count).toBe(1);
     expect(summary.sender_ids).toEqual([world.workerAId]);
 
-    // ── Step 8b: client B read_mailbox → message in 'delivered' state ──
+    // ── Step 8b: client B read_mailbox → message in 'stored' state ──
     const readRpc = await rpc(
       world.baseUrl,
       world.jwtB,
@@ -618,7 +618,7 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
       next_cursor: unknown;
     }>(readRpc);
     expect(readResult.messages).toHaveLength(1);
-    expect(readResult.messages[0]?.state).toBe('delivered');
+    expect(readResult.messages[0]?.state).toBe('stored');
     expect(readResult.messages[0]?.from).toBe(world.workerAId);
     expect(readResult.messages[0]?.body).toBe('hello from A');
     const messageId = readResult.messages[0]?.id as string;

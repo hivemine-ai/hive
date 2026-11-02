@@ -276,7 +276,7 @@ describe('PRY-003 Cell Store Slice 0 — smoke E2E', () => {
     expect(result.replayed).toBe(false);
     expect(result.messageId).toMatch(/^[0-9a-f-]{36}$/);
     expect(result.sentAt).toBeInstanceOf(Date);
-    expect(result.deliveredAt).toBeInstanceOf(Date);
+    expect(result.storedAt).toBeInstanceOf(Date);
   });
 
   // ── AC-1 step 5: workerB readMailbox returns the delivered message ──
@@ -291,7 +291,7 @@ describe('PRY-003 Cell Store Slice 0 — smoke E2E', () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]?.from).toBe(world.workerA.id);
     expect(messages[0]?.body).toBe('hello');
-    expect(messages[0]?.state).toBe('delivered');
+    expect(messages[0]?.state).toBe('stored');
     expect(messages[0]?.readAt).toBeNull();
   });
 

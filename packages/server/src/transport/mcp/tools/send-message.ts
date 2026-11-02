@@ -22,7 +22,7 @@ export type SendMessageInput = z.infer<typeof SendMessageInputSchema>;
 export interface SendMessageOutput {
   message_id: string;
   sent_at: string;
-  delivered_at: string;
+  stored_at: string;
   replayed: boolean;
 }
 
@@ -58,7 +58,7 @@ export function createSendMessageHandler(deps: SendMessageDeps) {
     return {
       message_id: result.messageId,
       sent_at: result.sentAt.toISOString(),
-      delivered_at: result.deliveredAt.toISOString(),
+      stored_at: result.storedAt.toISOString(),
       replayed: result.replayed,
     };
   };
