@@ -44,6 +44,8 @@ export interface McpTransport {
   toolCatalog: ToolDefinition[];
   /** Factory for `createMcpHandler`: one fresh server instance per request. */
   buildServer(): McpServer;
+  /** Identity stamped on the frames the listen edge writes. */
+  serverInfo: { name: string; version: string };
 }
 
 const DEFAULT_SERVER_INFO = { name: 'hive', version: HIVE_VERSION };
@@ -59,6 +61,7 @@ const CACHE_HINTS = {
 } as const;
 
 export function createMcpTransport(deps: McpTransportDeps): McpTransport {
+  const serverInfo = deps.serverInfo ?? DEFAULT_SERVER_INFO;
   const resolver = createReferenceResolver({ participantsRepo: deps.participantsRepo });
 
   const toolCatalog = createToolCatalog({
@@ -83,7 +86,7 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
   }));
 
   function buildServer(): McpServer {
-    const mcpServer = new McpServer(deps.serverInfo ?? DEFAULT_SERVER_INFO, {
+    const mcpServer = new McpServer(serverInfo, {
       instructions: deps.instructions ?? DEFAULT_INSTRUCTIONS,
       cacheHints: CACHE_HINTS,
     });
@@ -134,5 +137,5 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
     return mcpServer;
   }
 
-  return { toolCatalog, buildServer };
+  return { toolCatalog, buildServer, serverInfo };
 }

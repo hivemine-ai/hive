@@ -9,12 +9,20 @@ export type {
   ReadyHookInput,
 } from './presence/registry.js';
 
-export type { WaggleNotification, WaggleKind } from './waggle/types.js';
+export type { WaggleNotification, WaggleKind, DeferredWakeEvent } from './waggle/types.js';
 
 export { createConsolidator } from './waggle/consolidator.js';
 export type { Consolidator, ConsolidatorConfig, FlushCallback } from './waggle/consolidator.js';
 
-export { createBuilder } from './waggle/builder.js';
+export { createSenderThrottle } from './waggle/sender-throttle.js';
+export type {
+  AdmitResult,
+  DeferredWake,
+  SenderThrottle,
+  SenderThrottleConfig,
+} from './waggle/sender-throttle.js';
+
+export { createBuilder, deriveEventId } from './waggle/builder.js';
 export type { Builder, BuilderDeps } from './waggle/builder.js';
 
 export { createReplay } from './waggle/replay.js';

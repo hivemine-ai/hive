@@ -1,6 +1,6 @@
 // resources/list and resources/read over the caller mailbox. The only readable URI is
 // the one of the caller. Any other answers -32602 without telling a foreign mailbox
-// from a missing one. Contents are mailbox metadata, never message bodies: bodies are
+// from a missing one, and a caller without a Cell gets the same answer. Contents are mailbox metadata, never message bodies: bodies are
 // read with read_mailbox, as untrusted data.
 
 import type { McpServer } from '@modelcontextprotocol/server';
@@ -22,12 +22,12 @@ export function mailboxUri(cellId: string): string {
   return `hive://cells/${cellId}`;
 }
 
-async function callerCellId(deps: MailboxResourceDeps, ctx: RequestContext): Promise<string> {
+async function callerCellId(
+  deps: MailboxResourceDeps,
+  ctx: RequestContext,
+): Promise<string | null> {
   const cell = await deps.cellsRepo.findCellByOwner(ctx.identity.participantId);
-  if (!cell) {
-    throw new CellError('INTERNAL_INCONSISTENCY', { subCode: 'caller_has_no_cell' });
-  }
-  return cell.id;
+  return cell?.id ?? null;
 }
 
 export function registerMailboxResources(server: McpServer, deps: MailboxResourceDeps): void {
@@ -35,6 +35,7 @@ export function registerMailboxResources(server: McpServer, deps: MailboxResourc
     try {
       const ctx = requestContextFrom(handlerCtx.http?.authInfo);
       const cellId = await callerCellId(deps, ctx);
+      if (cellId === null) return { resources: [] };
       return {
         resources: [
           {
@@ -55,15 +56,15 @@ export function registerMailboxResources(server: McpServer, deps: MailboxResourc
     try {
       const ctx = requestContextFrom(handlerCtx.http?.authInfo);
       const cellId = await callerCellId(deps, ctx);
-      const uri = mailboxUri(cellId);
-      if (request.params.uri !== uri) {
+      const uri = cellId === null ? null : mailboxUri(cellId);
+      if (cellId === null || request.params.uri !== uri) {
         throw new CellError('INVALID_INPUT', { subCode: 'mailbox_uri_not_owned' });
       }
       const summary = await deps.cellsRepo.summarizeUnreadForCell(cellId);
       return {
         contents: [
           {
-            uri,
+            uri: request.params.uri,
             mimeType: 'application/json',
             text: JSON.stringify({
               unread_count: summary.unreadCount,

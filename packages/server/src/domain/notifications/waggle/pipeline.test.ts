@@ -13,7 +13,8 @@ import type { Builder } from './builder.js';
 import type { Consolidator } from './consolidator.js';
 import type { PresenceRegistry } from '#domain/notifications/presence/registry.js';
 import type { SubscriberHandle } from '#domain/notifications/presence/subscriber-handle.js';
-import type { WaggleNotification } from './types.js';
+import type { SenderThrottle } from './sender-throttle.js';
+import type { DeferredWakeEvent, WaggleNotification } from './types.js';
 
 import { createPipeline } from './pipeline.js';
 
@@ -81,7 +82,10 @@ interface PipelineRig {
   participantState: ParticipantStateSummary | null;
   cellById: Cell | null;
   buildResult: WaggleNotification | null;
-  absorbedEvents: MessageStoredEvent[];
+  absorbedEvents: Array<MessageStoredEvent | DeferredWakeEvent>;
+  throttleAdmits: boolean;
+  droppedCells: string[];
+  admitCalls: unknown[][];
   cancelled: string[];
   delivered: WaggleNotification[];
   log: ReturnType<typeof silentLogger>;
@@ -98,6 +102,9 @@ function buildPipelineRig(initial: Partial<PipelineRig> = {}): {
     cellById: 'cellById' in initial ? (initial.cellById ?? null) : activeCell(),
     buildResult: initial.buildResult ?? null,
     absorbedEvents: [],
+    throttleAdmits: initial.throttleAdmits ?? true,
+    droppedCells: [],
+    admitCalls: [],
     cancelled: [],
     delivered: [],
     log: silentLogger(),
@@ -141,10 +148,23 @@ function buildPipelineRig(initial: Partial<PipelineRig> = {}): {
   };
 
   const consolidator = {
-    absorb: (event: MessageStoredEvent) => rig.absorbedEvents.push(event),
+    absorb: (event: MessageStoredEvent | DeferredWakeEvent) => rig.absorbedEvents.push(event),
     cancelWindow: (cellId: string) => rig.cancelled.push(cellId),
     __activeWindowCount: () => 0,
   } as unknown as Consolidator;
+
+  const senderThrottle: SenderThrottle = {
+    admit: (...args) => {
+      rig.admitCalls.push(args);
+      return {
+        admitted: rig.throttleAdmits,
+        deferredWakeAt: rig.throttleAdmits ? null : new Date(),
+      };
+    },
+    dropCell: (cellId) => rig.droppedCells.push(cellId),
+    stop: () => undefined,
+    __entryCount: () => 0,
+  };
 
   const pipeline = createPipeline({
     presenceRegistry,
@@ -152,6 +172,7 @@ function buildPipelineRig(initial: Partial<PipelineRig> = {}): {
     cellsRepo,
     builder,
     consolidator,
+    senderThrottle,
     logger: rig.log.logger,
   });
 
@@ -232,7 +253,7 @@ describe('createPipeline.handleMessageStored', () => {
     expect(rig.absorbedEvents).toHaveLength(0);
   });
 
-  it('async branch throws → sync entrypoint stays silent and emits waggle_handle_message_delivered_failed log', async () => {
+  it('async branch throws → sync entrypoint stays silent and emits waggle_handle_message_stored_failed log', async () => {
     // Build a rig whose participantsRepo throws — the inner try/catch must
     // funnel the error into the structured log without re-raising.
     const log = silentLogger();
@@ -260,6 +281,7 @@ describe('createPipeline.handleMessageStored', () => {
       cellsRepo,
       builder,
       consolidator,
+      senderThrottle: {} as SenderThrottle,
       logger: log.logger,
     });
     const event = makeEvent(uuidv7(), uuidv7());
@@ -269,7 +291,7 @@ describe('createPipeline.handleMessageStored', () => {
 
     expect(absorbedEvents).toHaveLength(0);
     const failureLog = log.entries.find(
-      (e) => (e.payload as { event?: string }).event === 'waggle_handle_message_delivered_failed',
+      (e) => (e.payload as { event?: string }).event === 'waggle_handle_message_stored_failed',
     );
     expect(failureLog).toBeDefined();
     expect((failureLog?.payload as { errorMessage?: string }).errorMessage).toBe('db boom');
@@ -280,7 +302,7 @@ describe('createPipeline.flushCell', () => {
   it('cell not found → no-op', async () => {
     const { rig, pipeline } = buildPipelineRig({ cellById: null });
 
-    await pipeline.flushCell(uuidv7());
+    await pipeline.flushCell(uuidv7(), 1);
 
     expect(rig.delivered).toHaveLength(0);
   });
@@ -291,7 +313,7 @@ describe('createPipeline.flushCell', () => {
     closed.closedAt = new Date();
     const { rig, pipeline } = buildPipelineRig({ cellById: closed });
 
-    await pipeline.flushCell(closed.id);
+    await pipeline.flushCell(closed.id, 1);
 
     expect(rig.delivered).toHaveLength(0);
   });
@@ -299,7 +321,7 @@ describe('createPipeline.flushCell', () => {
   it('presence offline mid-window → no deliver (race protection)', async () => {
     const { rig, pipeline } = buildPipelineRig({ presenceOnline: false });
 
-    await pipeline.flushCell(uuidv7());
+    await pipeline.flushCell(uuidv7(), 1);
 
     expect(rig.delivered).toHaveLength(0);
   });
@@ -310,7 +332,7 @@ describe('createPipeline.flushCell', () => {
       participantState: { ...activeStateSummary(), state: 'suspended' },
     });
 
-    await pipeline.flushCell(uuidv7());
+    await pipeline.flushCell(uuidv7(), 1);
 
     expect(rig.delivered).toHaveLength(0);
   });
@@ -321,7 +343,7 @@ describe('createPipeline.flushCell', () => {
       buildResult: null,
     });
 
-    await pipeline.flushCell(uuidv7());
+    await pipeline.flushCell(uuidv7(), 1);
 
     expect(rig.delivered).toHaveLength(0);
   });
@@ -330,6 +352,8 @@ describe('createPipeline.flushCell', () => {
     const cell = activeCell();
     const notif: WaggleNotification = {
       kind: 'online',
+      eventId: 'event',
+      coalescedCount: 1,
       cellId: cell.id,
       recipientId: cell.ownerId,
       unreadCount: 2,
@@ -339,11 +363,130 @@ describe('createPipeline.flushCell', () => {
     };
     const { rig, pipeline } = buildPipelineRig({ cellById: cell, buildResult: notif });
 
-    await pipeline.flushCell(cell.id);
+    await pipeline.flushCell(cell.id, 1);
 
     expect(rig.delivered).toHaveLength(1);
     expect(rig.delivered[0]?.kind).toBe('online');
     expect(rig.delivered[0]?.unreadCount).toBe(2);
+  });
+});
+
+describe('createPipeline throttle and deferred wake', () => {
+  it('a refused event is not absorbed and is logged; the message stays stored', async () => {
+    const { rig, pipeline } = buildPipelineRig({ throttleAdmits: false });
+    const cellId = uuidv7();
+    const recipientId = uuidv7();
+
+    pipeline.handleMessageStored(makeEvent(cellId, recipientId));
+    await flushMicrotasks();
+
+    expect(rig.absorbedEvents).toHaveLength(0);
+    expect(rig.log.entries.map((e) => e.payload)).toContainEqual(
+      expect.objectContaining({ event: 'waggle_wakeup_throttled', cellId, recipientId }),
+    );
+  });
+
+  it('the throttle measures time from the stored_at of the event', async () => {
+    const { rig, pipeline } = buildPipelineRig();
+    const event = makeEvent(uuidv7(), uuidv7());
+    event.storedAt = new Date('2026-11-02T10:00:00.000Z');
+
+    pipeline.handleMessageStored(event);
+    await flushMicrotasks();
+
+    expect(rig.admitCalls).toEqual([[event.cellId, event.fromParticipantId, event.storedAt]]);
+  });
+
+  it('a deferred wake feeds the consolidator with a synthetic event', async () => {
+    const cell = activeCell();
+    const { rig, pipeline } = buildPipelineRig({ cellById: cell });
+    const senderId = uuidv7();
+    const scheduledAt = new Date();
+
+    await pipeline.handleDeferredWake({ cellId: cell.id, senderId, scheduledAt });
+
+    expect(rig.absorbedEvents).toEqual([
+      {
+        kind: 'deferred_wake',
+        cellId: cell.id,
+        recipientId: cell.ownerId,
+        fromParticipantId: senderId,
+        scheduledAt,
+      },
+    ]);
+  });
+
+  it('a deferred wake is dropped when the recipient went offline or is not active', async () => {
+    const cell = activeCell();
+    const offline = buildPipelineRig({ cellById: cell, presenceOnline: false });
+    await offline.pipeline.handleDeferredWake({
+      cellId: cell.id,
+      senderId: uuidv7(),
+      scheduledAt: new Date(),
+    });
+    expect(offline.rig.absorbedEvents).toHaveLength(0);
+
+    const suspended = buildPipelineRig({
+      cellById: cell,
+      participantState: { ...activeStateSummary(), state: 'suspended' },
+    });
+    await suspended.pipeline.handleDeferredWake({
+      cellId: cell.id,
+      senderId: uuidv7(),
+      scheduledAt: new Date(),
+    });
+    expect(suspended.rig.absorbedEvents).toHaveLength(0);
+  });
+
+  it('handleCellClosed also drops the throttle state of the Cell', () => {
+    const { rig, pipeline } = buildPipelineRig();
+    const cellId = uuidv7();
+    pipeline.handleCellClosed({
+      cellId,
+      ownerId: uuidv7(),
+      closedAt: new Date(),
+      reason: 'participant_revoked',
+    });
+    expect(rig.droppedCells).toEqual([cellId]);
+  });
+});
+
+describe('createPipeline.flushCell fan-out', () => {
+  it('resolves once the fan-out is launched, without waiting for a hung deliver', async () => {
+    const cell = activeCell();
+    const notification: WaggleNotification = {
+      kind: 'online',
+      eventId: 'event',
+      coalescedCount: 1,
+      cellId: cell.id,
+      recipientId: cell.ownerId,
+      unreadCount: 1,
+      senderIds: [uuidv7()],
+      emittedAt: new Date(),
+      waggleId: uuidv7(),
+    };
+    const hungDeliver = vi.fn(() => new Promise<void>(() => undefined));
+    const pipeline = createPipeline({
+      presenceRegistry: {
+        getPresence: () => ({ online: true, streamCount: 1, streamsSubscribedAt: [] }),
+        forEachSubscriber: (_p: string, fn: (h: SubscriberHandle) => Promise<void>) =>
+          fn({ deliver: hungDeliver } as unknown as SubscriberHandle),
+      } as unknown as PresenceRegistry,
+      participantsRepo: {
+        getParticipantState: () => Promise.resolve(activeStateSummary()),
+      } as unknown as ParticipantsReadRepo,
+      cellsRepo: { findCellById: () => Promise.resolve(cell) } as unknown as CellsRepo,
+      builder: {
+        buildOnlineWaggle: () => Promise.resolve(notification),
+        buildReplayWaggle: () => Promise.resolve(null),
+      },
+      consolidator: {} as Consolidator,
+      senderThrottle: {} as SenderThrottle,
+      logger: silentLogger().logger,
+    });
+
+    await expect(pipeline.flushCell(cell.id, 1)).resolves.toBeUndefined();
+    expect(hungDeliver).toHaveBeenCalledOnce();
   });
 });
 
@@ -384,6 +527,7 @@ describe('createPipeline.handleCellClosed', () => {
       cellsRepo,
       builder,
       consolidator,
+      senderThrottle: {} as SenderThrottle,
       logger: log.logger,
     });
 

@@ -183,6 +183,159 @@ describe('createSender / sendMessage', () => {
     await world.db.destroy();
   });
 
+  describe('per-sender quota', () => {
+    const fill = async (sender: Sender, count: number, start = 0): Promise<void> => {
+      for (let i = start; i < start + count; i += 1) {
+        await sender.sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'notification',
+          body: 'x',
+          idempotencyKey: `k-${String(i)}`,
+        });
+      }
+    };
+    const countStored = async (): Promise<number> =>
+      world.cellsRepo.countUnreadFromSender(world.cellB, world.workerA);
+
+    it('rejects at the cap with {limit, current}, stores nothing and emits nothing', async () => {
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 2 } });
+      await fill(sender, 2);
+      const events: MessageStoredEvent[] = [];
+      world.events.on('messageStored', (e) => events.push(e));
+
+      const err = await sender
+        .sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'notification',
+          body: 'over',
+        })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(CellError);
+      expect(err).toMatchObject({
+        code: 'SENDER_QUOTA_EXCEEDED',
+        subCode: 'pair_unread_cap',
+        data: { limit: 2, current: 2 },
+      });
+      expect(events).toHaveLength(0);
+      expect(await countStored()).toBe(2);
+    });
+
+    it('logs cell_sender_quota_exceeded with the rejected pair', async () => {
+      const warn = vi.fn();
+      const logger = { warn, info: vi.fn() } as unknown as Logger;
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 1 }, logger });
+      await fill(sender, 1);
+      await sender
+        .sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'notification',
+          body: 'over',
+        })
+        .catch(() => undefined);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'cell_sender_quota_exceeded',
+          participantId: world.workerA,
+          recipientId: world.workerB,
+          limit: 1,
+          currentUnread: 1,
+        }),
+        expect.any(String),
+      );
+    });
+
+    it('an idempotent replay at the cap returns the original result and emits nothing', async () => {
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 1 } });
+      await fill(sender, 1);
+      const events: MessageStoredEvent[] = [];
+      world.events.on('messageStored', (e) => events.push(e));
+
+      const replay = await sender.sendMessage({
+        callerContext: buildContext(world, world.workerA),
+        recipientId: world.workerB,
+        type: 'notification',
+        body: 'x',
+        idempotencyKey: 'k-0',
+      });
+
+      expect(replay.replayed).toBe(true);
+      expect(events).toHaveLength(0);
+    });
+
+    it('never deletes messages when the cap goes below what is stored', async () => {
+      const big = buildSender(world, { config: { maxUnreadPerSender: 5 } });
+      await fill(big.sender, 4);
+      const small = buildSender(world, { config: { maxUnreadPerSender: 2 } });
+
+      await expect(
+        small.sender.sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'notification',
+          body: 'over',
+        }),
+      ).rejects.toMatchObject({ code: 'SENDER_QUOTA_EXCEEDED', data: { limit: 2, current: 4 } });
+      expect(await countStored()).toBe(4);
+    });
+
+    it('reading frees quota; a rejected key is not burned', async () => {
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 1 } });
+      await fill(sender, 1);
+      const send = () =>
+        sender.sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'notification',
+          body: 'second',
+          idempotencyKey: 'retry-me',
+        });
+
+      await expect(send()).rejects.toMatchObject({ code: 'SENDER_QUOTA_EXCEEDED' });
+
+      await world.db
+        .updateTable('messages')
+        .set({ state: 'read' })
+        .where('cell_id', '=', world.cellB)
+        .execute();
+
+      const accepted = await send();
+      expect(accepted.replayed).toBe(false);
+    });
+
+    it('another sender to the same mailbox is unaffected', async () => {
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 1 } });
+      await fill(sender, 1);
+      const accepted = await sender.sendMessage({
+        callerContext: buildContext(world, world.hkA),
+        recipientId: world.workerB,
+        type: 'notification',
+        body: 'from someone else',
+      });
+      expect(accepted.replayed).toBe(false);
+    });
+
+    it('concurrent sends at cap-1 store exactly one', async () => {
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 3 } });
+      await fill(sender, 2);
+      const results = await Promise.allSettled(
+        [0, 1, 2, 3].map((i) =>
+          sender.sendMessage({
+            callerContext: buildContext(world, world.workerA),
+            recipientId: world.workerB,
+            type: 'notification',
+            body: `race-${String(i)}`,
+          }),
+        ),
+      );
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      expect(await countStored()).toBe(3);
+    });
+  });
+
   describe('happy path', () => {
     it('persists the message and emits messageStored post-commit', async () => {
       const at = new Date('2026-04-26T10:00:00.000Z');

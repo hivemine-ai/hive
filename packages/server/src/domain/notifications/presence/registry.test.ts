@@ -507,6 +507,23 @@ describe('cap and LRU eviction (no inactivity threshold)', () => {
   });
 });
 
+describe('listOpenStreams', () => {
+  it('lists only open entries, each with its subscription', async () => {
+    const registry = build();
+    const context = activeContext();
+    const opened = await registry.subscribe({
+      callerContext: context,
+      handle: mockHandle(context),
+    });
+    opened.ready();
+    await registry.subscribe({ callerContext: context, handle: mockHandle(context) });
+
+    const streams = registry.listOpenStreams(context.participantId);
+    expect(streams.map((s) => s.subscriptionId)).toEqual([opened.id]);
+    expect(registry.listOpenStreams(uuidv7())).toEqual([]);
+  });
+});
+
 describe('closeParticipantStreams', () => {
   it('closes every stream of the participant with the reason and removes the entries', async () => {
     const reg = build();

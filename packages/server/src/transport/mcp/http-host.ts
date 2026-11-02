@@ -30,6 +30,7 @@ import { attachRequestIdHook } from '#observability/request-id.js';
 import type { Database } from '#persistence/schema.js';
 
 import { toAuthInfo, verifyBearerHeader, type LastConnectedRefresher } from './auth-binding.js';
+import { MCP_ERR_INTERNAL } from './error-codes.js';
 import { mapDomainError } from './error-mapper.js';
 import { isAllowedByOriginGuard } from './origin-guard.js';
 import type { McpTransport } from './server.js';
@@ -43,20 +44,32 @@ const LISTEN_METHOD = 'subscriptions/listen';
  */
 export interface ListenEdge {
   /** Runs before the SDK. A returned error refuses the stream. */
-  authorize(input: { body: unknown; identity: IdentityContext }): WireError | null;
-  /** Runs once the SDK answered, before any byte reaches the client. */
-  onResponse(input: {
+  authorize(input: {
     body: unknown;
     identity: IdentityContext;
-    requestId: UUIDv7;
-    response: Response;
-    raw: ServerResponse;
-  }): void;
+  }): WireError | null | Promise<WireError | null>;
+  /** Runs once the SDK answered, before any byte reaches the client. */
+  onResponse(input: ListenResponseInput): ListenBinding | undefined;
+}
+
+export interface ListenResponseInput {
+  body: unknown;
+  identity: IdentityContext;
+  requestId: UUIDv7;
+  response: Response;
+  raw: ServerResponse;
+  /** Ends the SDK side of the stream. */
+  abort: () => void;
+}
+
+export interface ListenBinding {
+  /** Fires once, after the first chunk of the SDK (the acknowledgment) reached the response. */
+  onAcknowledged(): void;
 }
 
 export interface HttpHostDeps {
   mcpTransport: McpTransport;
-  verifier: Verifier;
+  verifier: Pick<Verifier, 'verify'>;
   lastConnected: LastConnectedRefresher;
   db: Kysely<Database>;
   signingKeysProvider: () => Iterable<SigningKey>;
@@ -98,6 +111,8 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
 
   const mcpHandler = createMcpHandler(() => deps.mcpTransport.buildServer(), {
     legacy: 'reject',
+    // The stream handle writes the keep-alive itself: it is the probe of its detector.
+    keepAliveMs: 0,
     onerror: (err) => {
       deps.logger.debug({ event: 'mcp_sdk_error', err: err.message }, 'mcp sdk error');
     },
@@ -187,37 +202,67 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
 
     const body = req.body;
     const isListen = rpcMethod(body) === LISTEN_METHOD;
-    if (isListen && deps.listenEdge) {
-      const refusal = deps.listenEdge.authorize({ body, identity });
-      if (refusal) {
-        return reply
-          .code(200)
-          .type('application/json')
-          .send({ jsonrpc: '2.0', error: refusal, id: rpcId(body) });
-      }
-    }
-
     const requestId = getRequestIdFromLogger(req.log as Logger) ?? uuidv7();
     const abort = new AbortController();
-    const response = await mcpHandler.fetch(toWebRequest(req, mcpPath, abort.signal), {
-      authInfo: toAuthInfo({ identity, requestId }),
-      parsedBody: body,
-    });
+
+    let response: Response;
+    try {
+      if (isListen && deps.listenEdge) {
+        const refusal = await deps.listenEdge.authorize({ body, identity });
+        if (refusal) {
+          return await reply
+            .code(200)
+            .type('application/json')
+            .send({ jsonrpc: '2.0', error: refusal, id: rpcId(body) });
+        }
+      }
+      response = await mcpHandler.fetch(toWebRequest(req, mcpPath, abort.signal), {
+        authInfo: toAuthInfo({ identity, requestId }),
+        parsedBody: body,
+      });
+    } catch (err) {
+      deps.logger.error(
+        {
+          event: 'mcp_handler_failed',
+          requestId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'mcp request failed before a response',
+      );
+      return reply
+        .code(500)
+        .type('application/json')
+        .send({
+          jsonrpc: '2.0',
+          error: { code: MCP_ERR_INTERNAL, message: 'internal error' },
+          id: rpcId(body),
+        });
+    }
 
     // The body may be a long stream, so the handler owns the raw response from here on.
     reply.hijack();
     const raw = reply.raw;
     raw.on('close', () => abort.abort());
-    if (isListen) deps.listenEdge?.onResponse({ body, identity, requestId, response, raw });
+    const binding = isListen
+      ? deps.listenEdge?.onResponse({
+          body,
+          identity,
+          requestId,
+          response,
+          raw,
+          abort: () => abort.abort(),
+        })
+      : undefined;
 
     raw.writeHead(response.status, Object.fromEntries(response.headers));
     if (!response.body) {
       raw.end();
       return;
     }
-    Readable.fromWeb(response.body)
-      .on('error', () => raw.destroy())
-      .pipe(raw);
+    const source = Readable.fromWeb(response.body);
+    source.on('error', () => raw.destroy()).pipe(raw);
+    // After `pipe`: its listener runs first, so the chunk is already in the response.
+    if (binding) source.once('data', () => binding.onAcknowledged());
   });
 
   // The revision removed the GET stream and session termination.
