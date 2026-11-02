@@ -64,7 +64,7 @@ export function attachHelpMetadata(command: Command, metadata: HelpMetadata): vo
 const TOP_LEVEL_GROUPS: ReadonlyArray<{ category: string; commands: ReadonlyArray<string> }> = [
   { category: 'server', commands: ['init', 'serve', 'migrate', 'service'] },
   { category: 'participants', commands: ['hive', 'hivekeeper', 'agent', 'credential'] },
-  { category: 'observability', commands: ['audit', 'config'] },
+  { category: 'observability', commands: ['audit', 'config', 'watch'] },
 ];
 
 /**
@@ -84,6 +84,7 @@ const TOP_LEVEL_SUMMARIES: Readonly<Record<string, string>> = {
   credential: 'credential lifecycle — issue, list, rotate, revoke',
   audit: 'query the audit log',
   config: 'persistent configuration',
+  watch: 'listen to a mailbox and print a metadata line per event',
 };
 
 const TOP_LEVEL_DESCRIPTION = 'bootstrap, manage participants, issue credentials, query audit log.';

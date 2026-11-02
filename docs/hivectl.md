@@ -366,6 +366,10 @@ WARNING: bind-all exposes the MCP server on all network interfaces.
 
 The setting takes effect on the next `hivectl serve` boot — restart the service after toggling.
 
+### `watch`
+
+Listens to one participant's mailbox and prints a metadata line per event. Unlike the rest of the catalog it is a network client of the MCP server: it needs no database and authenticates with the participant's own credential file, not the operator's shell trust. Full reference in [`hivectl-watch.md`](./hivectl-watch.md).
+
 ## Error codes
 
 | Exit | Constant            | Triggers                                                                                                                                                                         |

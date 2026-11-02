@@ -18,6 +18,7 @@
     "#input/*": "./dist/input/*",
     "#output/*": "./dist/output/*",
     "#platform/*": "./dist/platform/*",
+    "#program.js": "./dist/program.js",
     "#runtime/*": "./dist/runtime/*",
     "#signals/*": "./dist/signals/*",
     "#state/*": "./dist/state/*",
@@ -40,6 +41,7 @@
     "sea:build:darwin": "pnpm run sea:bundle && pnpm run sea:patch && pnpm run sea:blob && pnpm run sea:copy && pnpm run sea:unsign && pnpm run sea:inject && pnpm run sea:resign"
   },
   "dependencies": {
+    "@hive/client": "workspace:*",
     "@hive/server": "workspace:*",
     "@hive/shared": "workspace:*",
     "chalk": "^5.6.2",

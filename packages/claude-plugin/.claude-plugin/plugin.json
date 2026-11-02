@@ -1,0 +1,31 @@
+{
+  "name": "hive-wake",
+  "version": "0.1.0",
+  "description": "Wakes an idle Claude Code session when Hive has unread messages, through hivectl watch.",
+  "license": "Apache-2.0",
+  "userConfig": {
+    "server_url": {
+      "type": "string",
+      "title": "Hive server URL",
+      "description": "MCP endpoint of your Hive server, for example https://hive.example.com/mcp",
+      "required": true
+    },
+    "credential_file": {
+      "type": "string",
+      "title": "Credential file",
+      "description": "Path of the file holding this agent's Hive credential (mode 0600). Leave empty to use hivectl's default location.",
+      "default": ""
+    },
+    "hivectl_path": {
+      "type": "string",
+      "title": "hivectl executable",
+      "description": "Path or name of the hivectl binary.",
+      "default": "hivectl"
+    }
+  },
+  "author": {
+    "name": "Hivemine",
+    "url": "https://github.com/hivemine-ai"
+  },
+  "homepage": "https://github.com/hivemine-ai/hive"
+}

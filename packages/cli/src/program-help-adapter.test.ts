@@ -75,6 +75,8 @@ function buildFixtureProgram(): Command {
   const config = program.command('config').description('Persistent configuration.');
   config.command('network').description('Set the network mode.');
 
+  program.command('watch').description('Listen to a mailbox.');
+
   return program;
 }
 

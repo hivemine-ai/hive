@@ -24,6 +24,7 @@ import { runInit } from './commands/init.js';
 import { performMigrate } from './commands/migrate.js';
 import { parseLogLevel, runServe } from './commands/serve.js';
 import { registerServiceGroup } from './commands/service/index.js';
+import { registerWatchCommand } from './commands/watch/index.js';
 import { mapErrorToExit } from '#error/handler.js';
 import { asOptionalNumber, asOptionalString, asString, asStringArray } from './input/coerce.js';
 import { formatOutput, formatOutputList, resolveOutputMode } from './output/format.js';
@@ -565,6 +566,11 @@ export function buildProgram(): BuildProgramResult {
   // ── config (persistent operator-tweakable settings) ────────────────────
   // Currently a single child: `config network <local-only | bind-all>`.
   registerConfigGroup(program, lifecycleHooks);
+
+  // ── watch (network client of the MCP server, per ADR-024) ─────────────
+  // Not a domain command: no runtime, no database. It owns its own error
+  // mapping and signal handling so stdout stays reserved for event lines.
+  registerWatchCommand(program, lifecycleHooks);
 
   // ── help renderer (PRY-050) ───────────────────────────────────────────
   // Attach examples + see-also metadata to the subgroups that benefit

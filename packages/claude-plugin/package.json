@@ -1,0 +1,16 @@
+{
+  "name": "@hive/claude-plugin",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "Claude Code plugin that wakes an idle session on Hive events through hivectl watch.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint hooks --ignore-pattern '**/*.test.js'",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
+  }
+}

@@ -33,8 +33,17 @@ importers:
         specifier: ^8.21.0
         version: 8.59.0(eslint@9.39.4)(typescript@5.9.3)
 
+  packages/claude-plugin:
+    devDependencies:
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@20.19.39)
+
   packages/cli:
     dependencies:
+      '@hive/client':
+        specifier: workspace:*
+        version: link:../client
       '@hive/server':
         specifier: workspace:*
         version: link:../server
@@ -61,7 +70,21 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@20.19.39)
 
-  packages/client: {}
+  packages/client:
+    dependencies:
+      '@modelcontextprotocol/client':
+        specifier: 2.4.0
+        version: 2.4.0
+    devDependencies:
+      '@modelcontextprotocol/server':
+        specifier: 2.4.0
+        version: 2.4.0
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@types/node@20.19.39)
+      zod:
+        specifier: ^4.2.0
+        version: 4.6.7
 
   packages/server:
     dependencies:

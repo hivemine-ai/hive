@@ -2,7 +2,7 @@
   "name": "@hive/client",
   "version": "0.1.0-dev",
   "private": true,
-  "description": "Reusable client library for Hive (used by tests and Node-side agents).",
+  "description": "Reusable client library for Hive: the `subscriptions/listen` watcher core used by `hivectl watch`.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,6 +11,24 @@
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.4.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "vitest": "^2.1.9",
+    "zod": "^4.2.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/listen/fake-hive-server.d.ts",
+      "default": "./dist/listen/fake-hive-server.js"
+    }
   }
 }
