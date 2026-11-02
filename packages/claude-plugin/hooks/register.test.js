@@ -59,6 +59,16 @@ describe('register', () => {
     ]);
   });
 
+  it('discards the controller at session.end so the next session.start starts a fresh watch', async () => {
+    const t = load({ server_url: 'http://h/mcp' });
+    await t.handlers['session.start'](t.$, {}, t.pass);
+    await flush();
+    await t.handlers['session.end'](t.$, {}, t.pass);
+    await t.handlers['session.start'](t.$, {}, t.pass);
+    await flush();
+    expect(t.spawns).toHaveLength(2);
+  });
+
   it('warns and does not start watch without a server URL', async () => {
     const t = load({ server_url: '' });
     await t.handlers['session.start'](t.$, {}, t.pass);

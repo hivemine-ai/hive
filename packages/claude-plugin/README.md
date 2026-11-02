@@ -46,7 +46,13 @@ The credential itself is never an option and never reaches the plugin: it only p
   - on `EXIT_PRECONDITION` (4) or `EXIT_USER_ERROR` (1), including `WATCH_CREDENTIAL_REJECTED`, relaunching cannot fix it: the mod does not relaunch and shows a notice with the `WATCH_*` code taken from `watch`'s last stderr line;
   - on `EXIT_INTERRUPTED` (130) it does not relaunch;
   - if `hivectl` cannot be started at all, it shows a notice and does not relaunch.
+- **Idle retry.** If a prompt is rejected, or `--once` fails, while no turn is running, no `turn.complete` will come to recover the flag. The mod then retries `--once` with backoff (1 s doubling to 60 s) for as long as the flag is set. The retry is cancelled when a turn starts, when the flag clears, and when the session ends.
+- **Session end.** At `session.end` the mod stops `watch` and drops its state; the next `session.start` begins from scratch.
 - Esc discards events that were waiting: Claude Code rejects `$.prompt.submit` after Esc until the next user input. The flag stays set and the next `turn.complete` or event recovers whatever is still unread.
+
+## Known limit: `watch` is not tied to Claude Code's life
+
+`$.process.spawn` closes the child's stdin from the start, so `watch` cannot use stdin EOF to notice that its parent died, and the mod does not ask it to. Observed once, on macOS with Claude Code 2.1.316: after `kill -9` of Claude Code, a child that ignored SIGHUP was reparented to PID 1 and kept running; when the terminal hung up, an ordinary child died with it. So a `watch` can be left behind when Claude Code is killed without a hangup (for example outside a terminal), and the participant then stays `online` with nobody listening. This is one observation, not a guarantee in either direction; it is checked again in the v0.2.0 smoke (PRY-081). If you see a stray `hivectl watch`, kill it.
 
 ## Always mark what you handled
 

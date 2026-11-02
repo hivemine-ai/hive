@@ -19,6 +19,9 @@ const HEALTHY_MS = 60_000;
 /** Consecutive short-lived runs before the user is warned. */
 const CRASH_WARNING_AFTER = 5;
 const STDERR_TAIL_CHARS = 4000;
+/** Idle retry of `--once`: bounded exponential backoff, for as long as the flag is set. */
+const RETRY_MIN_MS = 1000;
+const RETRY_MAX_MS = 60_000;
 
 /**
  * @typedef {{ stream: 'stdout' | 'stderr', text: string }} Piece
@@ -46,6 +49,11 @@ export function createController({ options, host }) {
   let stopped = false;
   let turnActive = false;
   let onceRunning = false;
+  /** True from the moment a submit is issued until the host answers. */
+  let submitting = false;
+  /** Bumped to cancel the idle retry loop. */
+  let retryGen = 0;
+  let retrying = false;
   let flag = false;
   /** Bumped on every flag raise, so a raise during `--once` is never cleared by it. */
   let flagSeq = 0;
@@ -65,24 +73,62 @@ export function createController({ options, host }) {
   const raiseFlag = () => {
     flag = true;
     flagSeq += 1;
+    ensureRetry();
   };
+
+  const busy = () => turnActive || submitting || onceRunning;
+
+  /**
+   * While the flag is set and nothing is running there will be no `turn.complete`
+   * to recover it, so retry `--once` with backoff. Cancelled when a turn starts,
+   * when the flag clears, or on stop.
+   */
+  function ensureRetry() {
+    if (retrying || stopped || !flag || turnActive) return;
+    retrying = true;
+    const gen = ++retryGen;
+    void (async () => {
+      let attempt = 0;
+      try {
+        while (gen === retryGen && flag && !stopped && !turnActive) {
+          await host.sleep(Math.min(RETRY_MIN_MS * 2 ** attempt, RETRY_MAX_MS));
+          attempt += 1;
+          if (gen !== retryGen || !flag || stopped || turnActive) break;
+          if (submitting || onceRunning) continue;
+          await runOnce();
+        }
+      } finally {
+        if (gen === retryGen) retrying = false;
+      }
+    })();
+  }
+
+  function cancelRetry() {
+    retryGen += 1;
+    retrying = false;
+  }
 
   /** Submits a turn. Resolves true when the host accepted it. */
   async function submitTurn(/** @type {import('./event-line.js').WatchEvent} */ event) {
+    // Synchronous guard: a second line in the same chunk must see it before the await.
+    submitting = true;
     try {
       const result = await host.submit(buildPrompt(event));
       if (result && typeof result === 'object' && result.drop !== undefined) return false;
       turnActive = true;
+      cancelRetry();
       return true;
     } catch {
       return false;
+    } finally {
+      submitting = false;
     }
   }
 
   async function onWatchLine(/** @type {string} */ raw) {
     const event = parseEventLine(raw.trim());
     if (event === null) return;
-    if (turnActive || onceRunning) {
+    if (busy()) {
       raiseFlag();
       return;
     }
@@ -106,6 +152,7 @@ export function createController({ options, host }) {
       // Keep the flag: the next turn.complete or event retries.
     } finally {
       onceRunning = false;
+      if (flag) ensureRetry();
     }
   }
 
@@ -187,6 +234,7 @@ export function createController({ options, host }) {
     },
     onTurnStart() {
       turnActive = true;
+      cancelRetry();
     },
     onTurnComplete() {
       turnActive = false;
@@ -194,6 +242,7 @@ export function createController({ options, host }) {
     },
     async stop() {
       stopped = true;
+      cancelRetry();
       const proc = child;
       child = undefined;
       if (proc) await proc.return().catch(() => {});

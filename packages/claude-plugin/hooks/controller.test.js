@@ -52,6 +52,7 @@ function setup(overrides = {}) {
   const calls = { submit: [], run: [], toast: [], sleeps: [], spawn: [] };
   const procs = [];
   const clock = { now: 0 };
+  const hold = { on: false, pending: [] };
   let submitImpl = () => Promise.resolve({ text: 'ok' });
   let runImpl = () => Promise.resolve({ exitCode: 0, stdout: '', stderr: '' });
   let spawnImpl = null;
@@ -75,7 +76,8 @@ function setup(overrides = {}) {
     sleep: (ms) => {
       calls.sleeps.push(ms);
       clock.now += ms;
-      return Promise.resolve();
+      if (!hold.on) return Promise.resolve();
+      return new Promise((resolve) => hold.pending.push(resolve));
     },
     now: () => clock.now,
     ...overrides,
@@ -89,6 +91,12 @@ function setup(overrides = {}) {
     calls,
     procs,
     clock,
+    hold,
+    /** Releases the sleeps that are waiting, one round. */
+    releaseSleeps: async () => {
+      for (const r of hold.pending.splice(0)) r();
+      await flush();
+    },
     setSubmit: (f) => (submitImpl = f),
     setRun: (f) => (runImpl = f),
     setSpawn: (f) => (spawnImpl = f),
@@ -186,6 +194,7 @@ describe('waking an idle session', () => {
 describe('the pending flag', () => {
   async function started() {
     const t = setup();
+    t.hold.on = true;
     t.controller.start();
     await flush();
     t.controller.onTurnStart();
@@ -302,6 +311,7 @@ describe('the pending flag', () => {
 
   it('sets the flag when the idle submit is rejected, and recovers at turn.complete', async () => {
     const t = setup();
+    t.hold.on = true;
     t.controller.start();
     await flush();
     t.setSubmit(() => Promise.reject(new Error('rejected')));
@@ -465,5 +475,108 @@ describe('when watch ends', () => {
     await flush();
     expect(t.procs[0].killed).toBe(true);
     expect(t.calls.spawn).toHaveLength(1);
+  });
+});
+
+describe('two lines in the same chunk', () => {
+  it('opens one turn, not two, while the first submit is still pending', async () => {
+    const t = setup();
+    t.hold.on = true;
+    let resolveSubmit;
+    t.setSubmit(() => new Promise((resolve) => (resolveSubmit = resolve)));
+    t.controller.start();
+    await flush();
+    t.procs[0].push('stdout', line('e1') + line('e2'));
+    await flush();
+    expect(t.calls.submit).toHaveLength(1);
+    resolveSubmit({ text: 'ok' });
+    await flush();
+    expect(t.calls.submit).toHaveLength(1);
+  });
+
+  it('rolls the guard back when the submit fails, so the next attempt can start a turn', async () => {
+    const t = setup();
+    t.hold.on = true;
+    t.setSubmit(() => Promise.reject(new Error('rejected')));
+    t.controller.start();
+    await flush();
+    t.procs[0].push('stdout', line('e1') + line('e2'));
+    await flush();
+    expect(t.calls.submit).toHaveLength(1);
+    t.setSubmit(() => Promise.resolve({ text: 'ok' }));
+    t.setRun(() => Promise.resolve({ exitCode: 0, stdout: line('c', 1), stderr: '' }));
+    await t.releaseSleeps();
+    expect(t.calls.run).toHaveLength(1);
+    expect(t.calls.submit).toHaveLength(2);
+  });
+});
+
+describe('retrying while idle', () => {
+  async function idleWithFlag() {
+    const t = setup();
+    t.hold.on = true;
+    t.setSubmit(() => Promise.reject(new Error('rejected after Esc')));
+    t.controller.start();
+    await flush();
+    t.procs[0].push('stdout', line('e1'));
+    await flush();
+    return t;
+  }
+
+  it('retries --once with a growing, bounded backoff while the flag is set and no turn runs', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 2, stdout: '', stderr: '' }));
+    const retrySleeps = () => t.calls.sleeps;
+    await t.releaseSleeps();
+    await t.releaseSleeps();
+    await t.releaseSleeps();
+    expect(t.calls.run.length).toBeGreaterThanOrEqual(3);
+    const delays = retrySleeps();
+    expect(delays.slice(0, 3)).toEqual([1000, 2000, 4000]);
+    for (let i = 0; i < 12; i += 1) await t.releaseSleeps();
+    expect(Math.max(...t.calls.sleeps)).toBe(60_000);
+  });
+
+  it('stops retrying once --once clears the flag', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 0, stdout: '', stderr: '' }));
+    await t.releaseSleeps();
+    const runs = t.calls.run.length;
+    await t.releaseSleeps();
+    await t.releaseSleeps();
+    expect(t.calls.run).toHaveLength(runs);
+  });
+
+  it('stops retrying when a turn starts', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 2, stdout: '', stderr: '' }));
+    t.controller.onTurnStart();
+    await t.releaseSleeps();
+    await t.releaseSleeps();
+    expect(t.calls.run).toHaveLength(0);
+    t.controller.onTurnComplete();
+    await flush();
+    expect(t.calls.run).toHaveLength(1);
+  });
+
+  it('stops retrying after stop()', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 2, stdout: '', stderr: '' }));
+    await t.controller.stop();
+    await t.releaseSleeps();
+    await t.releaseSleeps();
+    expect(t.calls.run).toHaveLength(0);
+  });
+
+  it('retries after a failed --once triggered by turn.complete when the session is then idle', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 2, stdout: '', stderr: '' }));
+    t.controller.onTurnStart();
+    t.controller.onTurnComplete();
+    await flush();
+    const afterComplete = t.calls.run.length;
+    await t.releaseSleeps();
+    await t.releaseSleeps();
+    expect(t.calls.run.length).toBeGreaterThan(afterComplete);
   });
 });

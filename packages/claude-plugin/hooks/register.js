@@ -66,7 +66,9 @@ export function register(on, options) {
   });
 
   on('session.end', async ($, e, next) => {
-    await controller?.stop();
+    const ended = controller;
+    controller = undefined;
+    await ended?.stop();
     return next(e);
   });
 }
