@@ -1,8 +1,8 @@
 # MCP Server
 
-The Hive MCP server exposes the Auth, Cell Store, Visibility, Audit, and Waggle subsystems behind a Model Context Protocol (MCP) Streamable HTTP transport. Client agents speak JSON-RPC over HTTP to call tools and receive push notifications via SSE.
+The Hive MCP server exposes the Auth, Cell Store, Visibility, Audit, and Waggle subsystems behind a Model Context Protocol (MCP) HTTP transport. Client agents speak JSON-RPC over HTTP to call tools and receive push notifications over one long-lived stream.
 
-> **Status:** v0.1 ships the full 8-tool catalog.
+> **Status:** v0.2.0 serves MCP revision `2026-07-28` and nothing else. There is no `initialize` handshake, no session and no legacy fallback. See [Protocol](#protocol) and the breaking changes in the [CHANGELOG](../CHANGELOG.md).
 
 ## Quick start
 
@@ -36,11 +36,38 @@ curl http://127.0.0.1:8443/.well-known/jwks.json
 
 ## Concepts
 
-### Sessions
+### Protocol
 
-An MCP session begins when a client sends an `initialize` request. The server generates a session id (UUID v4) and returns it via the `Mcp-Session-Id` response header. Subsequent requests must include `Mcp-Session-Id: <id>` in the request headers.
+Hive serves MCP revision `2026-07-28` only. The revision is stateless: every request stands alone, carries its own protocol version and identity, and the server keeps no per-client state between requests.
 
-Each session keeps a verified `IdentityContext` (the Worker / Scout / Hivekeeper that owns the Bearer token) and a Presence subscription. Closing the session (DELETE `/mcp` or socket disconnect) tears both down.
+**Discovery.** A client calls `server/discover` (not `initialize`) to learn the supported versions, the capabilities and the server info. Claude Code waits 5 seconds for this answer; a server that is slower than that leaves the session without Hive tools.
+
+**Every `POST /mcp` carries:**
+
+| Where                  | Value                                                                                                                  |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `Authorization`        | `Bearer <JWT>`.                                                                                                        |
+| `MCP-Protocol-Version` | `2026-07-28`.                                                                                                          |
+| `MCP-Method`           | The JSON-RPC method (`tools/call`, `tools/list`, `server/discover`, `subscriptions/listen`, ...).                      |
+| `MCP-Name`             | For `tools/call`, the tool name.                                                                                       |
+| `Accept`               | `application/json, text/event-stream`.                                                                                 |
+| `params._meta`         | `io.modelcontextprotocol/protocolVersion` (`2026-07-28`) and `io.modelcontextprotocol/clientCapabilities` (an object). |
+
+**Capabilities.** `server/discover` advertises exactly `tools` and `resources.subscribe`. Hive does not serve `prompts` and no longer declares `experimental['claude/channel']`. `tools/list` is cacheable (`ttlMs: 60000`, `cacheScope: "public"`); `resources/list` and `resources/read` answer per caller and are never cached (`ttlMs: 0`, `cacheScope: "private"`).
+
+**What is rejected:**
+
+| Request                                                                                           | Answer                                                                       |
+| ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `initialize` without the version header, or under an older version                                | HTTP 400, JSON-RPC `-32022`, with `data.supported` listing `["2026-07-28"]`. |
+| `initialize` under the `2026-07-28` header                                                        | HTTP 400, JSON-RPC `-32020`. No session opens.                               |
+| A request without the `params._meta` envelope                                                     | HTTP 400, `-32602`.                                                          |
+| `GET /mcp`, `DELETE /mcp`                                                                         | HTTP 405. The revision removed both.                                         |
+| A request with an `Origin` that is not allow-listed, or a `Host` outside the list when one is set | HTTP 403 (see [Origin and Host](#origin-and-host)).                          |
+
+An `Mcp-Session-Id` header is ignored and the server never issues one. Clients that need `MCP_SDK_GENERATION=v1` or `MCP_PROTOCOL_NEGOTIATION=legacy` cannot talk to Hive: do not set either variable on a Claude Code that connects to a v0.2.0 server. The minimum Claude Code version is the one listed in the [`hive-wake` plugin README](../packages/claude-plugin/README.md#requirements).
+
+Each request is authorized on its own. The verifier checks the signature, expiry, blocklist and the participant's current state on **every** request, so a credential revoked with `hivectl` stops working on the very next request, with no server restart. (In v0.1.x a revocation made from `hivectl` was not applied by the running server until it restarted, INC-2026-008. If you run v0.1.x, restart the server after revoking a credential.)
 
 ### Authentication
 
@@ -50,7 +77,7 @@ Every request to `/mcp` must carry a Bearer token in the `Authorization` header:
 Authorization: Bearer <JWT>
 ```
 
-JWTs are issued by the Auth subsystem (`hivectl init` mints the first admin JWT; `hivectl create-agent --emit-credential` mints worker / scout credentials). The verifier checks the signature, expiry, blocklist, and the participant's current state on every request — a participant revoked mid-session loses access at the next call.
+JWTs are issued by the Auth subsystem (`hivectl init` mints the first admin JWT; `hivectl create-agent --emit-credential` mints worker / scout credentials). The verifier checks the signature, expiry, blocklist, and the participant's current state on every request — a participant revoked at any time loses access at the next call.
 
 A missing or invalid Bearer returns HTTP 401 with a JSON-RPC error body:
 
@@ -64,20 +91,58 @@ A missing or invalid Bearer returns HTTP 401 with a JSON-RPC error body:
 
 ### Tools
 
-The server exposes 8 tools in v0.1:
+The server exposes 8 tools:
 
-| Tool                    | Purpose                                                                                                                                                                                                                                                                                                                                                        |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `get_agent_config`      | Returns the calling participant's identity, hive, colony, and capabilities.                                                                                                                                                                                                                                                                                    |
-| `send_message`          | Sends a message from the caller to a recipient (UUID v7, email, agent reference, or `self`).                                                                                                                                                                                                                                                                   |
-| `reply_to`              | Sends a reply to the original sender of a message in the caller's cell. Recipient is derived from the referenced message; the wire `reply_to` field is propagated to the new message.                                                                                                                                                                          |
-| `list_agents`           | Lists agents (workers and scouts) in the hive visible to the caller per the visibility matrix, with optional filters by `type` / `owner` / `capability` and keyset pagination.                                                                                                                                                                                 |
-| `get_agent_status`      | Returns the presence (`online` / `offline`) and `last_connected_at` of an agent visible to the caller. Online resolves to `max(sessions)`; offline reads the persisted `agents.last_connected_at` (`null` if never connected). Visibility-denied collapses to `RECIPIENT_UNREACHABLE` for uniform privacy (indistinguishable from a non-existent participant). |
-| `read_mailbox`          | Reads messages from the caller's cell, with optional state / type / sender filters and keyset pagination.                                                                                                                                                                                                                                                      |
-| `mark_read`             | Marks a batch of message ids as read. Returns `marked` + `ignored` arrays for idempotent client logic.                                                                                                                                                                                                                                                         |
-| `check_unread_messages` | Returns the count of delivered (unread) messages and the distinct senders.                                                                                                                                                                                                                                                                                     |
+| Tool                    | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_agent_config`      | Returns the calling participant's identity, hive, colony, and capabilities.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `send_message`          | Sends a message from the caller to a recipient (UUID v7, email, agent reference, or `self`).                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `reply_to`              | Sends a reply to the original sender of a message in the caller's cell. Recipient is derived from the referenced message; the wire `reply_to` field is propagated to the new message.                                                                                                                                                                                                                                                                                                                 |
+| `list_agents`           | Lists agents (workers and scouts) in the hive visible to the caller per the visibility matrix, with optional filters by `type` / `owner` / `capability` and keyset pagination.                                                                                                                                                                                                                                                                                                                        |
+| `get_agent_status`      | Returns the presence (`online` / `offline`) and `last_connected_at` of an agent visible to the caller. `online` means reachable by push: the agent holds an open `subscriptions/listen` stream on its own mailbox, so an agent that only calls tools is `offline`. `last_connected_at` is the last authenticated request of the agent (`null` if it never connected). Visibility-denied collapses to `RECIPIENT_UNREACHABLE` for uniform privacy (indistinguishable from a non-existent participant). |
+| `read_mailbox`          | Reads messages from the caller's cell, with optional state / type / sender filters and keyset pagination.                                                                                                                                                                                                                                                                                                                                                                                             |
+| `mark_read`             | Marks a batch of message ids as read. Returns `marked` + `ignored` arrays for idempotent client logic.                                                                                                                                                                                                                                                                                                                                                                                                |
+| `check_unread_messages` | Returns the count of stored (unread) messages and the distinct senders.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 Tool inputs are validated against a JSON Schema (derived from zod). Refer to `tools/list` from any MCP client to inspect the live schemas. Tool results are returned as `structuredContent` (preferred) plus a JSON-stringified `text` content fallback.
+
+#### Message states and the `unread` alias
+
+A stored message is in state `stored` (not yet acknowledged) or `read`. `read_mailbox` accepts `filter.state` with the values `stored`, `read` and `unread`. **`unread` is an alias of `stored`**: both return the same messages, and the messages in the response always report `state: "stored"`, never `"unread"`. `stored_at` is the time the server persisted the message (it replaces `delivered_at`, and `stored` replaces `delivered`; neither old name is accepted, there are no aliases). The pagination cursor is `{ stored_at, message_id }`.
+
+`send_message` returns `{ message_id, sent_at, stored_at, replayed }`. `stored_at` means "persisted in the recipient's mailbox", not "reached the recipient": a recipient with no open stream still has the message stored and gets it on its next read or reconnection.
+
+#### Contract limits
+
+| Limit                                  | Value                                                                                                                                                                                                           |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `send_message.body`                    | 65 536 bytes (64 KiB) of UTF-8, not characters. Over the limit: `-32602 invalid input`, nothing stored. Verified at exactly 65 536 (accepted) and 65 537 (rejected).                                            |
+| HTTP request body                      | 4 MiB. Larger requests are refused by the HTTP layer with `413` and a non-JSON-RPC body before any tool runs.                                                                                                   |
+| `send_message.action` size             | 16 384 bytes of serialized JSON. Over the limit: `-32602`.                                                                                                                                                      |
+| `action` nesting depth                 | 32 levels. The depth is checked when the message is **read** (`read_mailbox`), not when it is sent. Do not send an `action` nested deeper than 32 levels: see the note below.                                   |
+| `mark_read.message_ids`                | 1 to 200 ids per call. 201 or more: `-32602` with `data.issues[0].message = "mark_read_batch_too_large"`. An empty array is also `-32602`. A malformed id does not fail the batch; it is returned in `ignored`. |
+| `read_mailbox.pagination.limit`        | 1 to 100.                                                                                                                                                                                                       |
+| `list_agents.pagination.limit`         | 1 to 100 (`HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE` may lower it).                                                                                                                                                   |
+| `send_message.ttl_ms`                  | Any positive integer (int64), no maximum. It is stored but **not enforced** in this version: messages are retained indefinitely and never move to `expired`.                                                    |
+| Unread messages per sender and mailbox | 500 (`HIVE_CELL_MAX_UNREAD_PER_SENDER`). See [Sender quota](#sender-quota).                                                                                                                                     |
+
+> **Known issue, `action` depth.** Because the depth check runs on read, a message whose `action` is nested deeper than 32 levels is accepted by `send_message` and then makes `read_mailbox` fail with `-32602` for any page that contains it. Keep `action` shallow. This is tracked as a code fix; the documented limit is the one the server enforces on read.
+
+#### `sender_ids` order
+
+`check_unread_messages.sender_ids`, the `mailbox` resource and the `sender_ids` of a push event list each sender once, ordered by the time of that sender's most recent unread message, newest first; senders tied on time are ordered by id. The list includes the caller itself when it has unread messages to itself. The order is stable between calls for the same mailbox state, but it changes as messages arrive and are read: use it as a hint of who wrote last, not as a key.
+
+#### `reply_to` is an advisory hint
+
+`send_message.reply_to` and `type: "response"` are validated for **format only**: the value must be a UUID v7. The server does not check that the referenced message exists, that it is in the caller's mailbox or that the caller may see it, and it does not leak whether an arbitrary id exists. A `response` with no `reply_to` is accepted and stored with `reply_to: null`. Do not treat `reply_to` as proof of threading; clients should verify the thread themselves. The `reply_to` **tool** is different: it takes a message id from the caller's own mailbox, derives the recipient from it and propagates the id.
+
+#### Sender quota
+
+A sender may keep at most `HIVE_CELL_MAX_UNREAD_PER_SENDER` (default `500`) unread messages in one recipient's mailbox. At the limit `send_message` fails with `SENDER_QUOTA_EXCEEDED`, JSON-RPC code `-32005`, and `data: { limit, current }`. The pair stays blocked until the recipient marks messages as read; lowering the limit never deletes anything. The check runs inside the send transaction (on Postgres under an advisory lock), so concurrent sends cannot overshoot the cap. Separately, the **wake** is throttled per sender and mailbox: a sender triggers at most `HIVE_WAGGLE_SENDER_WAKEUPS_PER_WINDOW` push events (default `5`) per `HIVE_WAGGLE_SENDER_WINDOW_MS` (default `60000`); further messages are still stored and one deferred event is sent when the window ends.
+
+#### `last_connected_at`
+
+`get_agent_status.last_connected_at` is refreshed by **any authenticated request** of a Worker or Scout (a tool call, `tools/list`, `server/discover`, opening a stream), not only by opening a stream. To keep a chatty agent from costing one write per call, the refresh is throttled to **one write per agent every 30 seconds**, so the value can lag the real last request by up to 30 s. A failed write is logged (`mcp_last_connected_refresh_failed`) and never fails the request. Hivekeepers do not have the field. Because it is refreshed by tool calls, it says nothing about whether the agent can be reached: use `online` for that.
 
 #### Recipient reference formats
 
@@ -98,9 +163,28 @@ When parsing fails (no `@`, multiple `@`s, or local-part outside the allowed alp
 
 ### Push notifications (Waggle)
 
-When a message is delivered to a participant's cell, the server emits **two notifications in parallel** on each delivery — a dual-emit pattern that keeps standard MCP clients working while enabling reactive autonomy in Claude Code. See [Channels](channels.md) for the operator guide on enabling reactive autonomy.
+Push uses the standard `subscriptions/listen` method of revision `2026-07-28`. A client opens it once, keeps the HTTP response open, and the server writes a frame for every change of its own mailbox. There is a single envelope; Hive no longer sends `notifications/claude/channel`.
 
-**Envelope 1 — `notifications/resources/updated` (MCP-standard, every client):**
+**Opening the stream.** `POST /mcp` with `MCP-Method: subscriptions/listen` and
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "subscriptions/listen",
+  "params": {
+    "notifications": { "resourceSubscriptions": ["hive://cells/<cellId>"] },
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {}
+    }
+  }
+}
+```
+
+The only URI a caller may subscribe to is its own mailbox, the one returned by `resources/list`. Any other URI, or a malformed request, is refused with `-32602` and nothing is registered. A stream with an empty `resourceSubscriptions` is served (it is how Claude Code opens its own stream) but never counts as presence and never receives mailbox events.
+
+**Event.** After the server acknowledges the subscription, each change is a `notifications/resources/updated` frame:
 
 ```json
 {
@@ -114,51 +198,50 @@ When a message is delivered to a participant's cell, the server emits **two noti
         "unread_count": <int>,
         "sender_ids": ["<UUID v7>", ...],
         "emitted_at": "<ISO 8601 UTC>",
-        "waggle_id": "<UUID v7>"
+        "waggle_id": "<UUID v7>",
+        "event_id": "<opaque string>"
       }
     }
   }
 }
 ```
 
-**Envelope 2 — `notifications/claude/channel` (Claude Code Channels — research preview):**
+The frame carries metadata only, never a message body. `kind` is `online` for a live event and `replay` for the catch-up sent after the acknowledgment.
 
-```json
-{
-  "method": "notifications/claude/channel",
-  "params": {
-    "content": "You have <N> unread message(s) in your mailbox. Run check_unread_messages to read.\n\n<!-- waggle: kind=<kind>, waggle_id=<UUID v7>, emitted_at=<ISO 8601 UTC> -->",
-    "meta": {
-      "cell_id": "<UUID v7>",
-      "kind": "online" | "replay",
-      "unread_count": "<int as string>",
-      "sender_ids": "<UUID v7,UUID v7,...>",
-      "waggle_id": "<UUID v7>",
-      "emitted_at": "<ISO 8601 UTC>"
-    }
-  }
-}
-```
+- **`event_id`** is deterministic: it derives from the cell, the latest unread message and the unread count, and does not depend on the transport. Two frames that describe the same mailbox state have the same `event_id`, so a client can drop the repeat. Dedup by `event_id`, never by `waggle_id`, which is internal telemetry.
+- **Replay.** After **every** acknowledgment (first connection, reconnection, or a client that resumes) the server sends the current unread state if the mailbox has unread messages. A client therefore never needs to query on connect, and a message that arrived while it was disconnected is announced when it comes back. If the replay itself fails, the server closes the stream (reason `replay_failed`) so the client reconnects.
+- **At-least-once.** A message that is not marked with `mark_read` is replayed again on every reconnection. Mark what you handled.
+- **Coalescing.** Several messages in the quiet window (`HIVE_WAGGLE_QUIET_WINDOW_MS`, default `500`) produce one event with the combined count.
 
-Claude Code v2.1.80+ injects `params.content` into the model context wrapped as `<channel source="hive" cell_id="..." ...>...</channel>` (the `meta` entries become XML attributes on the tag), which triggers the model to react autonomously without polling. Standard MCP clients ignore this notification (unknown method) and rely on Envelope 1 plus their own polling. The capability is declared as `experimental: { 'claude/channel': {} }` in the `initialize` response.
+### Stream lifecycle and presence
 
-**Fail-safe.** Envelope 2 is additive: if `sendNotification` rejects (channel-config drift, socket closed mid-deliver, SDK error), the server logs `event: 'mcp_channel_emit_failed'` and continues — Envelope 1 already delivered and is the load-bearing path. Reactive clients lose autonomy on that delivery; the next Waggle re-attempts cleanly.
+A participant is `online` exactly while it has at least one open `subscriptions/listen` stream on its own mailbox. There is no idle timer, no sweep and no `lastSeenAt`: a quiet stream stays `online` for as long as the connection is alive. (v0.1.x evicted streams that received no push for 30 minutes, which left a live but quiet worker deaf, INC-2026-007.)
 
-**Idempotency.** The `waggle_id` (in either envelope) is internal telemetry — clients **must not** dedup by it. To dedup, re-read state via `read_mailbox` or `check_unread_messages`.
+The server sends a keep-alive frame every `HIVE_LISTEN_KEEPALIVE_INTERVAL_MS` (default `15000`) so intermediaries do not close an idle connection and clients can tell a live stream from a dead one. It closes a stream, and the participant stops being `online`, in these cases:
 
-Push notifications travel over the SSE stream the client opened with `GET /mcp`. Clients without an open SSE stream can still poll via the tools above.
+| Cause                                                   | Close reason            | Notes                                                                                                                                                                                              |
+| ------------------------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The client disconnects                                  | _(socket closed)_       | Detected immediately.                                                                                                                                                                              |
+| The credential is revoked or the participant is revoked | `participant_revoked`   | Applied within `HIVE_MCP_REVERIFY_INTERVAL_SECONDS` (below).                                                                                                                                       |
+| The agent is suspended                                  | `participant_suspended` | Same window.                                                                                                                                                                                       |
+| The JWT expires                                         | `credential_expired`    | At the `exp` of the token.                                                                                                                                                                         |
+| The participant is over the stream cap                  | `evicted_lru`           | The oldest stream is closed and the new one registers. The cap is `HIVE_PRESENCE_MAX_SESSIONS_PER_PARTICIPANT` (default `16`); a new stream is never refused for it. Ends with a `complete` frame. |
+| Server shutdown                                         | `shutdown`              | Ends with a `complete` frame.                                                                                                                                                                      |
+| The connection stops draining writes                    | `stalled`               | See below.                                                                                                                                                                                         |
+| The replay failed                                       | `replay_failed`         | The client reconnects.                                                                                                                                                                             |
 
-### Session lifecycle
+**Revocation window.** Credential checks on open streams run in a single periodic pass every `HIVE_MCP_REVERIFY_INTERVAL_SECONDS` (default `60`; `0` disables it and is not for production). A revocation or suspension made with `hivectl` (a different process from the server) therefore closes the stream within that interval, not instantly. New requests are rejected at once. Lower the value if you need a tighter window.
 
-Each accepted MCP session registers a presence subscription on the server. Sessions are released by any of: a clean `DELETE /mcp`, a closed SSE stream, server shutdown, **or** the lifecycle hardening described here.
+**Limit: a silent network cut is not detected until the socket fails.** The server detects a dead stream when a write fails or when written bytes stop draining for `HIVE_LISTEN_STALL_TIMEOUT_MS` (default `30000`, must stay below `45000`). A silent partition or a stopped client does not trigger either: the kernel keeps accepting the small keep-alive frames, so such a participant can keep reporting `online` until the connection finally errors. This is accepted. The client defends itself instead: `hivectl watch` reconnects after 45 s without any byte (`--silence-timeout`), and a custom client should do the same.
 
-**Cap per participant.** A participant can hold up to `HIVE_PRESENCE_MAX_SESSIONS_PER_PARTICIPANT` simultaneous sessions (default `16`). The cap exists because every active session keeps an in-memory entry in the Presence Registry; an unbounded pool would let buggy or malicious clients exhaust memory.
+**Reactive clients must not poll.** Opening the stream does not wake an idle agent by itself, because MCP gives a server no way to start a turn. See [Reactive agents](reactive-agents.md) for `hivectl watch`, the Claude Code plugin and the worker recipe.
 
-**Idle sweep (TTL passive).** A periodic background sweep evicts sessions whose `lastSeenAt` is older than `HIVE_PRESENCE_IDLE_TIMEOUT_MS` (default `30 min`). The sweep runs every `HIVE_PRESENCE_SWEEP_INTERVAL_MS` (default `5 min`). `lastSeenAt` is refreshed on every successful Waggle delivery to the client, so an SSE-listening client that receives pushes is never evicted just for being passive. Setting `HIVE_PRESENCE_IDLE_TIMEOUT_MS=0` disables the sweep (sessions only freed by explicit close or socket dead — pre-v0.2 behavior).
+#### Guidelines for custom MCP clients
 
-**LRU at cap-hit.** When a new subscribe would hit the cap, the server checks the oldest session by `lastSeenAt`: if it has been idle for at least `HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS` (default `15 min`), it is evicted and the new session takes its slot; otherwise the new subscribe rejects with the JSON-RPC code `-32602` and a `subCode` of `too_many_sessions`. Setting `HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS=0` disables LRU eviction (cap-hit always rejects).
-
-Both eviction paths emit structured `info` log events for telemetry: `presence_session_evicted_idle` (TTL sweep) and `presence_session_evicted_lru` (cap-hit), each carrying `participantId`, `subscriptionId`, and the relevant timestamps.
+- **Reconnect with exponential backoff and jitter** after any failure to open `subscriptions/listen` or any dropped stream: for example 1 s, doubling to a cap of 60 s, randomized by up to 50 %, reset after a connection that stayed up for a minute. Do not retry in a tight loop; the log of a v0.1.x client that retried `subscribe` without backoff multiplied the server's noise about five times (INC-2026-001, finding 20).
+- Treat a continuous `-32001` as a bad credential, not as a network error: retry for a bounded window, then stop and tell the operator. `hivectl watch` uses 300 s.
+- Reconnect after a stretch of silence longer than three keep-alives (45 s with the defaults).
+- Use `event_id` to drop repeated events, and call `mark_read` for what you handled.
 
 ### Observability
 
@@ -169,7 +252,7 @@ The server emits structured JSON logs (one event per line) on stdout via [`pino`
 | Level   | Numeric | When                                                                                              |
 | ------- | ------- | ------------------------------------------------------------------------------------------------- |
 | `debug` | `20`    | Off by default. Enable with `HIVE_LOG_LEVEL=debug` for tracing. Not part of the normative policy. |
-| `info`  | `30`    | Happy-path lifecycle (server, session, request, dispatch, delivery successful).                   |
+| `info`  | `30`    | Happy-path lifecycle (server, stream, request, dispatch, delivery successful).                    |
 | `warn`  | `40`    | Recoverable anomalies (auth fail, deprecations, sweep misconfig, visibility deny).                |
 | `error` | `50`    | Unrecoverable failure of a specific request — process keeps running.                              |
 | `fatal` | `60`    | Process dies (init failure, panic recovery impossible).                                           |
@@ -184,55 +267,74 @@ Clients can pass their own id via the configured header (default `x-request-id`)
 
 ## HTTP endpoints
 
-| Method   | Path                     | Purpose                                                                  |
-| -------- | ------------------------ | ------------------------------------------------------------------------ |
-| `POST`   | `/mcp`                   | JSON-RPC requests + SSE response stream.                                 |
-| `GET`    | `/mcp`                   | Server-initiated SSE stream for notifications.                           |
-| `DELETE` | `/mcp`                   | Terminate the session (closes SSE streams, unsubscribes from Presence).  |
-| `GET`    | `/healthz`               | Liveness — returns 200 unconditionally.                                  |
-| `GET`    | `/readyz`                | Readiness — pings the DB with a 500ms timeout. 200 on ok, 503 otherwise. |
-| `GET`    | `/.well-known/jwks.json` | Public signing keys (Ed25519 / EdDSA). CORS open (`*`).                  |
+| Method   | Path                     | Purpose                                                                                                                  |
+| -------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `POST`   | `/mcp`                   | The only MCP entry: every JSON-RPC request, including `subscriptions/listen`, whose response is a long-lived SSE stream. |
+| `GET`    | `/mcp`                   | `405`. The revision removed the standalone notification stream.                                                          |
+| `DELETE` | `/mcp`                   | `405`. There are no sessions to terminate.                                                                               |
+| `GET`    | `/healthz`               | Liveness — returns 200 unconditionally.                                                                                  |
+| `GET`    | `/readyz`                | Readiness — pings the DB with a 500ms timeout. 200 on ok, 503 otherwise.                                                 |
+| `GET`    | `/.well-known/jwks.json` | Public signing keys (Ed25519 / EdDSA). CORS open (`*`).                                                                  |
 
 TLS termination is the operator's responsibility — run the server behind nginx, Caddy, or a cloud load balancer. The server itself only speaks plain HTTP.
 
+### Origin and Host
+
+The revision requires the server to validate `Origin`, as a defense against DNS rebinding on a loopback bind. Hive checks it before the Bearer token:
+
+- `HIVE_MCP_ALLOWED_ORIGINS` (comma-separated, default empty): an allow-list of `Origin` values. A request with **no** `Origin` header (every non-browser client, including Claude Code, `hivectl watch` and `curl`) always passes; a request with an `Origin` that is not on the list gets HTTP 403. With the default, no browser origin is allowed.
+- `HIVE_MCP_ALLOWED_HOSTS` (comma-separated, default empty): an allow-list of `Host` values, compared case-insensitively. Empty means `Host` is not validated. Set it to the public name of your deployment (for example `hive.example.com`) if you want requests for any other `Host` refused.
+
 ## Configuration
 
-| Variable                                  | Default        | Purpose                                                                                                                                                                                                   |
-| ----------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HIVE_MCP_HTTP_HOST`                      | `0.0.0.0`      | Bind address. Set `127.0.0.1` for local-only access.                                                                                                                                                      |
-| `HIVE_MCP_HTTP_PORT`                      | `8443`         | Listening port.                                                                                                                                                                                           |
-| `HIVE_MCP_HTTP_PATH`                      | `/mcp`         | MCP endpoint path.                                                                                                                                                                                        |
-| `HIVE_LOG_LEVEL`                          | `info`         | Pino log level: `trace` / `debug` / `info` / `warn` / `error` / `fatal` / `silent`. Process-wide. Honored by `main.ts` and the CLI logger when no explicit level is passed.                               |
-| `HIVE_MCP_LOG_LEVEL`                      | _unset_        | Legacy override consumed by `main.ts`. Falls back to `HIVE_LOG_LEVEL` when unset. Prefer `HIVE_LOG_LEVEL` in new deploys.                                                                                 |
-| `HIVE_MCP_LOG_PRETTY`                     | `false`        | If `true`, use `pino-pretty` (dev only). Production should leave it false (JSON logs).                                                                                                                    |
-| `HIVE_OBSERVABILITY_REQUEST_ID_HEADER`    | `x-request-id` | Header from which the server reads an inbound `requestId` for cross-system correlation. The value must be a valid UUIDv7; invalid values are discarded and a fresh id is generated.                       |
-| `HIVE_MCP_RECHECK_SENDER_STATE`           | `true`         | Toggle the `requireActiveSender` middleware. Disable only in performance-critical deployments where you accept that a revoked sender may make a few tool calls before the next domain check catches them. |
-| `HIVE_MCP_READYZ_DB_TIMEOUT_MS`           | `500`          | DB ping timeout for `GET /readyz`.                                                                                                                                                                        |
-| `HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` | `30`           | Max time to drain in-flight requests on SIGTERM/SIGINT.                                                                                                                                                   |
-| `HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE`      | `100`          | Hard cap server-side for `list_agents.pagination.limit`. The zod schema also enforces a `100` literal cap; this env var is the runtime authority and may be set lower.                                    |
-| `HIVE_AUTH_KEYS_DIR`                      | `./var/keys`   | Where to load the signing keypairs from.                                                                                                                                                                  |
+| Variable                                  | Default        | Purpose                                                                                                                                                                             |
+| ----------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HIVE_MCP_HTTP_HOST`                      | `0.0.0.0`      | Bind address. Set `127.0.0.1` for local-only access.                                                                                                                                |
+| `HIVE_MCP_HTTP_PORT`                      | `8443`         | Listening port.                                                                                                                                                                     |
+| `HIVE_MCP_HTTP_PATH`                      | `/mcp`         | MCP endpoint path.                                                                                                                                                                  |
+| `HIVE_LOG_LEVEL`                          | `info`         | Pino log level: `trace` / `debug` / `info` / `warn` / `error` / `fatal` / `silent`. Process-wide. Honored by `main.ts` and the CLI logger when no explicit level is passed.         |
+| `HIVE_MCP_LOG_LEVEL`                      | _unset_        | Legacy override consumed by `main.ts`. Falls back to `HIVE_LOG_LEVEL` when unset. Prefer `HIVE_LOG_LEVEL` in new deploys.                                                           |
+| `HIVE_MCP_LOG_PRETTY`                     | `false`        | If `true`, use `pino-pretty` (dev only). Production should leave it false (JSON logs).                                                                                              |
+| `HIVE_OBSERVABILITY_REQUEST_ID_HEADER`    | `x-request-id` | Header from which the server reads an inbound `requestId` for cross-system correlation. The value must be a valid UUIDv7; invalid values are discarded and a fresh id is generated. |
+| `HIVE_MCP_READYZ_DB_TIMEOUT_MS`           | `500`          | DB ping timeout for `GET /readyz`.                                                                                                                                                  |
+| `HIVE_MCP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` | `30`           | Max time to drain in-flight requests on SIGTERM/SIGINT.                                                                                                                             |
+| `HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE`      | `100`          | Hard cap server-side for `list_agents.pagination.limit`. The zod schema also enforces a `100` literal cap; this env var is the runtime authority and may be set lower.              |
+| `HIVE_AUTH_KEYS_DIR`                      | `./var/keys`   | Where to load the signing keypairs from.                                                                                                                                            |
 
-### Presence (session lifecycle)
+### Network edge, streams and push
 
-| Variable                                     | Default   | Purpose                                                                                                                                                                     |
-| -------------------------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HIVE_PRESENCE_MAX_SESSIONS_PER_PARTICIPANT` | `16`      | Cap on simultaneous sessions per participant.                                                                                                                               |
-| `HIVE_PRESENCE_IDLE_TIMEOUT_MS`              | `1800000` | Idle threshold (30 min). Sessions whose `lastSeenAt` is older are evicted by the periodic sweep. Set `0` to disable the sweep (pre-v0.2 behavior).                          |
-| `HIVE_PRESENCE_SWEEP_INTERVAL_MS`            | `300000`  | Sweep period (5 min). Honored only when `HIVE_PRESENCE_IDLE_TIMEOUT_MS > 0`.                                                                                                |
-| `HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS`       | `900000`  | Threshold for LRU eviction at cap-hit (15 min). The oldest session is evicted only if idle for at least this long; otherwise new subscribes reject. Set `0` to disable LRU. |
+| Variable                                     | Default | Purpose                                                                                                                                                                                                                   |
+| -------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HIVE_MCP_ALLOWED_ORIGINS`                   | _empty_ | Comma-separated allow-list of `Origin` values. Empty: only clients that send no `Origin` pass. See [Origin and Host](#origin-and-host).                                                                                   |
+| `HIVE_MCP_ALLOWED_HOSTS`                     | _empty_ | Comma-separated allow-list of `Host` values. Empty: `Host` is not validated.                                                                                                                                              |
+| `HIVE_MCP_REVERIFY_INTERVAL_SECONDS`         | `60`    | How often open streams are re-checked against the current credential and participant state. This is the maximum time a revoked or suspended participant keeps a stream. `0` disables the check (not for production).      |
+| `HIVE_LISTEN_KEEPALIVE_INTERVAL_MS`          | `15000` | Keep-alive frame period on every `subscriptions/listen` stream. Provisional.                                                                                                                                              |
+| `HIVE_LISTEN_STALL_TIMEOUT_MS`               | `30000` | A stream whose written bytes do not drain for this long is closed (`stalled`). Must be below `45000`, the silence after which `hivectl watch` reconnects; the server refuses to start otherwise. Provisional.             |
+| `HIVE_PRESENCE_MAX_SESSIONS_PER_PARTICIPANT` | `16`    | Cap on simultaneous listen streams per participant (the name is kept from v0.1). At the cap the oldest stream is closed and the new one registers. A presence entry has no other timeout: it lives as long as its stream. |
+| `HIVE_WAGGLE_QUIET_WINDOW_MS`                | `500`   | Quiet window that coalesces several messages into one event.                                                                                                                                                              |
+| `HIVE_WAGGLE_REPLAY_DELAY_MS`                | `0`     | Delay before the replay that follows an acknowledgment.                                                                                                                                                                   |
+| `HIVE_WAGGLE_SENDER_WAKEUPS_PER_WINDOW`      | `5`     | Push events one sender can trigger in one mailbox per window. Further messages are stored and one deferred event is sent at the end of the window. Provisional.                                                           |
+| `HIVE_WAGGLE_SENDER_WINDOW_MS`               | `60000` | The window of the throttle above. Must not be lower than `HIVE_WAGGLE_QUIET_WINDOW_MS`. Provisional.                                                                                                                      |
+| `HIVE_CELL_MAX_UNREAD_PER_SENDER`            | `500`   | Unread messages one sender may keep in one mailbox; beyond it `send_message` fails with `SENDER_QUOTA_EXCEEDED` (`-32005`). Provisional.                                                                                  |
+
+**Removed in v0.2.0.** `HIVE_PRESENCE_IDLE_TIMEOUT_MS`, `HIVE_PRESENCE_SWEEP_INTERVAL_MS`, `HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS` and `HIVE_PRESENCE_HEARTBEAT_TIMEOUT_MS` no longer exist: there is no idle sweep. A value set in your environment is ignored without an error, so remove it from your unit files and `.env`.
 
 The server also reads the env vars defined by the Auth, Cell Store, Visibility, Audit, and Waggle subsystems. See the per-subsystem docs (in this folder) and tech specs (in the vault) for the full list.
 
 ## Error codes
 
-| JSON-RPC code | Meaning                                                                                                                                          |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `-32001`      | Authentication required / failed. Bearer missing, invalid, expired, revoked, or session not found.                                               |
-| `-32002`      | Forbidden. The participant's role does not allow this operation.                                                                                 |
-| `-32004`      | Recipient not reachable. Cell closed, recipient missing, or visibility denied (the wire never distinguishes these reasons — privacy uniformity). |
-| `-32602`      | Invalid params. Zod validation failed, or domain-side `INVALID_INPUT`.                                                                           |
-| `-32603`      | Internal error. Something unexpected happened — check the server logs.                                                                           |
-| `-32601`      | Method not found. The tool name is not in the catalog (the catalog ships 8 tools in v0.1; unknown names fall here).                              |
+| JSON-RPC code | Meaning                                                                                                                                                           |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-32001`      | Authentication required / failed. Bearer missing, invalid, expired, revoked, or the participant is not active. HTTP 401.                                          |
+| `-32004`      | Recipient not reachable. Cell closed, recipient missing, or visibility denied (the wire never distinguishes these reasons — privacy uniformity).                  |
+| `-32005`      | `SENDER_QUOTA_EXCEEDED`. The sender has too many unread messages in this recipient's mailbox. `data: { limit, current }`.                                         |
+| `-32006`      | Forbidden (`INSUFFICIENT_PRIVILEGE`). The participant's role does not allow this operation. **Was `-32002` in v0.1.x.**                                           |
+| `-32602`      | Invalid params. Zod validation failed, domain-side `INVALID_INPUT`, an unknown tool name, or a `subscriptions/listen` for a URI that is not the caller's mailbox. |
+| `-32603`      | Internal error. Something unexpected happened — check the server logs.                                                                                            |
+| `-32020`      | `initialize` is rejected under the `2026-07-28` header. HTTP 400.                                                                                                 |
+| `-32022`      | Unsupported protocol version or no version. HTTP 400, with `data.supported`.                                                                                      |
+
+`-32002` is not used: the SDK rewrites it to `-32602` on the wire because the revision retired it as "resource not found", so Hive moved forbidden to `-32006`. An **unknown tool** now answers `-32602`; it was `-32601` in v0.1.x.
 
 The semantic `subCode` (e.g. `cell_closed_or_missing`, `visibility_denied`) is **never** sent to the client — it lives in the structured logs only.
 
