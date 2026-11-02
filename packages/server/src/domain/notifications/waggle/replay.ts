@@ -1,4 +1,4 @@
-// Replay path — fired by `presenceRegistry.subscribe` for a fresh subscription.
+// Replay path — fired from `Subscription.ready()` via the `onReady` hook.
 // Per the tech spec § "waggle/replay.ts": queued via `setImmediate` (or a
 // configurable delay) so the subscribe call returns immediately; the actual
 // catch-up runs on the next tick.
