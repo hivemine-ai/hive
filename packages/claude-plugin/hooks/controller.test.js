@@ -580,3 +580,38 @@ describe('retrying while idle', () => {
     expect(t.calls.run.length).toBeGreaterThan(afterComplete);
   });
 });
+
+describe('stop()', () => {
+  it('does not submit a turn when stop arrives while --once is in flight', async () => {
+    const t = setup();
+    t.hold.on = true;
+    t.controller.start();
+    await flush();
+    t.controller.onTurnStart();
+    t.procs[0].push('stdout', line('e1'));
+    await flush();
+    let release;
+    t.setRun(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ exitCode: 0, stdout: line('c', 2), stderr: '' });
+        }),
+    );
+    t.controller.onTurnComplete();
+    await flush();
+    await t.controller.stop();
+    release();
+    await flush();
+    expect(t.calls.submit).toHaveLength(0);
+  });
+
+  it('does not submit for a line that arrives after stop', async () => {
+    const t = setup();
+    t.controller.start();
+    await flush();
+    await t.controller.stop();
+    t.procs[0].push('stdout', line('e1'));
+    await flush();
+    expect(t.calls.submit).toHaveLength(0);
+  });
+});

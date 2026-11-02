@@ -110,6 +110,7 @@ export function createController({ options, host }) {
 
   /** Submits a turn. Resolves true when the host accepted it. */
   async function submitTurn(/** @type {import('./event-line.js').WatchEvent} */ event) {
+    if (stopped) return false;
     // Synchronous guard: a second line in the same chunk must see it before the await.
     submitting = true;
     try {
@@ -141,7 +142,7 @@ export function createController({ options, host }) {
     const seqAtStart = flagSeq;
     try {
       const result = await host.run(watchArgv(['--once']));
-      if (result.exitCode !== 0) return;
+      if (stopped || result.exitCode !== 0) return;
       const lines = result.stdout.split('\n').filter((l) => l.trim() !== '');
       const event = lines.length > 0 ? parseEventLine(/** @type {string} */ (lines[0])) : null;
       if (event !== null) {

@@ -42,7 +42,13 @@ export function register(on, options) {
         run: (argv) => $.process.run(argv, { timeoutMs: 30_000 }),
         submit: (text) => $.prompt.submit({ text }),
         toast: (text) => $.ui.toast(text, { timeoutMs: 15_000 }),
-        sleep: (ms) => new Promise((resolve) => globalThis.setTimeout(resolve, ms)),
+        sleep: (ms) =>
+          new Promise((resolve) => {
+            const timer = /** @type {{ unref?: () => void }} */ (
+              globalThis.setTimeout(resolve, ms)
+            );
+            timer.unref?.();
+          }),
         now: () => Date.now(),
       },
     });
