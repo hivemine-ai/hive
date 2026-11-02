@@ -85,6 +85,7 @@ interface PipelineRig {
   absorbedEvents: Array<MessageStoredEvent | DeferredWakeEvent>;
   throttleAdmits: boolean;
   droppedCells: string[];
+  admitCalls: unknown[][];
   cancelled: string[];
   delivered: WaggleNotification[];
   log: ReturnType<typeof silentLogger>;
@@ -103,6 +104,7 @@ function buildPipelineRig(initial: Partial<PipelineRig> = {}): {
     absorbedEvents: [],
     throttleAdmits: initial.throttleAdmits ?? true,
     droppedCells: [],
+    admitCalls: [],
     cancelled: [],
     delivered: [],
     log: silentLogger(),
@@ -152,10 +154,13 @@ function buildPipelineRig(initial: Partial<PipelineRig> = {}): {
   } as unknown as Consolidator;
 
   const senderThrottle: SenderThrottle = {
-    admit: () => ({
-      admitted: rig.throttleAdmits,
-      deferredWakeAt: rig.throttleAdmits ? null : new Date(),
-    }),
+    admit: (...args) => {
+      rig.admitCalls.push(args);
+      return {
+        admitted: rig.throttleAdmits,
+        deferredWakeAt: rig.throttleAdmits ? null : new Date(),
+      };
+    },
     dropCell: (cellId) => rig.droppedCells.push(cellId),
     stop: () => undefined,
     __entryCount: () => 0,
@@ -379,6 +384,17 @@ describe('createPipeline throttle and deferred wake', () => {
     expect(rig.log.entries.map((e) => e.payload)).toContainEqual(
       expect.objectContaining({ event: 'waggle_wakeup_throttled', cellId, recipientId }),
     );
+  });
+
+  it('the throttle measures time from the stored_at of the event', async () => {
+    const { rig, pipeline } = buildPipelineRig();
+    const event = makeEvent(uuidv7(), uuidv7());
+    event.storedAt = new Date('2026-11-02T10:00:00.000Z');
+
+    pipeline.handleMessageStored(event);
+    await flushMicrotasks();
+
+    expect(rig.admitCalls).toEqual([[event.cellId, event.fromParticipantId, event.storedAt]]);
   });
 
   it('a deferred wake feeds the consolidator with a synthetic event', async () => {

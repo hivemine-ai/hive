@@ -80,7 +80,11 @@ async function markAllRead(client: Client): Promise<void> {
   await client.callTool({ name: 'mark_read', arguments: { message_ids: ids } });
 }
 
-async function rawListen(world: SmokeWorld, jwt: string, uris: string[]): Promise<Response> {
+async function rawListen(
+  world: SmokeWorld,
+  jwt: string,
+  notifications: Record<string, unknown>,
+): Promise<Response> {
   return fetch(`${world.baseUrl}/mcp`, {
     method: 'POST',
     headers: {
@@ -95,7 +99,7 @@ async function rawListen(world: SmokeWorld, jwt: string, uris: string[]): Promis
       id: 1,
       method: 'subscriptions/listen',
       params: {
-        notifications: { resourceSubscriptions: uris },
+        notifications,
         _meta: {
           'io.modelcontextprotocol/protocolVersion': PROTOCOL_VERSION,
           'io.modelcontextprotocol/clientCapabilities': {},
@@ -229,7 +233,7 @@ describe('listen push over the real stack', () => {
       const victim = await open(world.jwtB);
       const victimUri = victim.mailboxUri;
 
-      const res = await rawListen(world, world.jwtA, [victimUri]);
+      const res = await rawListen(world, world.jwtA, { resourceSubscriptions: [victimUri] });
 
       expect(res.status).toBe(200);
       expect(res.headers.get('content-type')).toContain('application/json');
@@ -241,7 +245,16 @@ describe('listen push over the real stack', () => {
 
     it('an empty resourceSubscriptions is served and never counts as presence', async () => {
       await start();
-      const res = await rawListen(world, world.jwtB, []);
+      const res = await rawListen(world, world.jwtB, { resourceSubscriptions: [] });
+
+      expect(res.headers.get('content-type')).toContain('text/event-stream');
+      await res.text();
+      expect(await isOnline(sender, world.workerBId)).toBe(false);
+    });
+
+    it('a stream of toolsListChanged only never counts as presence', async () => {
+      await start();
+      const res = await rawListen(world, world.jwtB, { toolsListChanged: true });
 
       expect(res.headers.get('content-type')).toContain('text/event-stream');
       await res.text();

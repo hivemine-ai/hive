@@ -174,7 +174,7 @@ describe('createStreamHandle', () => {
       handle.close('client_closed');
     });
 
-    it('a failed keep-alive closes a half-open socket with write_failed', async () => {
+    it('a failed keep-alive write closes with write_failed', async () => {
       const { sink, closes } = build();
       sink.failWith = new Error('ECONNRESET');
       await vi.advanceTimersByTimeAsync(KEEPALIVE_MS);
