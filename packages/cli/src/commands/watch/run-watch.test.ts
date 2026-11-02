@@ -245,6 +245,36 @@ describe('hivectl watch --exec', () => {
     expect(stderr.join('').match(/watch\.exec_failed/g)).toHaveLength(3);
   });
 
+  it('delivers what is still unread again when watch is relaunched after WATCH_EXEC_FAILED', async () => {
+    server.setUnread(ME, { count: 2, senders: ['s1'] });
+    const failing = script('process.exit(9)');
+    await expect(
+      runWatch(
+        resolveWatchInput(
+          { server: server.url, credentialFile, exec: failing.program, execArgs: failing.execArgs },
+          { HIVE_WATCH_EXEC_MAX_RETRIES: '0' },
+        ),
+        io(),
+      ),
+    ).rejects.toMatchObject({ code: 'WATCH_EXEC_FAILED' });
+    expect(server.listenCount()).toBe(1);
+
+    const out = join(dir, 'second-run.log');
+    const body = `require('fs').appendFileSync(${JSON.stringify(out)},'woken\\n')`;
+    const run = runWatch(execInput(body), io());
+    await waitFor(() => {
+      try {
+        return readFileSync(out, 'utf8').includes('woken');
+      } catch {
+        return false;
+      }
+    });
+    expect(server.listenCount()).toBe(2);
+    expect(server.toolCalls).toEqual([]);
+    controller.abort();
+    await run;
+  });
+
   it('keeps the stream open between runs so the worker stays online', async () => {
     const run = runWatch(execInput('process.exit(0)'), io());
     await waitFor(() => server.online().includes(ME));
