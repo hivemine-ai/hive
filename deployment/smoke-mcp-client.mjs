@@ -1,116 +1,34 @@
 #!/usr/bin/env node
 /* eslint-env node */
-// Standalone MCP smoke client used by .github/workflows/smoke.yml + the
-// `H7 — smoke E2E local` checklist of PRY-008. Talks raw HTTP + SSE to
-// the MCP transport (no SDK dependency — keeps CI install footprint small).
+// Standalone MCP smoke client used by .github/workflows/smoke.yml and the
+// `H7 — smoke E2E local` checklist of PRY-008. It talks plain HTTP to the MCP
+// endpoint on revision 2026-07-28 (no SDK dependency, no session handshake).
 //
 // Usage:
-//   node deployment/smoke-mcp-client.mjs <baseUrl> <jwt> <expectedParticipantId>
+//   node deployment/smoke-mcp-client.mjs <baseUrl> <jwt> <expectedParticipantId> <deniedRecipientId>
 //
 // Exits 0 when:
-//   1. POST /mcp initialize succeeds (returns mcp-session-id, protocol version).
-//   2. POST /mcp notifications/initialized completes (handshake done).
-//   3. POST /mcp tools/call get_agent_config returns participantId === expected.
+//   1. `server/discover` answers 200 and lists 2026-07-28 as a supported version.
+//   2. `tools/call get_agent_config` returns participant_id === expected.
+//   3. `tools/call send_message` to self succeeds.
+//   4. `tools/call get_agent_status` on a worker of another owner is denied with -32004.
+//      The server must run with HIVE_VISIBILITY_AUDIT_CANSEE_DENIALS=true, so the
+//      denial leaves a `visibility_denial` audit row for the workflow to check.
 //
-// Exits 1 with diagnostic to stderr otherwise.
+// Exits 1 with a diagnostic on stderr otherwise.
 
-const [, , baseUrl, jwt, expectedParticipantId] = process.argv;
-if (!baseUrl || !jwt || !expectedParticipantId) {
-  console.error('usage: smoke-mcp-client.mjs <baseUrl> <jwt> <expectedParticipantId>');
+import { PROTOCOL_VERSION, envelope, rpc } from './mcp-wire.mjs';
+
+const [, , baseUrl, jwt, expectedParticipantId, deniedRecipientId] = process.argv;
+if (!baseUrl || !jwt || !expectedParticipantId || !deniedRecipientId) {
+  console.error(
+    'usage: smoke-mcp-client.mjs <baseUrl> <jwt> <expectedParticipantId> <deniedRecipientId>',
+  );
   process.exit(2);
 }
 
-const MCP_URL = `${baseUrl}/mcp`;
-const PROTOCOL_VERSION = '2024-11-05';
-
-async function rpc(body, sessionId) {
-  const headers = {
-    'content-type': 'application/json',
-    accept: 'application/json, text/event-stream',
-    authorization: `Bearer ${jwt}`,
-  };
-  if (sessionId) headers['mcp-session-id'] = sessionId;
-
-  const res = await fetch(MCP_URL, { method: 'POST', headers, body: JSON.stringify(body) });
-  const returnedSession = res.headers.get('mcp-session-id');
-  const contentType = res.headers.get('content-type') ?? '';
-
-  if (res.status === 202 || res.status === 204) {
-    await drain(res);
-    return { status: res.status, body: null, sessionId: returnedSession };
-  }
-
-  if (contentType.includes('text/event-stream') && res.body) {
-    const parsed = await readSseUntilId(res.body, body.id);
-    return { status: res.status, body: parsed, sessionId: returnedSession };
-  }
-
-  const text = await res.text();
-  let parsed = null;
-  if (text.length > 0) {
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      // leave null
-    }
-  }
-  return { status: res.status, body: parsed, sessionId: returnedSession };
-}
-
-async function drain(res) {
-  if (!res.body) return;
-  const reader = res.body.getReader();
-  while (!(await reader.read()).done) {
-    /* drain */
-  }
-}
-
-async function readSseUntilId(stream, targetId, timeoutMs = 5000) {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  const deadline = Date.now() + timeoutMs;
-
-  try {
-    while (Date.now() < deadline) {
-      const remaining = Math.max(50, deadline - Date.now());
-      const next = await Promise.race([
-        reader.read().then((r) => ({ kind: 'chunk', ...r })),
-        new Promise((resolve) => setTimeout(() => resolve({ kind: 'timeout' }), remaining)),
-      ]);
-      if (next.kind === 'timeout' || next.done) break;
-
-      buffer += decoder.decode(next.value, { stream: true });
-
-      let boundary = buffer.indexOf('\n\n');
-      while (boundary !== -1) {
-        const rawEvent = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        const dataLines = rawEvent
-          .split('\n')
-          .filter((line) => line.startsWith('data:'))
-          .map((line) => line.slice('data:'.length).trim());
-        if (dataLines.length > 0) {
-          try {
-            const parsed = JSON.parse(dataLines.join('\n'));
-            if (parsed.id === targetId) return parsed;
-            if (parsed.error && parsed.id === null) return parsed;
-          } catch {
-            // skip non-JSON events
-          }
-        }
-        boundary = buffer.indexOf('\n\n');
-      }
-    }
-  } finally {
-    try {
-      await reader.cancel();
-    } catch {
-      // best-effort cancel
-    }
-  }
-  return null;
-}
+const url = `${baseUrl}/mcp`;
+const RECIPIENT_UNREACHABLE = -32004;
 
 function fail(msg, extra) {
   console.error(`smoke-mcp-client: FAIL — ${msg}`);
@@ -118,67 +36,87 @@ function fail(msg, extra) {
   process.exit(1);
 }
 
-async function main() {
-  // ── 1. initialize ──
-  const init = await rpc({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'initialize',
-    params: {
-      protocolVersion: PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: 'hive-smoke-client', version: '0.1.0' },
-    },
+async function callTool(id, name, args) {
+  const res = await rpc({
+    url,
+    jwt,
+    id,
+    method: 'tools/call',
+    params: { name, arguments: args, _meta: envelope() },
   });
-  if (init.status !== 200) fail(`initialize returned status ${init.status}`, init);
-  if (!init.body || init.body.error) fail('initialize returned error', init.body);
-  if (!init.sessionId) fail('initialize did not return mcp-session-id header');
-  const sessionId = init.sessionId;
-  console.log(`smoke-mcp-client: initialize ok (sessionId=${sessionId})`);
-
-  // ── 2. notifications/initialized ──
-  const inited = await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId);
-  if (inited.status !== 202 && inited.status !== 200 && inited.status !== 204) {
-    fail(`notifications/initialized returned status ${inited.status}`);
-  }
-
-  // ── 3. tools/call get_agent_config ──
-  const toolCall = await rpc(
-    {
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'tools/call',
-      params: { name: 'get_agent_config', arguments: {} },
-    },
-    sessionId,
-  );
-  if (toolCall.status !== 200) fail(`tools/call returned status ${toolCall.status}`, toolCall);
-  if (!toolCall.body || toolCall.body.error) fail('tools/call returned error', toolCall.body);
-
-  const result = toolCall.body.result;
-  if (!result || !Array.isArray(result.content) || result.content.length === 0) {
-    fail('tools/call result missing content array', toolCall.body);
-  }
-  const textContent = result.content.find((c) => c.type === 'text');
-  if (!textContent) fail('tools/call result has no text content', result.content);
-  let parsedConfig;
+  if (res.status !== 200) fail(`tools/call ${name} returned status ${res.status}`, res.body);
+  if (!res.body || res.body.error) fail(`tools/call ${name} returned an error`, res.body);
+  const result = res.body.result;
+  if (result?.isError) fail(`tools/call ${name} reported isError`, result);
+  const text = result?.content?.find((c) => c.type === 'text');
+  if (!text) fail(`tools/call ${name} result has no text content`, result);
   try {
-    parsedConfig = JSON.parse(textContent.text);
+    return JSON.parse(text.text);
   } catch (err) {
-    fail(`tools/call text content is not JSON: ${err.message}`, textContent);
+    fail(`tools/call ${name} text content is not JSON: ${err.message}`, text);
   }
+}
 
-  // get_agent_config returns the field as `participant_id` (snake_case wire
-  // shape per [[API MCP — Tools]] tech spec).
-  const actualParticipantId = parsedConfig.participant_id ?? parsedConfig.participantId;
-  if (actualParticipantId !== expectedParticipantId) {
+async function main() {
+  // ── 1. server/discover ──
+  const discover = await rpc({
+    url,
+    jwt,
+    method: 'server/discover',
+    params: { _meta: envelope() },
+  });
+  if (discover.status !== 200) fail(`server/discover returned status ${discover.status}`, discover);
+  if (!discover.body || discover.body.error)
+    fail('server/discover returned an error', discover.body);
+  const supported = discover.body.result?.supportedVersions;
+  if (!Array.isArray(supported) || !supported.includes(PROTOCOL_VERSION)) {
+    fail(`server/discover does not list ${PROTOCOL_VERSION}`, discover.body.result);
+  }
+  if (discover.headers.get('mcp-session-id')) {
+    fail('server answered with an mcp-session-id header; the revision has no sessions');
+  }
+  console.log(`smoke-mcp-client: server/discover ok (supportedVersions=${supported.join(',')})`);
+
+  // ── 2. tools/call get_agent_config ──
+  const config = await callTool(2, 'get_agent_config', {});
+  // The wire shape is snake_case, per the `API MCP — Tools` tech spec.
+  if (config.participant_id !== expectedParticipantId) {
     fail(
-      `participant_id mismatch — expected ${expectedParticipantId}, got ${actualParticipantId}`,
-      parsedConfig,
+      `participant_id mismatch — expected ${expectedParticipantId}, got ${config.participant_id}`,
+      config,
     );
   }
+  console.log(`smoke-mcp-client: get_agent_config ok (participant_id=${config.participant_id})`);
 
-  console.log(`smoke-mcp-client: get_agent_config ok (participant_id=${actualParticipantId})`);
+  // ── 3. tools/call send_message (to self) ──
+  const sent = await callTool(3, 'send_message', {
+    recipient: expectedParticipantId,
+    type: 'notification',
+    body: 'deployment smoke',
+  });
+  if (typeof sent.message_id !== 'string') fail('send_message returned no message_id', sent);
+  console.log(`smoke-mcp-client: send_message ok (message_id=${sent.message_id})`);
+
+  // ── 4. get_agent_status on another owner's worker: denied, and audited ──
+  const denied = await rpc({
+    url,
+    jwt,
+    id: 4,
+    method: 'tools/call',
+    params: {
+      name: 'get_agent_status',
+      arguments: { participant: deniedRecipientId },
+      _meta: envelope(),
+    },
+  });
+  if (denied.body?.error?.code !== RECIPIENT_UNREACHABLE) {
+    fail(
+      `get_agent_status on another owner's worker not denied with ${RECIPIENT_UNREACHABLE}`,
+      denied,
+    );
+  }
+  console.log('smoke-mcp-client: visibility denial ok (-32004)');
+
   console.log('smoke-mcp-client: PASS');
 }
 
