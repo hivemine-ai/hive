@@ -159,8 +159,10 @@ describe('onResponse', () => {
     raw.emit('close');
     expect(log.entries[1]).toMatchObject({
       event: 'mcp_listen_closed',
+      subscribesOwnMailbox: false,
       closeReason: 'client_closed',
     });
+    expect(streams.__openCount()).toBe(0);
   });
 
   it('a non-SSE answer of the SDK is not a stream', () => {
@@ -243,6 +245,81 @@ describe('onResponse', () => {
     expect(closed).toHaveLength(1);
     expect(closed[0]).toMatchObject({ closeReason: 'client_closed', subscribesOwnMailbox: true });
     expect(closed[0]?.['streamDurationMs']).toEqual(expect.any(Number));
+    expect(streams.__openCount()).toBe(0);
+  });
+});
+
+describe('a stream with an empty list has a lifecycle, without presence', () => {
+  it('writes keep-alives', () => {
+    vi.useFakeTimers();
+    const { streams } = build({ keepAliveIntervalMs: 1000 });
+    const { raw } = open(streams, []);
+    const write = vi.spyOn(raw, 'write');
+
+    vi.advanceTimersByTime(1000);
+
+    expect(write).toHaveBeenCalledWith(': keepalive\n\n', expect.any(Function));
+    raw.emit('close');
+    vi.useRealTimers();
+  });
+
+  it('closes when the credential expires', () => {
+    vi.useFakeTimers();
+    const { streams, log } = build();
+    const expiring = {
+      ...IDENTITY,
+      snapshot: { ...IDENTITY.snapshot, credentialExpiresAt: new Date(Date.now() + 5000) },
+    };
+    const raw = new FakeRaw();
+    streams.onResponse({
+      body: listenBody([]),
+      identity: expiring,
+      requestId: '01900000-0000-7000-8000-0000000000bb',
+      response: sseResponse(),
+      raw: raw as unknown as ServerResponse,
+      abort: vi.fn(),
+    });
+
+    vi.advanceTimersByTime(5000);
+
+    expect(log.entries).toContainEqual(
+      expect.objectContaining({ event: 'mcp_listen_closed', closeReason: 'credential_expired' }),
+    );
+    vi.useRealTimers();
+  });
+
+  it('closes on revocation through the re-verification pass', async () => {
+    const { streams, subscribe, log } = build({
+      verifier: {
+        reverifyStream: () => Promise.resolve({ ok: false, reason: 'participant_revoked' }),
+      },
+    });
+    const { raw } = open(streams, []);
+
+    await streams.reverifyOpenStreams();
+
+    expect(raw.destroyed).toBe(true);
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(log.entries).toContainEqual(
+      expect.objectContaining({
+        event: 'mcp_listen_closed',
+        subscribesOwnMailbox: false,
+        closeReason: 'participant_revoked',
+      }),
+    );
+  });
+
+  it('stop() ends it with complete, so the HTTP drain does not wait for it', () => {
+    const { streams, log } = build();
+    const { raw } = open(streams, []);
+    const write = vi.spyOn(raw, 'write');
+
+    streams.stop();
+
+    expect(write).toHaveBeenCalledWith(expect.stringContaining('"complete"'), expect.any(Function));
+    expect(log.entries).toContainEqual(
+      expect.objectContaining({ event: 'mcp_listen_closed', closeReason: 'shutdown' }),
+    );
     expect(streams.__openCount()).toBe(0);
   });
 });

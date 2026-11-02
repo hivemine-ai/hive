@@ -271,7 +271,13 @@ describe('createReplay', () => {
   });
 
   describe('failure closes the stream', () => {
-    function rig(overrides: { cellsRepo?: CellsRepo; deliver?: () => Promise<void> } = {}) {
+    function rig(
+      overrides: {
+        cellsRepo?: CellsRepo;
+        deliver?: () => Promise<void>;
+        isOpen?: () => boolean;
+      } = {},
+    ) {
       const ownerId = uuidv7();
       const cell = activeCell(ownerId);
       const closes: string[] = [];
@@ -300,7 +306,7 @@ describe('createReplay', () => {
           } as unknown as ParticipantsReadRepo,
           builder: fakeBuilder(notification(cell.id, ownerId)),
           presenceRegistry: {
-            isOpen: () => true,
+            isOpen: overrides.isOpen ?? (() => true),
             unsubscribe: (_id: string, _participant: string, reason: string) => {
               unsubscribed.push(reason);
             },
@@ -336,6 +342,26 @@ describe('createReplay', () => {
       await vi.waitFor(() => {
         expect(r.closes).toEqual(['replay_failed']);
       });
+    });
+
+    it('a client that left during the replay is not a failure', async () => {
+      let open = true;
+      const deliver = vi.fn(() => {
+        // The handle closed itself before rejecting, as with a normal disconnection.
+        open = false;
+        return Promise.reject(new Error('stream closed'));
+      });
+      const r = rig({ isOpen: () => open, deliver });
+
+      r.replay.scheduleReplayFor(r.ownerId, r.handle, uuidv7());
+      await vi.waitFor(() => {
+        expect(deliver).toHaveBeenCalledOnce();
+      });
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+
+      expect(r.errors).toEqual([]);
+      expect(r.closes).toEqual([]);
+      expect(r.unsubscribed).toEqual([]);
     });
 
     it('a stream no longer open gets nothing, and that is not a failure', async () => {

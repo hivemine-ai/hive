@@ -387,7 +387,6 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     async stop() {
       logger.info({ event: 'wire_stopping' }, 'hive server shutting down');
       // Streams first: a stream is a long POST that would otherwise exhaust the drain.
-      listenStreams.stop();
       try {
         notifications.presenceRegistry.shutdown();
       } catch (err) {
@@ -399,6 +398,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
           'presence registry shutdown failed',
         );
       }
+      listenStreams.stop();
       notifications.stop();
       const drainMs = Math.max(1, cfg.shutdownDrainTimeoutSeconds) * 1000;
       await stopWithDrainTimeout(httpHost.stop(), drainMs, (err) => {

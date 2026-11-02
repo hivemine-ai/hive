@@ -71,6 +71,14 @@ export function createReplay(deps: ReplayDeps, config: ReplayConfig): Replay {
     try {
       await runReplayFor(participantId, handle, subscriptionId);
     } catch (err) {
+      // A client that left mid-replay: nothing failed, and its reconnection replays.
+      if (!deps.presenceRegistry.isOpen(subscriptionId, participantId)) {
+        deps.logger.debug(
+          { event: 'waggle_replay_stream_gone', participantId, subscriptionId },
+          'stream closed during the replay',
+        );
+        return;
+      }
       deps.logger.error(
         {
           event: 'waggle_replay_failed',

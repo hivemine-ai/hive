@@ -5,9 +5,8 @@
 //
 // Only the caller's own mailbox can be subscribed, so a non-empty `resourceSubscriptions`
 // that passed `authorize` is the own mailbox and counts as presence. An empty one, which
-// is how Claude Code opens its own stream, is served and never counts.
-
-import type { ServerResponse } from 'node:http';
+// is how Claude Code opens its own stream, is served and never counts, but it has the
+// same lifecycle: keep-alive, expiry, re-verification and `complete` on shutdown.
 
 import { v7 as uuidv7 } from 'uuid';
 
@@ -43,6 +42,10 @@ export interface ListenStreamsDeps {
 export interface ListenStreams extends ListenEdge {
   /** Starts the single re-verification timer of the process. */
   start(): void;
+  /**
+   * Stops the timer and ends with `complete` whatever is still open. Call it after
+   * `presenceRegistry.shutdown()`: streams without presence are not in the registry.
+   */
   stop(): void;
   /** One pass over the open streams. Public for tests. */
   reverifyOpenStreams(): Promise<void>;
@@ -99,69 +102,12 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
     return INVALID_INPUT;
   }
 
-  function logOpened(
-    streamId: string,
-    connectionId: string | null,
-    identity: IdentityContext,
-    subscribesOwnMailbox: boolean,
-    resourceSubscriptionsCount: number,
-    requestId: string,
-  ): void {
-    logger.info(
-      {
-        event: 'mcp_listen_opened',
-        streamId,
-        connectionId,
-        participantId: identity.participantId,
-        subscribesOwnMailbox,
-        resourceSubscriptionsCount,
-        requestId,
-      },
-      'listen stream opened',
-    );
-  }
-
-  function closedLogger(
-    streamId: string,
-    connectionId: string | null,
-    identity: IdentityContext,
-    subscribesOwnMailbox: boolean,
-  ): (closeReason: StreamCloseReason) => void {
-    const openedAt = Date.now();
-    return (closeReason) => {
-      logger.info(
-        {
-          event: 'mcp_listen_closed',
-          streamId,
-          connectionId,
-          participantId: identity.participantId,
-          subscribesOwnMailbox,
-          closeReason,
-          streamDurationMs: Date.now() - openedAt,
-        },
-        'listen stream closed',
-      );
-    };
-  }
-
-  function serveWithoutPresence(
-    raw: ServerResponse,
-    identity: IdentityContext,
-    streamId: string,
-    requestId: string,
-  ): void {
-    logOpened(streamId, null, identity, false, 0, requestId);
-    const logClosed = closedLogger(streamId, null, identity, false);
-    raw.once('close', () => {
-      logClosed('client_closed');
-    });
-  }
-
-  function bindPresence(
+  function track(
     input: ListenResponseInput,
     streamId: string,
-    count: number,
-  ): ListenBinding {
+    subscribesOwnMailbox: boolean,
+    resourceSubscriptionsCount: number,
+  ): SubscriberHandle {
     const { body, identity, requestId, raw, abort } = input;
     const handle = createStreamHandle({
       callerContext: identity,
@@ -175,14 +121,35 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
     });
     raw.socket?.setKeepAlive(true, deps.keepAliveIntervalMs);
 
-    logOpened(streamId, handle.connectionId, identity, true, count, requestId);
+    const fields = {
+      streamId,
+      connectionId: handle.connectionId,
+      participantId: identity.participantId,
+      subscribesOwnMailbox,
+    };
+    logger.info(
+      { event: 'mcp_listen_opened', ...fields, resourceSubscriptionsCount, requestId },
+      'listen stream opened',
+    );
     open.set(handle.connectionId, { handle, identity });
-    const logClosed = closedLogger(streamId, handle.connectionId, identity, true);
-    handle.onClose((reason) => {
+    const openedAt = Date.now();
+    handle.onClose((closeReason) => {
       open.delete(handle.connectionId);
-      logClosed(reason);
+      logger.info(
+        {
+          event: 'mcp_listen_closed',
+          ...fields,
+          closeReason,
+          streamDurationMs: Date.now() - openedAt,
+        },
+        'listen stream closed',
+      );
     });
+    return handle;
+  }
 
+  function bindPresence(handle: SubscriberHandle, input: ListenResponseInput): ListenBinding {
+    const { identity, requestId } = input;
     let acknowledged = false;
     let subscription: Subscription | undefined;
     deps.presenceRegistry.subscribe({ callerContext: identity, handle, requestId }).then(
@@ -269,11 +236,8 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
       const streamId = uuidv7();
       const uris = requestedSubscriptions(input.body);
       const count = Array.isArray(uris) ? uris.length : 0;
-      if (count === 0) {
-        serveWithoutPresence(input.raw, input.identity, streamId, input.requestId);
-        return undefined;
-      }
-      return bindPresence(input, streamId, count);
+      const handle = track(input, streamId, count > 0, count);
+      return count > 0 ? bindPresence(handle, input) : undefined;
     },
 
     start() {
@@ -287,6 +251,7 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
     stop() {
       clearInterval(reverifyTimer);
       reverifyTimer = undefined;
+      for (const { handle } of Array.from(open.values())) handle.close('shutdown');
     },
 
     reverifyOpenStreams,

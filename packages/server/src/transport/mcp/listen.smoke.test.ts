@@ -252,6 +252,18 @@ describe('listen push over the real stack', () => {
       expect(await isOnline(sender, world.workerBId)).toBe(false);
     });
 
+    it('an open connection with an empty list does not hold the shutdown', async () => {
+      await start();
+      const res = await rawListen(world, world.jwtB, { resourceSubscriptions: [] });
+      expect(await isOnline(sender, world.workerBId)).toBe(false);
+
+      const startedAt = Date.now();
+      await world.wire.stop();
+
+      expect(Date.now() - startedAt).toBeLessThan(2000);
+      await res.text();
+    });
+
     it('a stream of toolsListChanged only never counts as presence', async () => {
       await start();
       const res = await rawListen(world, world.jwtB, { toolsListChanged: true });
