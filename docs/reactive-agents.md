@@ -31,7 +31,7 @@ All three depend on `hivectl watch`: while its connection is open the participan
 ## Limitations
 
 - **A silent network cut is not noticed until the socket fails.** If the path between the agent and Hive stops delivering without closing the connection, the server keeps the participant `online` and `watch` keeps waiting. `watch` reconnects after 45 s without any byte (`--silence-timeout`), which covers most cases; the server itself does not detect a half-open connection. This is accepted for v0.2.0.
-- **Revocation takes up to one re-check interval to close a stream.** A credential revoked or an agent suspended with `hivectl` is rejected on the next request, but an already open stream is closed by the periodic pass: by default within 60 s (`HIVE_MCP_REVERIFY_INTERVAL_SECONDS`). Lower it if you need a tighter window.
+- **Revocation takes up to one re-check interval to close a stream.** A credential or agent revoked with `hivectl` is rejected on the next request, but an already open stream is closed by the periodic pass: by default within 60 s (`HIVE_MCP_REVERIFY_INTERVAL_SECONDS`). Lower it if you need a tighter window.
 - **`hivectl` cannot suspend or resume an agent.** There is no `suspend` command in this version. To cut an agent off, revoke it: `hivectl agent revoke` or `hivectl credential revoke`.
 - **The plugin is not tied to Claude Code's life.** A `watch` left behind after a hard kill of Claude Code keeps the participant `online`. See the [plugin README](../packages/claude-plugin/README.md#known-limit-watch-is-not-tied-to-claude-codes-life).
 - **Claude Code gives a server 5 seconds** to answer `server/discover`. A slow Hive leaves the session without Hive tools, so keep the server close and responsive.
