@@ -45,23 +45,6 @@ export interface NotificationsFactoryOptions {
   replayDelayMs?: number;
   /** Default 16. */
   maxSessionsPerParticipant?: number;
-  /**
-   * Idle threshold for the periodic sweep. Default 30 min in production. Set
-   * to 0 (`HIVE_PRESENCE_IDLE_TIMEOUT_MS=0`) to disable the sweep —
-   * backwards-compat with Slice 0 behavior. Per ADR-012.
-   */
-  idleTimeoutMs?: number | null;
-  /**
-   * Period of the sweep timer. Default 5 min. Only honored when
-   * `idleTimeoutMs > 0`. Per ADR-012.
-   */
-  sweepIntervalMs?: number;
-  /**
-   * LRU eviction threshold at cap-hit. Default 15 min. Set to 0 to disable
-   * LRU eviction (cap-hit always rejects with `too_many_sessions`). Per
-   * ADR-012.
-   */
-  lruEvictThresholdMs?: number | null;
 }
 
 export interface Notifications {
@@ -75,9 +58,6 @@ export interface Notifications {
 const DEFAULT_QUIET_WINDOW_MS = 500;
 const DEFAULT_REPLAY_DELAY_MS = 0;
 const DEFAULT_MAX_SESSIONS = 16;
-const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min — per ADR-012
-const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000; // 5 min — per ADR-012
-const DEFAULT_LRU_EVICT_THRESHOLD_MS = 15 * 60 * 1000; // 15 min — per ADR-012
 
 export function resolveNotificationsConfig(
   env: NodeJS.ProcessEnv,
@@ -86,9 +66,6 @@ export function resolveNotificationsConfig(
   quietWindowMs: number;
   replayDelayMs: number;
   maxSessionsPerParticipant: number;
-  idleTimeoutMs: number | null;
-  sweepIntervalMs: number;
-  lruEvictThresholdMs: number | null;
 } {
   const quietWindowMs =
     options.quietWindowMs ??
@@ -109,57 +86,7 @@ export function resolveNotificationsConfig(
       min: 1,
     });
 
-  // Idle timeout: explicit null/undefined options preserved; env default
-  // applies otherwise. `HIVE_PRESENCE_IDLE_TIMEOUT_MS=0` → null (sweep
-  // disabled, backwards-compat with Slice 0).
-  const idleTimeoutMs = resolveIdleTimeoutMs(env, options);
-
-  const sweepIntervalMs =
-    options.sweepIntervalMs ??
-    parseIntEnv(env['HIVE_PRESENCE_SWEEP_INTERVAL_MS'], DEFAULT_SWEEP_INTERVAL_MS, {
-      name: 'HIVE_PRESENCE_SWEEP_INTERVAL_MS',
-      min: 0,
-    });
-
-  const lruEvictThresholdMs = resolveLruThresholdMs(env, options);
-
-  return {
-    quietWindowMs,
-    replayDelayMs,
-    maxSessionsPerParticipant,
-    idleTimeoutMs,
-    sweepIntervalMs,
-    lruEvictThresholdMs,
-  };
-}
-
-function resolveIdleTimeoutMs(
-  env: NodeJS.ProcessEnv,
-  options: NotificationsFactoryOptions,
-): number | null {
-  if (options.idleTimeoutMs !== undefined) return options.idleTimeoutMs;
-  const raw = env['HIVE_PRESENCE_IDLE_TIMEOUT_MS'];
-  if (raw === undefined || raw === '') return DEFAULT_IDLE_TIMEOUT_MS;
-  const parsed = parseIntEnv(raw, DEFAULT_IDLE_TIMEOUT_MS, {
-    name: 'HIVE_PRESENCE_IDLE_TIMEOUT_MS',
-    min: 0,
-  });
-  // Treat 0 as "disabled" — backwards-compat path.
-  return parsed === 0 ? null : parsed;
-}
-
-function resolveLruThresholdMs(
-  env: NodeJS.ProcessEnv,
-  options: NotificationsFactoryOptions,
-): number | null {
-  if (options.lruEvictThresholdMs !== undefined) return options.lruEvictThresholdMs;
-  const raw = env['HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS'];
-  if (raw === undefined || raw === '') return DEFAULT_LRU_EVICT_THRESHOLD_MS;
-  const parsed = parseIntEnv(raw, DEFAULT_LRU_EVICT_THRESHOLD_MS, {
-    name: 'HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS',
-    min: 0,
-  });
-  return parsed === 0 ? null : parsed;
+  return { quietWindowMs, replayDelayMs, maxSessionsPerParticipant };
 }
 
 /**
@@ -187,12 +114,9 @@ export function createNotificationsForProduction(
 
   const presenceRegistry = createPresenceRegistry({
     maxSessionsPerParticipant: config.maxSessionsPerParticipant,
-    idleTimeoutMs: config.idleTimeoutMs,
-    sweepIntervalMs: config.sweepIntervalMs,
-    lruEvictThresholdMs: config.lruEvictThresholdMs,
     logger: deps.logger,
     participantsRepo: deps.participantsRepo,
-    onSubscribed: ({ participantId, subscriptionId, handle }) => {
+    onReady: ({ participantId, subscriptionId, handle }) => {
       replay.scheduleReplayFor(participantId, handle, subscriptionId);
     },
   });

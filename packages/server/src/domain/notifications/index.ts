@@ -1,12 +1,12 @@
 // Public barrel for the notifications domain (Waggle Pipeline + Presence Registry).
 
-export type { SubscriberHandle } from './presence/subscriber-handle.js';
+export type { SubscriberHandle, StreamCloseReason } from './presence/subscriber-handle.js';
 export type { SubscribeInput, Subscription, PresenceSnapshot } from './presence/types.js';
 export { createPresenceRegistry } from './presence/registry.js';
 export type {
   PresenceRegistry,
   PresenceRegistryConfig,
-  SubscribedHookInput,
+  ReadyHookInput,
 } from './presence/registry.js';
 
 export type { WaggleNotification, WaggleKind } from './waggle/types.js';

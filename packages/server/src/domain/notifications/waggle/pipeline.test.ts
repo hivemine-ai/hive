@@ -106,8 +106,8 @@ function buildPipelineRig(initial: Partial<PipelineRig> = {}): {
   const presenceRegistry = {
     getPresence: () => ({
       online: rig.presenceOnline,
-      sessionCount: rig.presenceOnline ? 1 : 0,
-      sessionsSubscribedAt: rig.presenceOnline ? [new Date()] : [],
+      streamCount: rig.presenceOnline ? 1 : 0,
+      streamsSubscribedAt: rig.presenceOnline ? [new Date()] : [],
     }),
     forEachSubscriber: async (
       _participantId: string,
@@ -120,6 +120,7 @@ function buildPipelineRig(initial: Partial<PipelineRig> = {}): {
           rig.delivered.push(n);
           return Promise.resolve();
         },
+        close() {},
         onClose() {},
       };
       await fn(handle);
@@ -236,7 +237,7 @@ describe('createPipeline.handleMessageStored', () => {
     // funnel the error into the structured log without re-raising.
     const log = silentLogger();
     const presenceRegistry = {
-      getPresence: () => ({ online: true, sessionCount: 1, sessionsSubscribedAt: [new Date()] }),
+      getPresence: () => ({ online: true, streamCount: 1, streamsSubscribedAt: [new Date()] }),
       forEachSubscriber: () => Promise.resolve(),
     } as unknown as PresenceRegistry;
     const participantsRepo = {

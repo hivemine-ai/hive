@@ -1,138 +1,105 @@
 // Presence Registry — in-memory map participantId → connectionId → ActiveSubscriber.
-// Per the tech spec § "presence/registry.ts": single source of truth for "who is
-// online" inside this Node process; consumed by the Waggle pipeline (push vs
-// no-op) and by future MCP tools (`get_agent_status`).
+//
+// One entry = one open `subscriptions/listen` stream that subscribes the
+// participant's own mailbox. An entry lives exactly as long as its stream:
+// there is no sweep, no inactivity threshold and no timer. The handle owns
+// network-failure detection (keep-alive + stall detector) and reports the end
+// of the stream through `onClose`; the registry only reacts. This is the fix
+// for INC-2026-007 (an idle-but-alive stream used to be evicted for lack of delivery traffic).
+//
+// Entry states:
+//   pending — registered, acknowledgment not yet written. Not online, no fan-out.
+//   open    — `Subscription.ready()` called after the acknowledgment. Online.
 //
 // Concurrency: Node's event loop serializes Map mutations; no locks needed.
-// `forEachSubscriber` snapshots the value array before iterating so a listener
-// that triggers `unsubscribe` mid-iteration does not corrupt the loop.
-//
-// Lifecycle hardening (Slice 2 — per ADR-012):
-//   - TTL passive: a periodic sweep (`setInterval`) evicts entries whose
-//     `lastSeenAt` is older than `idleTimeoutMs`. Disabled when
-//     `idleTimeoutMs` is null/0 (backwards-compat with Slice 0).
-//   - LRU eviction at cap-hit: when `subscribe` would reject for cap, the
-//     oldest entry is evicted if it meets `lruEvictThresholdMs` — otherwise
-//     reject with `too_many_sessions` (preserving Slice 0 behavior).
-//   - `forEachSubscriber` post-success updates `lastSeenAt` so an active
-//     receiver of Waggle deliveries does not get evicted.
-//   - `shutdown()` clears the sweep interval — required for graceful stop
-//     and for tests to avoid timer leaks.
+// `forEachSubscriber` snapshots the handles before iterating so a handle that
+// unsubscribes mid-fan-out does not corrupt the loop.
 
 import { v7 as uuidv7 } from 'uuid';
 
 import type { ParticipantsReadRepo } from '#domain/auth/participants/repository.js';
 import type { UUIDv7 } from '#domain/auth/types.js';
-import { warnSweepMisconfig } from '#observability/config-guard.js';
 import type { Logger } from '#observability/logger.js';
 
 import { WaggleError } from '../errors.js';
 
-import type { SubscriberHandle } from './subscriber-handle.js';
+import type { StreamCloseReason, SubscriberHandle } from './subscriber-handle.js';
 import type { PresenceSnapshot, SubscribeInput, Subscription } from './types.js';
+
+type StreamState = 'pending' | 'open';
 
 interface ActiveSubscriber {
   subscriptionId: UUIDv7;
+  participantId: UUIDv7;
   handle: SubscriberHandle;
+  /** Ordering key for LRU. Never refreshed by traffic. */
   subscribedAt: Date;
-  lastSeenAt: Date;
+  /** Correlates logs with the POST that opened the stream. */
+  requestId: string;
+  state: StreamState;
 }
 
 interface ParticipantPresence {
   subscriberByConnection: Map<UUIDv7, ActiveSubscriber>;
 }
 
-/** Hook payload fired AFTER a successful subscribe. Used by composition root
- *  to wire `replay.scheduleReplayFor` without coupling registry → replay. */
-export interface SubscribedHookInput {
+/** Hook payload fired when a stream becomes `open`. Composition wires the replay scheduler here. */
+export interface ReadyHookInput {
   participantId: UUIDv7;
   subscriptionId: UUIDv7;
   handle: SubscriberHandle;
 }
 
 export interface PresenceRegistryConfig {
-  /** Cap of simultaneous sessions per participant. Default 16. */
+  /** Cap of simultaneous streams per participant. Default 16. */
   maxSessionsPerParticipant?: number;
-  /**
-   * Idle threshold for the periodic sweep. If `now − lastSeenAt ≥ idleTimeoutMs`
-   * the entry is evicted. Null/0 disables the sweep (backwards-compat with
-   * Slice 0). No default — composition factory decides.
-   */
-  idleTimeoutMs?: number | null;
-  /**
-   * Period of the sweep timer. Only honored when `idleTimeoutMs > 0`. No
-   * default — composition factory decides.
-   */
-  sweepIntervalMs?: number;
-  /**
-   * LRU eviction threshold at cap-hit. When the cap is reached and a new
-   * subscribe arrives, the entry with the oldest `lastSeenAt` is evicted iff
-   * `now − oldest.lastSeenAt ≥ lruEvictThresholdMs`. Null/0 disables LRU
-   * eviction (cap-hit always rejects).
-   */
-  lruEvictThresholdMs?: number | null;
-  /**
-   * Deprecated alias for `idleTimeoutMs`. If both are set, `idleTimeoutMs`
-   * wins; if only `heartbeatTimeoutMs` is set, it is forwarded with a
-   * deprecation warning. Will be removed in a future release.
-   */
-  heartbeatTimeoutMs?: number | null;
-  /** Hook fired AFTER a successful subscribe — composition wires the replay scheduler here. */
-  onSubscribed?: (input: SubscribedHookInput) => void;
-  /**
-   * Clock factory. Defaults to `() => new Date()`. Tests inject a controlled
-   * clock so the sweep + LRU thresholds are deterministic without real timers.
-   */
+  /** Fired by `Subscription.ready()` — composition wires `replay.scheduleReplayFor` here. */
+  onReady?: (input: ReadyHookInput) => void;
+  /** Clock factory. Defaults to `() => new Date()`. */
   now?: () => Date;
-  /**
-   * Logger for eviction events and deprecation warnings. Optional — without
-   * a logger the registry is silent (suitable for unit tests not asserting
-   * on logs). Composition root passes the application logger.
-   */
+  /** Logger for presence events. Optional — without it the registry is silent. */
   logger?: Logger;
   /**
-   * Participants repository used to persist `agents.last_connected_at` as a
-   * non-blocking side effect of every successful `subscribe` for `worker` and
-   * `scout` callers (skipped for `hivekeeper`). The UPDATE is fire-and-forget;
-   * a failure is logged at `warn` and never aborts the subscribe (PRY-030).
-   * Optional — when undefined (eg. unit tests scaffolded without auth), the
-   * side effect is silently disabled.
+   * Source of the live participant state. `subscribe` re-reads it (instead of
+   * trusting the request snapshot) as its last await before inserting, which
+   * closes the suspension/subscribe race. Without it the snapshot state is used.
    */
-  participantsRepo?: Pick<ParticipantsReadRepo, 'updateAgentLastConnectedAt'>;
+  participantsRepo?: Pick<ParticipantsReadRepo, 'getParticipantState'>;
 }
 
 export interface PresenceRegistry {
-  /** Returns a Promise per the cross-spec API; the body is sync (Map insert + hook). */
+  /**
+   * Registers a `pending` entry. At the cap the oldest stream is evicted (closed
+   * with `evicted_lru`) — subscribe never rejects for the cap.
+   */
   subscribe(input: SubscribeInput): Promise<Subscription>;
-  /** Idempotent. Removes the entry by `subscriptionId` (lookup O(n) per participant; n ≤ cap). */
-  unsubscribe(subscriptionId: UUIDv7, participantId: UUIDv7): void;
-  /** Pure read — no mutation. Used by the pipeline online/offline gate. */
+  /**
+   * Idempotent. Removes the entry (lookup O(n) per participant; n ≤ cap). Does
+   * NOT call `handle.close()`: the stream is already gone or being closed by its owner.
+   */
+  unsubscribe(subscriptionId: UUIDv7, participantId: UUIDv7, reason: StreamCloseReason): void;
+  /** True iff the entry exists and is `open`. Pure read. */
+  isOpen(subscriptionId: UUIDv7, participantId: UUIDv7): boolean;
+  /** Pure read; counts only `open` entries. `online === (streamCount > 0)`. */
   getPresence(participantId: UUIDv7): PresenceSnapshot;
-  /** Snapshot-then-iterate fan-out. Sequential `await` per handle; errors thrown
-   *  by `fn` are caught inside and reported via the optional sink. Touches
-   *  `lastSeenAt` on each handle for which `fn` resolved without throwing. */
+  /**
+   * Snapshot-then-iterate fan-out over `open` entries only. Sequential `await`
+   * per handle; errors thrown by `fn` are isolated and reported via `onError`.
+   */
   forEachSubscriber(
     participantId: UUIDv7,
     fn: (handle: SubscriberHandle) => Promise<void>,
     onError?: (handle: SubscriberHandle, err: unknown) => void,
   ): Promise<void>;
-  /**
-   * Updates `lastSeenAt` for the matching subscription. No-op when neither
-   * `idleTimeoutMs` nor `heartbeatTimeoutMs` is configured.
-   */
-  touch(subscriptionId: UUIDv7, participantId: UUIDv7): void;
-  /**
-   * Stops the periodic sweep timer. Idempotent. MUST be called by the
-   * composition root on graceful stop and by tests in their teardown.
-   */
+  /** Forced close of every stream of the participant (revocation / suspension). Idempotent. */
+  closeParticipantStreams(
+    participantId: UUIDv7,
+    reason: Extract<StreamCloseReason, 'participant_revoked' | 'participant_suspended'>,
+  ): void;
+  /** Closes every stream with `shutdown`, empties the registry and rejects later subscribes. Idempotent. */
   shutdown(): void;
-  /** Test helper — exposes the live count for a participant. Internal-only. */
-  __sessionCount(participantId: UUIDv7): number;
-  /**
-   * Test helper — runs the sweep synchronously against an explicit `now`.
-   * Production code never calls this; the periodic timer drives the sweep.
-   */
-  __sweepStale(now: Date): void;
+  /** Test helper — live entry count (pending + open) for a participant. */
+  __streamCount(participantId: UUIDv7): number;
 }
 
 const DEFAULT_MAX_SESSIONS = 16;
@@ -142,270 +109,263 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
   const maxSessions = config.maxSessionsPerParticipant ?? DEFAULT_MAX_SESSIONS;
   const now = config.now ?? ((): Date => new Date());
   const logger = config.logger;
+  let isShutDown = false;
 
-  // Resolve idleTimeoutMs with `heartbeatTimeoutMs` as deprecated alias.
-  // Precedence: idleTimeoutMs > heartbeatTimeoutMs. If only the legacy field
-  // is set, log a one-shot deprecation warning.
-  let idleTimeoutMs: number | null;
-  if (config.idleTimeoutMs !== undefined) {
-    idleTimeoutMs = config.idleTimeoutMs;
-  } else if (config.heartbeatTimeoutMs !== undefined) {
-    idleTimeoutMs = config.heartbeatTimeoutMs;
-    if (idleTimeoutMs !== null && idleTimeoutMs > 0 && logger !== undefined) {
-      logger.warn(
-        { event: 'presence_heartbeat_timeout_ms_deprecated' },
-        'PresenceRegistryConfig.heartbeatTimeoutMs is deprecated; use idleTimeoutMs',
-      );
+  function openCount(presence: ParticipantPresence | undefined): number {
+    if (presence === undefined) return 0;
+    let n = 0;
+    for (const sub of presence.subscriberByConnection.values()) {
+      if (sub.state === 'open') n += 1;
     }
-  } else {
-    idleTimeoutMs = null;
+    return n;
   }
 
-  const sweepIntervalMs = config.sweepIntervalMs ?? 0;
-  const lruEvictThresholdMs = config.lruEvictThresholdMs ?? null;
+  function findEntry(
+    subscriptionId: UUIDv7,
+    participantId: UUIDv7,
+  ): { presence: ParticipantPresence; connectionId: UUIDv7; entry: ActiveSubscriber } | undefined {
+    const presence = presenceMap.get(participantId);
+    if (presence === undefined) return undefined;
+    for (const [connectionId, entry] of presence.subscriberByConnection) {
+      if (entry.subscriptionId === subscriptionId) return { presence, connectionId, entry };
+    }
+    return undefined;
+  }
 
-  // Closes N2 of PRY-017: surface a misconfiguration where the idle
-  // threshold is enabled but no sweep timer would mount. Without this guard
-  // the sweep silently never runs and idle sessions accumulate — the very
-  // pathology that drove INC-2026-003.
-  if (logger !== undefined) {
-    warnSweepMisconfig(logger, 'PresenceRegistry', {
-      enabledMs: idleTimeoutMs,
-      intervalMs: sweepIntervalMs,
+  // Single removal path: every cause of removal funnels here so none can skip
+  // the `presence_stream_offline` emission (open → removed, last open stream).
+  function removeEntry(
+    presence: ParticipantPresence,
+    connectionId: UUIDv7,
+    entry: ActiveSubscriber,
+    reason: StreamCloseReason,
+  ): void {
+    presence.subscriberByConnection.delete(connectionId);
+    if (presence.subscriberByConnection.size === 0) {
+      presenceMap.delete(entry.participantId);
+    }
+    if (entry.state === 'open' && openCount(presence) === 0) {
+      logger?.info(
+        {
+          event: 'presence_stream_offline',
+          participantId: entry.participantId,
+          closeReason: reason,
+          streamDurationMs: now().getTime() - entry.subscribedAt.getTime(),
+          requestId: entry.requestId,
+        },
+        'presence stream offline',
+      );
+    }
+  }
+
+  function unsubscribeImpl(
+    subscriptionId: UUIDv7,
+    participantId: UUIDv7,
+    reason: StreamCloseReason,
+  ): void {
+    const found = findEntry(subscriptionId, participantId);
+    if (found === undefined) return;
+    removeEntry(found.presence, found.connectionId, found.entry, reason);
+  }
+
+  function safeClose(handle: SubscriberHandle, reason: StreamCloseReason, context: object): void {
+    try {
+      handle.close(reason);
+    } catch (err) {
+      logger?.warn(
+        {
+          event: 'presence_handle_close_failed',
+          ...context,
+          closeReason: reason,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'handle.close threw; entry already removed',
+      );
+    }
+  }
+
+  function evictOldest(participantId: UUIDv7, presence: ParticipantPresence): void {
+    let victimKey: UUIDv7 | undefined;
+    let victim: ActiveSubscriber | undefined;
+    // Strict `<` keeps the earliest-inserted entry on a timestamp tie.
+    for (const [key, sub] of presence.subscriberByConnection) {
+      if (victim === undefined || sub.subscribedAt.getTime() < victim.subscribedAt.getTime()) {
+        victimKey = key;
+        victim = sub;
+      }
+    }
+    if (victim === undefined || victimKey === undefined) return;
+    // Remove first so the cap slot is free even if close() misbehaves.
+    removeEntry(presence, victimKey, victim, 'evicted_lru');
+    logger?.info(
+      {
+        event: 'presence_stream_evicted_lru',
+        participantId,
+        victimSubscriptionId: victim.subscriptionId,
+        victimSubscribedAt: victim.subscribedAt.toISOString(),
+      },
+      'presence stream evicted at cap',
+    );
+    safeClose(victim.handle, 'evicted_lru', {
+      participantId,
+      subscriptionId: victim.subscriptionId,
     });
   }
 
-  function getOrCreate(participantId: UUIDv7): ParticipantPresence {
-    let entry = presenceMap.get(participantId);
-    if (!entry) {
-      entry = { subscriberByConnection: new Map() };
-      presenceMap.set(participantId, entry);
-    }
-    return entry;
-  }
-
-  // Module-private closure form so the returned object's methods don't depend
-  // on `this` binding. Callers that destructure (`const { subscribe } = reg;`)
-  // would otherwise hit `Cannot read properties of undefined`.
-  function unsubscribeImpl(subscriptionId: UUIDv7, participantId: UUIDv7): void {
+  function closeAll(participantId: UUIDv7, reason: StreamCloseReason): void {
     const presence = presenceMap.get(participantId);
-    if (!presence) return;
-    // Lookup by subscriptionId — O(n) where n ≤ cap (default 16).
-    let matchedConnectionId: UUIDv7 | undefined;
-    for (const [connectionId, sub] of presence.subscriberByConnection) {
-      if (sub.subscriptionId === subscriptionId) {
-        matchedConnectionId = connectionId;
-        break;
-      }
-    }
-    if (matchedConnectionId === undefined) return;
-    presence.subscriberByConnection.delete(matchedConnectionId);
-    if (presence.subscriberByConnection.size === 0) {
-      presenceMap.delete(participantId);
-    }
-  }
-
-  function sweepStale(snapshotNow: Date): void {
-    if (idleTimeoutMs === null || idleTimeoutMs <= 0) return;
-    const cutoff = snapshotNow.getTime() - idleTimeoutMs;
-    // Snapshot of (participantId, subscriber) tuples so that mutations during
-    // unsubscribe do not corrupt iteration.
-    const toEvict: Array<{
-      participantId: UUIDv7;
-      subscriptionId: UUIDv7;
-      lastSeenAt: Date;
-    }> = [];
-    for (const [participantId, presence] of presenceMap) {
-      for (const sub of presence.subscriberByConnection.values()) {
-        if (sub.lastSeenAt.getTime() <= cutoff) {
-          toEvict.push({
-            participantId,
-            subscriptionId: sub.subscriptionId,
-            lastSeenAt: sub.lastSeenAt,
-          });
-        }
-      }
-    }
-    for (const entry of toEvict) {
-      unsubscribeImpl(entry.subscriptionId, entry.participantId);
-      logger?.info(
-        {
-          event: 'presence_session_evicted_idle',
-          participantId: entry.participantId,
-          subscriptionId: entry.subscriptionId,
-          lastSeenAt: entry.lastSeenAt.toISOString(),
-          idleTimeoutMs,
-        },
-        'presence session evicted by idle sweep',
-      );
-    }
-  }
-
-  // Install the periodic sweep when both knobs are configured. A null/0 on
-  // either knob keeps the registry in Slice 0 mode (no auto-eviction).
-  let sweepTimer: NodeJS.Timeout | null = null;
-  if (idleTimeoutMs !== null && idleTimeoutMs > 0 && sweepIntervalMs > 0) {
-    sweepTimer = setInterval(() => {
-      try {
-        sweepStale(now());
-      } catch (err) {
-        // Defensive: a thrown error inside an interval callback would surface
-        // as `unhandledException` in Node — guard it.
-        logger?.error(
-          {
-            event: 'presence_sweep_failed',
-            err: err instanceof Error ? err.message : String(err),
-          },
-          'presence sweep iteration failed',
-        );
-      }
-    }, sweepIntervalMs);
-    // The sweep is a janitor, not a critical path. Don't keep the event loop
-    // alive when the only pending work is the next sweep tick.
-    if (typeof sweepTimer.unref === 'function') {
-      sweepTimer.unref();
+    if (presence === undefined) return;
+    const entries = Array.from(presence.subscriberByConnection.entries());
+    for (const [connectionId, entry] of entries) {
+      removeEntry(presence, connectionId, entry, reason);
+      safeClose(entry.handle, reason, { participantId, subscriptionId: entry.subscriptionId });
     }
   }
 
   return {
-    subscribe(input) {
-      // Defense-in-depth: the verifier already enforces state==='active' (Auth
-      // step 7), but tests and internal callers may bypass it. The check is a
-      // single property read — cheap.
-      if (input.callerContext.current.state !== 'active') {
-        return Promise.reject(
-          new WaggleError('PARTICIPANT_NOT_ACTIVE_FOR_SUBSCRIBE', {
-            subCode: input.callerContext.current.state,
-            message: 'Participant is not active; subscribe rejected',
-          }),
-        );
+    async subscribe(input) {
+      if (isShutDown) {
+        throw new WaggleError('INVALID_INPUT', {
+          subCode: 'registry_shut_down',
+          message: 'Presence registry is shut down; subscribe rejected',
+        });
+      }
+      const participantId = input.callerContext.participantId;
+
+      // Fresh state check. Must be the LAST await before the insertion below:
+      // a suspension applied before this read is seen here; one applied after
+      // the insertion closes the entry through `closeParticipantStreams`.
+      let state: string = input.callerContext.current.state;
+      if (state === 'active' && config.participantsRepo !== undefined) {
+        const live = await config.participantsRepo.getParticipantState(participantId);
+        state = live?.state ?? 'not_found';
+      }
+      if (state !== 'active') {
+        throw new WaggleError('PARTICIPANT_NOT_ACTIVE_FOR_SUBSCRIBE', {
+          subCode: state,
+          message: 'Participant is not active; subscribe rejected',
+        });
+      }
+      // The shutdown may have happened while awaiting the state read.
+      if (isShutDown) {
+        throw new WaggleError('INVALID_INPUT', {
+          subCode: 'registry_shut_down',
+          message: 'Presence registry is shut down; subscribe rejected',
+        });
       }
 
-      const participantId = input.callerContext.participantId;
-      const presence = getOrCreate(participantId);
+      // A handle re-registered under the same connectionId replaces its entry
+      // instead of counting twice (buggy transport self-sabotages, nobody else).
+      const connectionId = input.handle.connectionId;
+      const current = presenceMap.get(participantId);
+      const existing = current?.subscriberByConnection.get(connectionId);
+      if (current !== undefined && existing !== undefined) {
+        removeEntry(current, connectionId, existing, 'client_closed');
+      }
 
-      if (presence.subscriberByConnection.size >= maxSessions) {
-        // Try LRU eviction before rejecting. The oldest entry by lastSeenAt
-        // is evicted iff it meets `lruEvictThresholdMs`; otherwise the new
-        // subscribe is rejected as in Slice 0.
-        const evicted = tryLruEvict(participantId, presence);
-        if (!evicted) {
-          return Promise.reject(
-            new WaggleError('INVALID_INPUT', {
-              subCode: 'too_many_sessions',
-              message: `Participant has reached the cap of ${String(maxSessions)} simultaneous sessions`,
-            }),
-          );
-        }
+      const beforeInsert = presenceMap.get(participantId);
+      if (beforeInsert !== undefined && beforeInsert.subscriberByConnection.size >= maxSessions) {
+        evictOldest(participantId, beforeInsert);
+      }
+
+      let presence = presenceMap.get(participantId);
+      if (presence === undefined) {
+        presence = { subscriberByConnection: new Map() };
+        presenceMap.set(participantId, presence);
       }
 
       const subscriptionId = uuidv7();
-      const tNow = now();
+      const subscribedAt = now();
       const entry: ActiveSubscriber = {
         subscriptionId,
+        participantId,
         handle: input.handle,
-        subscribedAt: tNow,
-        lastSeenAt: tNow,
+        subscribedAt,
+        requestId: input.requestId ?? uuidv7(),
+        state: 'pending',
       };
-      presence.subscriberByConnection.set(input.handle.connectionId, entry);
+      presence.subscriberByConnection.set(connectionId, entry);
 
-      const close = (): void => {
-        unsubscribeImpl(subscriptionId, participantId);
-      };
-      // The handle wires its own close detection (socket dead → invoke this).
-      input.handle.onClose(close);
-
-      // Fire the post-subscribe hook AFTER the registry mutation but BEFORE
-      // returning. Composition wires `replay.scheduleReplayFor` here so the
-      // replay is queued for the next tick (setImmediate), not blocking us.
-      try {
-        config.onSubscribed?.({ participantId, subscriptionId, handle: input.handle });
-      } catch {
-        // Swallow — subscribe MUST NOT fail because of a hook bug. If the
-        // composition wired something that throws, we still return the
-        // subscription; the client can use polling fallbacks.
-      }
-
-      // PRY-030 — persist `last_connected_at` as a non-blocking side effect for
-      // worker/scout callers. Hivekeepers are skipped (the column lives on the
-      // `agents` table; Hivekeepers don't have one). The UPDATE happens off the
-      // hot path (`Promise.resolve().then(...)`); a rejection is logged and
-      // swallowed so subscribe never fails because of persistence flakiness.
-      if (config.participantsRepo !== undefined && input.callerContext.kind !== 'hivekeeper') {
-        const repo = config.participantsRepo;
-        void Promise.resolve()
-          .then(() => repo.updateAgentLastConnectedAt(participantId, tNow))
-          .catch((err: unknown) => {
-            logger?.warn(
-              {
-                event: 'presence_last_connected_at_update_failed',
-                participantId,
-                subscriptionId,
-                err,
-              },
-              'last_connected_at update failed; subscribe already succeeded',
-            );
-          });
-      }
-
-      logger?.info(
-        {
-          event: 'presence_subscribe_success',
-          participantId,
-          subscriptionId,
-          connectionId: input.handle.connectionId,
-        },
-        'presence subscribe success',
-      );
+      input.handle.onClose((reason) => {
+        unsubscribeImpl(subscriptionId, participantId, reason);
+      });
 
       const subscription: Subscription = {
         id: subscriptionId,
         participantId,
-        subscribedAt: tNow,
-        close,
+        subscribedAt,
+        ready() {
+          const found = findEntry(subscriptionId, participantId);
+          if (found === undefined || found.entry.state === 'open') return;
+          const wasOnline = openCount(found.presence) > 0;
+          found.entry.state = 'open';
+          if (!wasOnline) {
+            logger?.info(
+              {
+                event: 'presence_stream_online',
+                participantId,
+                streamCount: openCount(found.presence),
+                requestId: found.entry.requestId,
+              },
+              'presence stream online',
+            );
+          }
+          try {
+            config.onReady?.({ participantId, subscriptionId, handle: input.handle });
+          } catch (err) {
+            // A buggy hook must not break the stream; the client can still
+            // recover through check_unread_messages.
+            logger?.warn(
+              {
+                event: 'presence_on_ready_hook_failed',
+                participantId,
+                subscriptionId,
+                err: err instanceof Error ? err.message : String(err),
+              },
+              'onReady hook threw',
+            );
+          }
+        },
+        close(reason = 'client_closed') {
+          unsubscribeImpl(subscriptionId, participantId, reason);
+        },
       };
-      return Promise.resolve(subscription);
+      return subscription;
     },
 
     unsubscribe: unsubscribeImpl,
 
+    isOpen(subscriptionId, participantId) {
+      return findEntry(subscriptionId, participantId)?.entry.state === 'open';
+    },
+
     getPresence(participantId) {
       const presence = presenceMap.get(participantId);
-      if (!presence || presence.subscriberByConnection.size === 0) {
-        return { online: false, sessionCount: 0, sessionsSubscribedAt: [] };
-      }
-      const subscribedAts: Date[] = [];
-      for (const sub of presence.subscriberByConnection.values()) {
-        subscribedAts.push(sub.subscribedAt);
+      const streamsSubscribedAt: Date[] = [];
+      if (presence !== undefined) {
+        for (const sub of presence.subscriberByConnection.values()) {
+          if (sub.state === 'open') streamsSubscribedAt.push(sub.subscribedAt);
+        }
       }
       return {
-        online: true,
-        sessionCount: subscribedAts.length,
-        sessionsSubscribedAt: subscribedAts,
+        online: streamsSubscribedAt.length > 0,
+        streamCount: streamsSubscribedAt.length,
+        streamsSubscribedAt,
       };
     },
 
     async forEachSubscriber(participantId, fn, onError) {
       const presence = presenceMap.get(participantId);
-      if (!presence || presence.subscriberByConnection.size === 0) return;
-      // Snapshot the (handle, subscriber) pairs before iterating — `fn` may
-      // trigger `unsubscribe` (e.g. a zombie handle's deliver throws → handle
-      // invokes onClose) and mutating the Map mid-iteration would skip
-      // entries. We carry the subscriber reference so a successful deliver
-      // can update its `lastSeenAt` without a second lookup.
-      const pairs: Array<{ handle: SubscriberHandle; sub: ActiveSubscriber }> = [];
+      if (presence === undefined) return;
+      const handles: SubscriberHandle[] = [];
       for (const sub of presence.subscriberByConnection.values()) {
-        pairs.push({ handle: sub.handle, sub });
+        if (sub.state === 'open') handles.push(sub.handle);
       }
-      for (const { handle, sub } of pairs) {
+      for (const handle of handles) {
         try {
           await fn(handle);
-          // Post-success: refresh `lastSeenAt` so a client that only receives
-          // pushes (no tool calls) is not evicted by the idle sweep.
-          sub.lastSeenAt = now();
         } catch (err) {
-          // Per the tech spec: error-isolated by handle. One zombie does not
-          // block the rest of the fan-out.
+          // Error-isolated per handle: one zombie does not block the rest.
           if (onError) {
             try {
               onError(handle, err);
@@ -417,66 +377,19 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
       }
     },
 
-    touch(subscriptionId, participantId) {
-      // Touch is a no-op when neither knob is set — preserves Slice 0
-      // semantics for callers that don't run the sweep.
-      if (idleTimeoutMs === null || idleTimeoutMs <= 0) return;
-      const presence = presenceMap.get(participantId);
-      if (!presence) return;
-      for (const sub of presence.subscriberByConnection.values()) {
-        if (sub.subscriptionId === subscriptionId) {
-          sub.lastSeenAt = now();
-          return;
-        }
-      }
+    closeParticipantStreams(participantId, reason) {
+      closeAll(participantId, reason);
     },
 
     shutdown() {
-      if (sweepTimer !== null) {
-        clearInterval(sweepTimer);
-        sweepTimer = null;
+      isShutDown = true;
+      for (const participantId of Array.from(presenceMap.keys())) {
+        closeAll(participantId, 'shutdown');
       }
     },
 
-    __sessionCount(participantId) {
+    __streamCount(participantId) {
       return presenceMap.get(participantId)?.subscriberByConnection.size ?? 0;
     },
-
-    __sweepStale(snapshotNow) {
-      sweepStale(snapshotNow);
-    },
   };
-
-  /**
-   * Attempts LRU eviction on cap-hit. Returns true iff an entry was evicted
-   * (caller can proceed with the new subscribe). Returns false when no entry
-   * is old enough — caller must reject with `too_many_sessions`.
-   */
-  function tryLruEvict(participantId: UUIDv7, presence: ParticipantPresence): boolean {
-    if (lruEvictThresholdMs === null || lruEvictThresholdMs <= 0) return false;
-    let oldest: ActiveSubscriber | null = null;
-    for (const sub of presence.subscriberByConnection.values()) {
-      if (oldest === null || sub.lastSeenAt.getTime() < oldest.lastSeenAt.getTime()) {
-        oldest = sub;
-      }
-    }
-    if (oldest === null) return false;
-    const idleMs = now().getTime() - oldest.lastSeenAt.getTime();
-    if (idleMs < lruEvictThresholdMs) return false;
-    const evictedId = oldest.subscriptionId;
-    const evictedLastSeenAt = oldest.lastSeenAt;
-    unsubscribeImpl(evictedId, participantId);
-    logger?.info(
-      {
-        event: 'presence_session_evicted_lru',
-        participantId,
-        subscriptionId: evictedId,
-        lastSeenAt: evictedLastSeenAt.toISOString(),
-        idleMs,
-        lruEvictThresholdMs,
-      },
-      'presence session evicted by LRU at cap-hit',
-    );
-    return true;
-  }
 }

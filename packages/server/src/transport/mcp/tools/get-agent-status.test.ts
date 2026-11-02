@@ -88,7 +88,7 @@ function buildDeps(
   const canSeeMock = vi.fn().mockResolvedValue(opts.canSee ?? true);
   const getPresenceMock = vi
     .fn()
-    .mockReturnValue(opts.presence ?? { online: false, sessionCount: 0, sessionsSubscribedAt: [] });
+    .mockReturnValue(opts.presence ?? { online: false, streamCount: 0, streamsSubscribedAt: [] });
   const getParticipantStateMock = vi.fn().mockResolvedValue(
     opts.participantState === undefined
       ? {
@@ -172,7 +172,7 @@ describe('createGetAgentStatusHandler', () => {
     const subscribedAt = new Date('2026-04-30T12:00:00Z');
     const lastRequestAt = new Date('2026-04-30T13:00:00Z');
     const deps = buildDeps({
-      presence: { online: true, sessionCount: 1, sessionsSubscribedAt: [subscribedAt] },
+      presence: { online: true, streamCount: 1, streamsSubscribedAt: [subscribedAt] },
       participantState: { state: 'active' },
       agent: makeAgent({ lastConnectedAt: lastRequestAt }),
     });
@@ -190,7 +190,7 @@ describe('createGetAgentStatusHandler', () => {
   it('an agent that only calls tools is offline, with a recent last_connected_at', async () => {
     const lastRequestAt = new Date('2026-04-30T13:00:00Z');
     const deps = buildDeps({
-      presence: { online: false, sessionCount: 0, sessionsSubscribedAt: [] },
+      presence: { online: false, streamCount: 0, streamsSubscribedAt: [] },
       participantState: { state: 'active' },
       agent: makeAgent({ lastConnectedAt: lastRequestAt }),
     });
@@ -206,7 +206,7 @@ describe('createGetAgentStatusHandler', () => {
     const t1 = new Date('2026-05-01T10:00:00.000Z');
     const persisted = new Date('2026-04-30T08:00:00.000Z');
     const deps = buildDeps({
-      presence: { online: true, sessionCount: 1, sessionsSubscribedAt: [t1] },
+      presence: { online: true, streamCount: 1, streamsSubscribedAt: [t1] },
       participantState: { state: 'suspended' },
       agent: makeAgent({ state: 'suspended', lastConnectedAt: persisted }),
     });
@@ -219,7 +219,7 @@ describe('createGetAgentStatusHandler', () => {
   it('offline with persisted last_connected_at → returns the persisted ISO string', async () => {
     const persisted = new Date('2026-04-30T08:00:00.000Z');
     const deps = buildDeps({
-      presence: { online: false, sessionCount: 0, sessionsSubscribedAt: [] },
+      presence: { online: false, streamCount: 0, streamsSubscribedAt: [] },
       participantState: { state: 'active' },
       agent: makeAgent({ lastConnectedAt: persisted }),
     });
@@ -234,7 +234,7 @@ describe('createGetAgentStatusHandler', () => {
 
   it('offline never-connected (last_connected_at null) → wire null', async () => {
     const deps = buildDeps({
-      presence: { online: false, sessionCount: 0, sessionsSubscribedAt: [] },
+      presence: { online: false, streamCount: 0, streamsSubscribedAt: [] },
       participantState: { state: 'active' },
       agent: makeAgent({ lastConnectedAt: null }),
     });
@@ -285,7 +285,7 @@ describe('createGetAgentStatusHandler', () => {
 
   it('participantState=null (deleted between visibility and state read) → offline + null', async () => {
     const deps = buildDeps({
-      presence: { online: false, sessionCount: 0, sessionsSubscribedAt: [] },
+      presence: { online: false, streamCount: 0, streamsSubscribedAt: [] },
       participantState: null,
       agent: null,
     });
@@ -312,7 +312,7 @@ describe('createGetAgentStatusHandler', () => {
 
   it('hivekeeper target — agent row is null but visible Hivekeeper → offline + null', async () => {
     const deps = buildDeps({
-      presence: { online: false, sessionCount: 0, sessionsSubscribedAt: [] },
+      presence: { online: false, streamCount: 0, streamsSubscribedAt: [] },
       participantState: { state: 'active' },
       agent: null, // findAgentById returns null because the target is a Hivekeeper, not an Agent.
     });

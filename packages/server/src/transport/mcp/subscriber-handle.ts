@@ -4,7 +4,10 @@ import type { Logger } from 'pino';
 import type { IdentityContext, UUIDv7 } from '#domain/auth/types.js';
 import type { WaggleNotification } from '#domain/notifications/waggle/types.js';
 
-import type { SubscriberHandle } from '#domain/notifications/presence/subscriber-handle.js';
+import type {
+  StreamCloseReason,
+  SubscriberHandle,
+} from '#domain/notifications/presence/subscriber-handle.js';
 
 /**
  * Minimal subset of the MCP SDK's `Server` that we depend on. Lets us mock the
@@ -105,13 +108,13 @@ export function buildChannelMeta(notification: WaggleNotification): Record<strin
 export function createMcpSubscriberHandle(deps: McpSubscriberHandleDeps): McpSubscriberHandle {
   const { callerContext, serverRef, logger } = deps;
   const connectionId: UUIDv7 = uuidv7();
-  const closeListeners: Array<() => void> = [];
+  const closeListeners: Array<(reason: StreamCloseReason) => void> = [];
 
-  function fireCloseListeners(): void {
+  function fireCloseListeners(reason: StreamCloseReason = 'client_closed'): void {
     const batch = closeListeners.splice(0);
     for (const cb of batch) {
       try {
-        cb();
+        cb(reason);
       } catch (err) {
         logger.warn({ event: 'subscriber_handle_onclose_listener_failed', err });
       }
@@ -174,7 +177,11 @@ export function createMcpSubscriberHandle(deps: McpSubscriberHandleDeps): McpSub
       }
     },
 
-    onClose(callback: () => void): void {
+    close(reason: StreamCloseReason): void {
+      fireCloseListeners(reason);
+    },
+
+    onClose(callback: (reason: StreamCloseReason) => void): void {
       closeListeners.push(callback);
     },
 

@@ -55,7 +55,10 @@ import { migrateToLatest } from '#persistence/migrate.js';
 import { dateToIso, jsonStringify } from '#persistence/type-mappers.js';
 import { createLogger, type Logger } from '#observability/logger.js';
 
-import type { SubscriberHandle } from '#domain/notifications/presence/subscriber-handle.js';
+import type {
+  StreamCloseReason,
+  SubscriberHandle,
+} from '#domain/notifications/presence/subscriber-handle.js';
 import type { WaggleNotification } from './types.js';
 
 const SYSTEM_CALLER: CallerContext = {
@@ -75,7 +78,7 @@ interface MockHandle extends SubscriberHandle {
 
 function mockHandle(callerContext: IdentityContext): MockHandle {
   const captured: WaggleNotification[] = [];
-  let onCloseCb: (() => void) | null = null;
+  let onCloseCb: ((reason: StreamCloseReason) => void) | null = null;
   return {
     connectionId: uuidv7(),
     callerContext,
@@ -84,11 +87,14 @@ function mockHandle(callerContext: IdentityContext): MockHandle {
       captured.push(notification);
       return Promise.resolve();
     },
-    onClose(cb: () => void) {
+    close(reason: StreamCloseReason) {
+      onCloseCb?.(reason);
+    },
+    onClose(cb: (reason: StreamCloseReason) => void) {
       onCloseCb = cb;
     },
     triggerClose() {
-      onCloseCb?.();
+      onCloseCb?.('client_closed');
     },
   };
 }
@@ -279,6 +285,7 @@ describe('PRY-005 Waggle + Presence Slice 0 — smoke E2E', () => {
       callerContext: world.ctxB,
       handle,
     });
+    sub.ready();
 
     expect(sub.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(world.notifications.presenceRegistry.getPresence(world.workerB.id).online).toBe(true);
@@ -287,10 +294,11 @@ describe('PRY-005 Waggle + Presence Slice 0 — smoke E2E', () => {
   // ── Steps 5-7 — online path: send → wait window → mock receives Waggle ──
   it('online path: workerA sends to workerB → mockHandleB receives kind=online with right payload', async () => {
     const handle = mockHandle(world.ctxB);
-    await world.notifications.presenceRegistry.subscribe({
+    const sub = await world.notifications.presenceRegistry.subscribe({
       callerContext: world.ctxB,
       handle,
     });
+    sub.ready();
     // Drain the post-subscribe replay (Cell is empty; the replay path returns
     // null from the builder so nothing is delivered).
     await sleep(FLUSH_GRACE_MS);
@@ -320,6 +328,7 @@ describe('PRY-005 Waggle + Presence Slice 0 — smoke E2E', () => {
       callerContext: world.ctxB,
       handle,
     });
+    sub.ready();
 
     sub.close();
 
@@ -340,10 +349,11 @@ describe('PRY-005 Waggle + Presence Slice 0 — smoke E2E', () => {
 
     // Now subscribe — replay should fire.
     const handle = mockHandle(world.ctxB);
-    await world.notifications.presenceRegistry.subscribe({
+    const sub = await world.notifications.presenceRegistry.subscribe({
       callerContext: world.ctxB,
       handle,
     });
+    sub.ready();
     await sleep(FLUSH_GRACE_MS);
 
     const replayWaggles = handle.captured.filter((w) => w.kind === 'replay');
@@ -362,6 +372,7 @@ describe('PRY-005 Waggle + Presence Slice 0 — smoke E2E', () => {
       callerContext: world.ctxB,
       handle: handle1,
     });
+    sub.ready();
     await sleep(FLUSH_GRACE_MS);
     expect(world.notifications.presenceRegistry.getPresence(world.workerB.id).online).toBe(true);
 
@@ -381,10 +392,11 @@ describe('PRY-005 Waggle + Presence Slice 0 — smoke E2E', () => {
 
     // Step 9 — re-subscribe (with a fresh handle)
     const handle2 = mockHandle(world.ctxB);
-    await world.notifications.presenceRegistry.subscribe({
+    const sub2 = await world.notifications.presenceRegistry.subscribe({
       callerContext: world.ctxB,
       handle: handle2,
     });
+    sub2.ready();
     await sleep(FLUSH_GRACE_MS);
 
     const replays = handle2.captured.filter((w) => w.kind === 'replay');
