@@ -68,6 +68,7 @@ import {
   type SnapshotWriter,
 } from './snapshot-writer.js';
 import { createVisibilityEngineForProduction } from './visibility-engine-factory.js';
+import { createLastConnectedRefresher } from '#transport/mcp/auth-binding.js';
 import { createMcpTransport } from '#transport/mcp/server.js';
 import { createHttpHost } from '#transport/mcp/http-host.js';
 import type { HttpHost } from '#transport/mcp/http-host.js';
@@ -87,6 +88,10 @@ export interface WireConfig {
   keysDir?: string;
   /** Default 100. Hard cap server-side for `list_agents.pagination.limit` (PRY-029). */
   listAgentsMaxPageSize?: number;
+  /** From HIVE_MCP_ALLOWED_ORIGINS. Default empty: only clients without Origin pass. */
+  allowedOrigins?: string[];
+  /** From HIVE_MCP_ALLOWED_HOSTS. Default empty: Host is not validated. */
+  allowedHosts?: string[];
 }
 
 export interface WireDeps {
@@ -138,7 +143,19 @@ export function resolveWireConfigFromEnv(
         min: 1,
         max: 1000,
       }),
+    allowedOrigins: overrides.allowedOrigins ?? parseCsvEnv(env['HIVE_MCP_ALLOWED_ORIGINS']),
+    allowedHosts:
+      overrides.allowedHosts ??
+      parseCsvEnv(env['HIVE_MCP_ALLOWED_HOSTS']).map((host) => host.toLowerCase()),
   };
+}
+
+function parseCsvEnv(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 /**
@@ -228,7 +245,6 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
   // 7. MCP transport.
   const mcpTransport = createMcpTransport({
-    verifier,
     participantsRepo,
     cellsRepo,
     sender,
@@ -244,6 +260,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     {
       mcpTransport,
       verifier,
+      lastConnected: createLastConnectedRefresher({ participantsRepo, logger }),
       db,
       signingKeysProvider: () => signingKeys.values() as Iterable<SigningKey>,
       logger,
@@ -253,6 +270,8 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       host: cfg.httpHost,
       port: cfg.httpPort,
       readyzDbTimeoutMs: cfg.readyzDbTimeoutMs,
+      allowedOrigins: cfg.allowedOrigins,
+      allowedHosts: cfg.allowedHosts,
     },
   );
 

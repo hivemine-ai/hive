@@ -70,7 +70,7 @@ export interface ToolDefinition {
   name: ToolName;
   title: string;
   description: string;
-  inputSchema: z.ZodTypeAny;
+  inputSchema: z.ZodType;
   // The handler receives the parsed input + RequestContext; it returns an
   // arbitrary serialisable value that the SDK marshals as the tool result.
   handler: (input: unknown, ctx: RequestContext) => Promise<unknown>;
@@ -170,7 +170,7 @@ export function createToolCatalog(deps: ToolCatalogDeps): ToolDefinition[] {
       name: 'get_agent_status',
       title: 'Get agent status',
       description:
-        'Returns the presence (online/offline) and last_connected_at of an agent visible to the caller. last_connected_at is derived from the live session set when online, and from the persisted agents.last_connected_at when offline (null if the agent never connected).',
+        'Returns the presence (online/offline) and last_connected_at of an agent visible to the caller. online means reachable by push: the agent holds an open subscription to its own mailbox, so an agent that only calls tools is offline. last_connected_at is the last authenticated request of the agent (null if it never connected).',
       inputSchema: GetAgentStatusInputSchema,
       handler: async (input, ctx) => getAgentStatus(GetAgentStatusInputSchema.parse(input), ctx),
     },

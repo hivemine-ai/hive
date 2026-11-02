@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { CellError } from '#domain/cells/index.js';
+import { CellError, isCellError } from '#domain/cells/index.js';
 import type { Reader, ReadMailboxFilter, ReadMailboxInput } from '#domain/cells/index.js';
 
 import type { ReferenceResolver } from '../reference-resolver.js';
@@ -43,6 +43,21 @@ export interface ReadMailboxDeps {
   resolver: ReferenceResolver;
 }
 
+async function resolveSender(
+  resolver: ReferenceResolver,
+  reference: string,
+  ctx: RequestContext,
+): Promise<string> {
+  try {
+    return await resolver.resolveParticipantReference(reference, ctx.identity);
+  } catch (err) {
+    if (isCellError(err) && err.subCode === 'reference_unresolved') {
+      throw new CellError('INVALID_INPUT', { subCode: 'reference_unresolved' });
+    }
+    throw err;
+  }
+}
+
 export function createReadMailboxHandler(deps: ReadMailboxDeps) {
   return async function readMailbox(
     input: ReadMailboxToolInput,
@@ -71,10 +86,11 @@ export function createReadMailboxHandler(deps: ReadMailboxDeps) {
         // Closes INC-2026-001 #1 (PRY-020) — the previous implementation
         // resolved the reference but discarded the result, leaking ALL
         // mail to a caller that thought it was filtering by sender.
-        filter.from = await deps.resolver.resolveParticipantReference(
-          input.filter.from,
-          ctx.identity,
-        );
+        //
+        // Unlike list_agents there is no empty list that uniform privacy would justify
+        // here: the filter applies to the caller mailbox, so an unresolved reference is
+        // a bad input.
+        filter.from = await resolveSender(deps.resolver, input.filter.from, ctx);
       }
     }
 

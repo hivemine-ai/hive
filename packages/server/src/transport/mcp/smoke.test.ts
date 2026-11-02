@@ -10,21 +10,18 @@
 //   - Real VisibilityEngine (production factory; not stubbed — this slice
 //     proves the cross-component wiring end-to-end).
 //   - Real Notifications (Waggle Pipeline + Presence Registry).
-//   - Real MCP transport (server.ts + http-host.ts) with the SDK 1.29.0.
+//   - Real MCP transport (server.ts + http-host.ts) on SDK 2.x, revision 2026-07-28.
 //   - Two HTTP clients (worker-a, worker-b) using `fetch` global, sharing the
 //     same fastify host.
 //
-// The push-notification path (worker-b receives Waggle within quiet window)
-// is NOT covered by this smoke test because it requires an SSE stream open
-// on the client side — see Slice 1+ for transport-level notification delivery
-// validation. This smoke test instead asserts the polling path
-// (`check_unread_messages`, `read_mailbox`) which is demoable end-to-end.
+// The push path over `subscriptions/listen` belongs to PRY-077. This smoke test covers
+// the request path (`check_unread_messages`, `read_mailbox`), which is stateless.
 
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { v7 as uuidv7 } from 'uuid';
 
 import {
@@ -47,6 +44,7 @@ import { dateToIso, jsonStringify } from '#persistence/type-mappers.js';
 import { createLogger } from '#observability/logger.js';
 import type { Logger } from '#observability/logger.js';
 import { Writable } from 'node:stream';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 
 const SYSTEM_CALLER: CallerContext = {
   kind: 'system',
@@ -224,47 +222,52 @@ interface JsonRpcResponse {
 interface RpcOutcome {
   status: number;
   body: JsonRpcResponse | null;
-  sessionId: string | null;
   rawText: string;
 }
 
-async function rpc(
-  baseUrl: string,
-  jwt: string,
-  body: JsonRpcRequest,
-  sessionId?: string,
-): Promise<RpcOutcome> {
+const PROTOCOL_VERSION = '2026-07-28';
+
+function modernHeaders(jwt: string, body: JsonRpcRequest): Record<string, string> {
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     accept: 'application/json, text/event-stream',
     authorization: `Bearer ${jwt}`,
+    'mcp-protocol-version': PROTOCOL_VERSION,
+    'mcp-method': body.method,
   };
-  if (sessionId !== undefined) headers['mcp-session-id'] = sessionId;
+  const params = body.params as { name?: string; uri?: string } | undefined;
+  const name = params?.name ?? params?.uri;
+  if (name !== undefined) headers['mcp-name'] = name;
+  return headers;
+}
 
+function withEnvelope(body: JsonRpcRequest): JsonRpcRequest {
+  return {
+    ...body,
+    params: {
+      ...(body.params as Record<string, unknown> | undefined),
+      _meta: {
+        'io.modelcontextprotocol/protocolVersion': PROTOCOL_VERSION,
+        'io.modelcontextprotocol/clientCapabilities': {},
+        'io.modelcontextprotocol/clientInfo': { name: 'hive-smoke', version: '0' },
+      },
+    },
+  };
+}
+
+async function rpc(baseUrl: string, jwt: string, body: JsonRpcRequest): Promise<RpcOutcome> {
   const res = await fetch(`${baseUrl}/mcp`, {
     method: 'POST',
-    headers,
-    body: JSON.stringify(body),
+    headers: modernHeaders(jwt, body),
+    body: JSON.stringify(withEnvelope(body)),
   });
-  const returnedSession = res.headers.get('mcp-session-id');
   const contentType = res.headers.get('content-type') ?? '';
-
-  if (res.status === 202 || res.status === 204) {
-    // Notifications (no response expected) — drain and return.
-    await drainBody(res);
-    return { status: res.status, body: null, sessionId: returnedSession, rawText: '' };
-  }
 
   if (contentType.includes('text/event-stream') && res.body) {
     // SSE: read until we get a `data:` line whose JSON body matches the request id.
     const targetId = body.id;
     const { parsed, raw } = await readSseUntilIdRaw(res.body, targetId);
-    return {
-      status: res.status,
-      body: parsed,
-      sessionId: returnedSession,
-      rawText: parsed ? JSON.stringify(parsed) : raw,
-    };
+    return { status: res.status, body: parsed, rawText: parsed ? JSON.stringify(parsed) : raw };
   }
 
   const text = await res.text();
@@ -276,36 +279,7 @@ async function rpc(
       parsed = null;
     }
   }
-  return { status: res.status, body: parsed, sessionId: returnedSession, rawText: text };
-}
-
-async function sendNotification(
-  baseUrl: string,
-  jwt: string,
-  method: string,
-  sessionId: string,
-): Promise<void> {
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-    accept: 'application/json, text/event-stream',
-    authorization: `Bearer ${jwt}`,
-    'mcp-session-id': sessionId,
-  };
-  const res = await fetch(`${baseUrl}/mcp`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ jsonrpc: '2.0', method }),
-  });
-  await drainBody(res);
-}
-
-async function drainBody(res: Response): Promise<void> {
-  if (!res.body) return;
-  const reader = res.body.getReader();
-  while (true) {
-    const { done } = await reader.read();
-    if (done) break;
-  }
+  return { status: res.status, body: parsed, rawText: text };
 }
 
 async function readSseUntilIdRaw(
@@ -429,47 +403,6 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     expect(body.keys[0]?.kty).toBe('OKP');
   });
 
-  it('rejects cross-session identity hijack (Bob reusing Alice session id → 403)', async () => {
-    // 1. Alice initialises a session.
-    const initA = await rpc(world.baseUrl, world.jwtA, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'hijack-victim', version: '0' },
-      },
-    });
-    expect(initA.status).toBe(200);
-    const sessionA = initA.sessionId as string;
-    expect(sessionA).toBeTruthy();
-    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
-
-    // 2. Bob (different valid identity) sends a request reusing Alice's session id.
-    //    Defense MUST reject with 403 forbidden BEFORE the request reaches the
-    //    SDK transport — otherwise Bob would act as Alice on subsequent tool calls.
-    const res = await fetch(`${world.baseUrl}/mcp`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
-        authorization: `Bearer ${world.jwtB}`,
-        'mcp-session-id': sessionA,
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 99,
-        method: 'tools/call',
-        params: { name: 'get_agent_config', arguments: {} },
-      }),
-    });
-    expect(res.status).toBe(403);
-    const body = (await res.json()) as JsonRpcResponse;
-    expect(body.error?.code).toBe(-32002);
-    expect(body.error?.message).toBe('forbidden');
-  });
-
   it('rejects initialize without Bearer token (401)', async () => {
     const res = await fetch(`${world.baseUrl}/mcp`, {
       method: 'POST',
@@ -490,37 +423,14 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     expect(body.error?.code).toBe(-32001);
   });
 
-  it('AC1: full roundtrip — initialize → get_agent_config → send → check_unread → read_mailbox → mark_read → re-read', async () => {
-    // ── Step 5a: client A initialize ──
-    const initA = await rpc(world.baseUrl, world.jwtA, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'smoke-a', version: '0.1' },
-      },
-    });
-    expect(initA.status).toBe(200);
-    expect(initA.sessionId).toBeTruthy();
-    const sessionA = initA.sessionId as string;
-
-    // Send the `notifications/initialized` to complete the MCP handshake.
-    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
-
+  it('AC1: full roundtrip — get_agent_config → send → check_unread → read_mailbox → mark_read → re-read', async () => {
     // ── Step 5b: get_agent_config (worker-a) ──
-    const cfgA = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: { name: 'get_agent_config', arguments: {} },
-      },
-      sessionA,
-    );
+    const cfgA = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'get_agent_config', arguments: {} },
+    });
     const cfg = parseToolResult<{
       participant_id: string;
       kind: string;
@@ -534,41 +444,20 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     expect(cfg.owner_id).toBeTruthy();
     expect(cfg.capabilities).toContain('cell.send');
 
-    // ── Step 6: client B initialize ──
-    const initB = await rpc(world.baseUrl, world.jwtB, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'smoke-b', version: '0.1' },
-      },
-    });
-    expect(initB.status).toBe(200);
-    expect(initB.sessionId).toBeTruthy();
-    const sessionB = initB.sessionId as string;
-    await sendNotification(world.baseUrl, world.jwtB, 'notifications/initialized', sessionB);
-
     // ── Step 7: client A send_message → worker-b ──
-    const sendRpc = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      {
-        jsonrpc: '2.0',
-        id: 3,
-        method: 'tools/call',
-        params: {
-          name: 'send_message',
-          arguments: {
-            recipient: world.workerBId,
-            type: 'notification',
-            body: 'hello from A',
-          },
+    const sendRpc = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: {
+        name: 'send_message',
+        arguments: {
+          recipient: world.workerBId,
+          type: 'notification',
+          body: 'hello from A',
         },
       },
-      sessionA,
-    );
+    });
     const sendResult = parseToolResult<{
       message_id: string;
       sent_at: string;
@@ -579,33 +468,23 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     expect(sendResult.replayed).toBe(false);
 
     // ── Step 8a: client B check_unread_messages ──
-    const checkRpc = await rpc(
-      world.baseUrl,
-      world.jwtB,
-      {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: { name: 'check_unread_messages', arguments: {} },
-      },
-      sessionB,
-    );
+    const checkRpc = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'check_unread_messages', arguments: {} },
+    });
     const summary = parseToolResult<{ unread_count: number; sender_ids: string[] }>(checkRpc);
     expect(summary.unread_count).toBe(1);
     expect(summary.sender_ids).toEqual([world.workerAId]);
 
     // ── Step 8b: client B read_mailbox → message in 'stored' state ──
-    const readRpc = await rpc(
-      world.baseUrl,
-      world.jwtB,
-      {
-        jsonrpc: '2.0',
-        id: 3,
-        method: 'tools/call',
-        params: { name: 'read_mailbox', arguments: {} },
-      },
-      sessionB,
-    );
+    const readRpc = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'read_mailbox', arguments: {} },
+    });
     const readResult = parseToolResult<{
       messages: Array<{
         id: string;
@@ -624,33 +503,23 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     const messageId = readResult.messages[0]?.id as string;
 
     // ── Step 8c: client B mark_read → marked: [id] ──
-    const markRpc = await rpc(
-      world.baseUrl,
-      world.jwtB,
-      {
-        jsonrpc: '2.0',
-        id: 4,
-        method: 'tools/call',
-        params: { name: 'mark_read', arguments: { message_ids: [messageId] } },
-      },
-      sessionB,
-    );
+    const markRpc = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: { name: 'mark_read', arguments: { message_ids: [messageId] } },
+    });
     const markResult = parseToolResult<{ marked: string[]; ignored: string[] }>(markRpc);
     expect(markResult.marked).toEqual([messageId]);
     expect(markResult.ignored).toEqual([]);
 
     // ── Step 8d: client B read_mailbox → same message, state: 'read' ──
-    const reReadRpc = await rpc(
-      world.baseUrl,
-      world.jwtB,
-      {
-        jsonrpc: '2.0',
-        id: 5,
-        method: 'tools/call',
-        params: { name: 'read_mailbox', arguments: {} },
-      },
-      sessionB,
-    );
+    const reReadRpc = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'tools/call',
+      params: { name: 'read_mailbox', arguments: {} },
+    });
     const reRead = parseToolResult<{
       messages: Array<{ id: string; state: string }>;
     }>(reReadRpc);
@@ -659,69 +528,32 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
   });
 
   it('PRY-028 AC-7: reply_to roundtrip — A sends to B → B replies via reply_to → A receives reply with reply_to populated', async () => {
-    // Initialize both sessions.
-    const initA = await rpc(world.baseUrl, world.jwtA, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'smoke-a', version: '0.1' },
-      },
-    });
-    const sessionA = initA.sessionId as string;
-    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
-
-    const initB = await rpc(world.baseUrl, world.jwtB, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'smoke-b', version: '0.1' },
-      },
-    });
-    const sessionB = initB.sessionId as string;
-    await sendNotification(world.baseUrl, world.jwtB, 'notifications/initialized', sessionB);
-
     // Step 1: A sends a request to B.
-    const sendRpc = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: {
-          name: 'send_message',
-          arguments: {
-            recipient: world.workerBId,
-            type: 'request',
-            body: 'are you there?',
-          },
+    const sendRpc = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'send_message',
+        arguments: {
+          recipient: world.workerBId,
+          type: 'request',
+          body: 'are you there?',
         },
       },
-      sessionA,
-    );
+    });
     const originalSendResult = parseToolResult<{ message_id: string }>(sendRpc);
     const originalMessageId = originalSendResult.message_id;
 
     // Step 2: B reads its mailbox to discover the message id (the original
     // message_id from send_message is also valid; reading is what a real
     // client would do).
-    const readRpc = await rpc(
-      world.baseUrl,
-      world.jwtB,
-      {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: { name: 'read_mailbox', arguments: {} },
-      },
-      sessionB,
-    );
+    const readRpc = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'read_mailbox', arguments: {} },
+    });
     const readForB = parseToolResult<{
       messages: Array<{ id: string; from: string; reply_to: string | null }>;
     }>(readRpc);
@@ -732,24 +564,19 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
 
     // Step 3: B replies via reply_to. The handler resolves recipient = A
     // automatically from the original message's from_participant_id.
-    const replyRpc = await rpc(
-      world.baseUrl,
-      world.jwtB,
-      {
-        jsonrpc: '2.0',
-        id: 3,
-        method: 'tools/call',
-        params: {
-          name: 'reply_to',
-          arguments: {
-            message_id: originalMessageId,
-            type: 'response',
-            body: 'yes I am here',
-          },
+    const replyRpc = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: {
+        name: 'reply_to',
+        arguments: {
+          message_id: originalMessageId,
+          type: 'response',
+          body: 'yes I am here',
         },
       },
-      sessionB,
-    );
+    });
     const replyResult = parseToolResult<{
       message_id: string;
       replayed: boolean;
@@ -759,17 +586,12 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
 
     // Step 4: A reads its mailbox and finds the reply with reply_to populated
     // pointing back at the original message id.
-    const readForA = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      {
-        jsonrpc: '2.0',
-        id: 3,
-        method: 'tools/call',
-        params: { name: 'read_mailbox', arguments: {} },
-      },
-      sessionA,
-    );
+    const readForA = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'read_mailbox', arguments: {} },
+    });
     const aMailbox = parseToolResult<{
       messages: Array<{
         id: string;
@@ -787,39 +609,21 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
   });
 
   it('PRY-028 AC-2: reply_to with a message_id that is not in the caller cell hard-fails with -32602 invalid input', async () => {
-    const initB = await rpc(world.baseUrl, world.jwtB, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'smoke-b', version: '0.1' },
-      },
-    });
-    const sessionB = initB.sessionId as string;
-    await sendNotification(world.baseUrl, world.jwtB, 'notifications/initialized', sessionB);
-
     // B has never received a message; any UUIDv7 we pass is not in B's cell.
     const fakeMessageId = '01900000-0000-7000-8000-deadbeefdead';
-    const replyRpc = await rpc(
-      world.baseUrl,
-      world.jwtB,
-      {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: {
-          name: 'reply_to',
-          arguments: {
-            message_id: fakeMessageId,
-            type: 'response',
-            body: 'whatever',
-          },
+    const replyRpc = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'reply_to',
+        arguments: {
+          message_id: fakeMessageId,
+          type: 'response',
+          body: 'whatever',
         },
       },
-      sessionB,
-    );
+    });
 
     // The MCP SDK marshals tool errors as a JSON-RPC error envelope on the
     // top-level response. Per F-S2 invariant the wire message is the literal
@@ -830,25 +634,11 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
   });
 
   it('PRY-030 AC-5 (closes the v0.1 catalog): tools/list exposes exactly 8 tools and includes get_agent_status', async () => {
-    const initA = await rpc(world.baseUrl, world.jwtA, {
+    const listRpc = await rpc(world.baseUrl, world.jwtA, {
       jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'smoke-list-agents', version: '0.1' },
-      },
+      id: 2,
+      method: 'tools/list',
     });
-    const sessionA = initA.sessionId as string;
-    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
-
-    const listRpc = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
-      sessionA,
-    );
     const result = listRpc.body?.result as { tools: Array<{ name: string }> };
     expect(result.tools).toBeDefined();
     expect(result.tools.length).toBe(8);
@@ -866,30 +656,12 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
   });
 
   it('PRY-029 AC-2 + AC-9: list_agents returns visible agents with the wire shape and excludes hivekeepers', async () => {
-    const initA = await rpc(world.baseUrl, world.jwtA, {
+    const listAgentsRpc = await rpc(world.baseUrl, world.jwtA, {
       jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'smoke-list-agents-happy', version: '0.1' },
-      },
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'list_agents', arguments: {} },
     });
-    const sessionA = initA.sessionId as string;
-    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
-
-    const listAgentsRpc = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: { name: 'list_agents', arguments: {} },
-      },
-      sessionA,
-    );
 
     const listView = parseToolResult<{
       agents: Array<{
@@ -925,34 +697,16 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
   });
 
   it('PRY-029 AC-3 + AC-5: filter type=worker and capability propagate to the list', async () => {
-    const initA = await rpc(world.baseUrl, world.jwtA, {
+    // Filter by capability that workerA has but no other agent declares.
+    const listRpc = await rpc(world.baseUrl, world.jwtA, {
       jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
+      id: 2,
+      method: 'tools/call',
       params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'smoke-list-agents-filter', version: '0.1' },
+        name: 'list_agents',
+        arguments: { filter: { type: 'worker', capability: 'cell.send' } },
       },
     });
-    const sessionA = initA.sessionId as string;
-    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
-
-    // Filter by capability that workerA has but no other agent declares.
-    const listRpc = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: {
-          name: 'list_agents',
-          arguments: { filter: { type: 'worker', capability: 'cell.send' } },
-        },
-      },
-      sessionA,
-    );
 
     const listView = parseToolResult<{
       agents: Array<{ id: string; type: string; capabilities: string[] }>;
@@ -967,139 +721,423 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     }
   });
 
-  // PRY-030 AC-6 — get_agent_status full lifecycle. Worker B is queried while
-  // never-connected (null), then it opens a session (online with timestamp),
-  // then it closes (offline with persisted timestamp).
-  it('PRY-030 AC-6: get_agent_status across never-connected → online → offline transitions', async () => {
-    // Step 1: workerA initializes its own session.
-    const initA = await rpc(world.baseUrl, world.jwtA, {
+  // get_agent_status.online means reachable by push. An agent that only calls tools
+  // holds no stream: it stays offline while its last_connected_at moves.
+  it('get_agent_status: a tools-only agent is offline, and any request refreshes last_connected_at', async () => {
+    const statusOfB = async () =>
+      parseToolResult<{
+        participant_id: string;
+        presence: 'online' | 'offline';
+        last_connected_at: string | null;
+      }>(
+        await rpc(world.baseUrl, world.jwtA, {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: { name: 'get_agent_status', arguments: { participant: world.workerBId } },
+        }),
+      );
+
+    const never = await statusOfB();
+    expect(never.participant_id).toBe(world.workerBId);
+    expect(never.presence).toBe('offline');
+    expect(never.last_connected_at).toBeNull();
+
+    const beforeRequest = Date.now();
+    const cfg = await rpc(world.baseUrl, world.jwtB, {
       jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'smoke-get-agent-status-a', version: '0.1' },
-      },
+      id: 3,
+      method: 'tools/list',
     });
-    const sessionA = initA.sessionId as string;
-    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionA);
+    expect(cfg.status).toBe(200);
 
-    // Step 2: workerA queries get_agent_status(workerB). workerB has not
-    // connected yet → presence offline + last_connected_at null.
-    const queryWorkerBId = world.workerBId;
-    const status1Rpc = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: { name: 'get_agent_status', arguments: { participant: queryWorkerBId } },
-      },
-      sessionA,
-    );
-    const status1 = parseToolResult<{
-      participant_id: string;
-      presence: 'online' | 'offline';
-      last_connected_at: string | null;
-    }>(status1Rpc);
-    expect(status1.participant_id).toBe(queryWorkerBId);
-    expect(status1.presence).toBe('offline');
-    expect(status1.last_connected_at).toBeNull();
-
-    // Step 3: workerB initializes a session. The MCP transport wires the
-    // SubscriberHandle during the init handshake → presence Registry subscribes →
-    // side-effect persists `agents.last_connected_at = <subscribe time>`.
-    // Sample wall-clock before init to bound the persisted timestamp from below.
-    const beforeSubscribe = Date.now();
-    const initB = await rpc(world.baseUrl, world.jwtB, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'smoke-get-agent-status-b', version: '0.1' },
-      },
+    // The refresh is fire and forget, so give the UPDATE time to land.
+    await vi.waitFor(async () => {
+      expect((await statusOfB()).last_connected_at).not.toBeNull();
     });
-    const sessionB = initB.sessionId as string;
-    await sendNotification(world.baseUrl, world.jwtB, 'notifications/initialized', sessionB);
-
-    // Step 4: B issues a no-op tool call to ensure the session is fully wired
-    // (and to verify ensureSessionFor is idempotent if subscribe already happened).
-    await rpc(
-      world.baseUrl,
-      world.jwtB,
-      {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: { name: 'get_agent_config', arguments: {} },
-      },
-      sessionB,
+    const after = await statusOfB();
+    expect(after.presence).toBe('offline');
+    expect(new Date(after.last_connected_at as string).getTime()).toBeGreaterThanOrEqual(
+      beforeRequest,
     );
+  });
 
-    // The side-effect is non-blocking — drain microtasks and let the UPDATE land.
-    await new Promise((r) => setTimeout(r, 50));
-
-    // Step 5: workerA queries get_agent_status(workerB) → online + timestamp.
-    const status2Rpc = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      {
-        jsonrpc: '2.0',
-        id: 3,
-        method: 'tools/call',
-        params: { name: 'get_agent_status', arguments: { participant: queryWorkerBId } },
-      },
-      sessionA,
-    );
-    const status2 = parseToolResult<{
-      participant_id: string;
-      presence: 'online' | 'offline';
-      last_connected_at: string | null;
-    }>(status2Rpc);
-    expect(status2.presence).toBe('online');
-    expect(status2.last_connected_at).not.toBeNull();
-    const onlineTs = new Date(status2.last_connected_at as string);
-    expect(onlineTs.getTime()).toBeGreaterThanOrEqual(beforeSubscribe);
-
-    // Step 6: workerB closes its session via DELETE — this should fire the
-    // SubscriberHandle's onClose → registry.unsubscribe → presence offline.
-    await fetch(`${world.baseUrl}/mcp`, {
-      method: 'DELETE',
+  it('rejects initialize with -32022 naming the supported versions', async () => {
+    const res = await fetch(`${world.baseUrl}/mcp`, {
+      method: 'POST',
       headers: {
-        authorization: `Bearer ${world.jwtB}`,
-        'mcp-session-id': sessionB,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${world.jwtA}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'legacy-client', version: '0' },
+        },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as JsonRpcResponse;
+    expect(body.error?.code).toBe(-32022);
+    expect((body.error as unknown as { data: { supported: string[] } }).data.supported).toEqual([
+      PROTOCOL_VERSION,
+    ]);
+  });
+
+  it('rejects a request without the headers of the revision', async () => {
+    const res = await fetch(`${world.baseUrl}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${world.jwtA}`,
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as JsonRpcResponse;
+    expect(body.error?.code).toBe(-32022);
+  });
+
+  it('answers GET and DELETE on the MCP path with 405 and no authentication', async () => {
+    for (const method of ['GET', 'DELETE']) {
+      const res = await fetch(`${world.baseUrl}/mcp`, { method });
+      expect(res.status).toBe(405);
+      expect(res.headers.get('allow')).toBe('POST');
+    }
+  });
+
+  it('server/discover declares the real capabilities and only the modern version', async () => {
+    const outcome = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'server/discover',
+    });
+
+    expect(outcome.status).toBe(200);
+    const result = outcome.body?.result as {
+      supportedVersions: string[];
+      capabilities: Record<string, unknown>;
+      resultType: string;
+    };
+    expect(result.supportedVersions).toEqual([PROTOCOL_VERSION]);
+    expect(result.capabilities).toEqual({ tools: {}, resources: { subscribe: true } });
+    expect(result.resultType).toBe('complete');
+  });
+
+  it('tools/list is deterministic and carries the cache metadata', async () => {
+    const list = async () =>
+      (await rpc(world.baseUrl, world.jwtA, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).body
+        ?.result as {
+        tools: { name: string }[];
+        ttlMs: number;
+        cacheScope: string;
+        resultType: string;
+      };
+
+    const first = await list();
+    const second = await list();
+
+    expect(second.tools).toEqual(first.tools);
+    expect(first.ttlMs).toBe(60_000);
+    expect(first.cacheScope).toBe('public');
+    expect(first.resultType).toBe('complete');
+  });
+
+  // zod-to-json-schema silently returns an empty schema with zod 4 while every other
+  // test stays green, so each published schema is pinned here.
+  it('publishes the JSON Schema of each of the 8 tools', async () => {
+    const outcome = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+    });
+    const tools = (
+      outcome.body?.result as {
+        tools: {
+          name: string;
+          inputSchema: {
+            type: string;
+            properties?: Record<string, Record<string, unknown>>;
+            required?: string[];
+          };
+        }[];
+      }
+    ).tools;
+    const schemaOf = (name: string) => {
+      const tool = tools.find((t) => t.name === name);
+      if (!tool) throw new Error(`missing tool ${name}`);
+      expect(tool.inputSchema.type).toBe('object');
+      return {
+        properties: Object.keys(tool.inputSchema.properties ?? {}).sort(),
+        required: [...(tool.inputSchema.required ?? [])].sort(),
+        raw: tool.inputSchema.properties ?? {},
+      };
+    };
+
+    const expected: Record<string, { properties: string[]; required: string[] }> = {
+      get_agent_config: { properties: [], required: [] },
+      check_unread_messages: { properties: [], required: [] },
+      send_message: {
+        properties: [
+          'action',
+          'body',
+          'idempotency_key',
+          'recipient',
+          'reply_to',
+          'ttl_ms',
+          'type',
+        ],
+        required: ['body', 'recipient', 'type'],
+      },
+      reply_to: {
+        properties: ['action', 'body', 'idempotency_key', 'message_id', 'ttl_ms', 'type'],
+        required: ['body', 'message_id', 'type'],
+      },
+      read_mailbox: { properties: ['filter', 'pagination'], required: [] },
+      mark_read: { properties: ['message_ids'], required: ['message_ids'] },
+      list_agents: { properties: ['filter', 'pagination'], required: [] },
+      get_agent_status: { properties: ['participant'], required: ['participant'] },
+    };
+    expect(tools.map((t) => t.name).sort()).toEqual(Object.keys(expected).sort());
+    for (const [name, shape] of Object.entries(expected)) {
+      const { properties, required } = schemaOf(name);
+      expect({ properties, required }).toEqual(shape);
+    }
+
+    const sendType = schemaOf('send_message').raw['type'] as { enum: string[] };
+    expect(sendType.enum).toEqual(['request', 'response', 'notification']);
+
+    const readMailbox = schemaOf('read_mailbox').raw as {
+      filter: { properties: { state: { enum: string[] } } };
+      pagination: { properties: { cursor: { properties: Record<string, unknown> } } };
+    };
+    expect(readMailbox.filter.properties.state.enum).toEqual(['stored', 'read', 'unread']);
+    expect(Object.keys(readMailbox.pagination.properties.cursor.properties).sort()).toEqual([
+      'message_id',
+      'stored_at',
+    ]);
+  });
+
+  it('resources/list and resources/read serve the caller mailbox metadata, never bodies', async () => {
+    const secret = 'body-that-must-not-leak';
+    await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'send_message',
+        arguments: { recipient: world.workerAId, type: 'notification', body: secret },
       },
     });
 
-    // Drain so the close cascade settles.
-    await new Promise((r) => setTimeout(r, 50));
+    const listed = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'resources/list',
+    });
+    const list = listed.body?.result as {
+      resources: { uri: string }[];
+      ttlMs: number;
+      cacheScope: string;
+      resultType: string;
+    };
+    expect(list.resources).toHaveLength(1);
+    expect(list.cacheScope).toBe('private');
+    expect(list.ttlMs).toBe(0);
+    expect(list.resultType).toBe('complete');
+    const uri = list.resources[0]!.uri;
+    expect(uri).toMatch(/^hive:\/\/cells\/[0-9a-f-]{36}$/);
 
-    // Step 7: workerA queries again → offline with the persisted timestamp.
-    const status3Rpc = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      {
+    const read = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'resources/read',
+      params: { uri },
+    });
+    expect(read.rawText).not.toContain(secret);
+    const result = read.body?.result as {
+      contents: { uri: string; text: string }[];
+      ttlMs: number;
+      cacheScope: string;
+      resultType: string;
+    };
+    expect(result.cacheScope).toBe('private');
+    expect(result.ttlMs).toBe(0);
+    expect(result.resultType).toBe('complete');
+    expect(JSON.parse(result.contents[0]!.text)).toEqual({
+      unread_count: 1,
+      sender_ids: [world.workerBId],
+    });
+  });
+
+  it('rejects a foreign or unknown mailbox URI in resources/read with -32602, uniformly', async () => {
+    const listed = await rpc(world.baseUrl, world.jwtB, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'resources/list',
+    });
+    const foreignUri = (listed.body?.result as { resources: { uri: string }[] }).resources[0]!.uri;
+
+    const read = (uri: string) =>
+      rpc(world.baseUrl, world.jwtA, {
         jsonrpc: '2.0',
-        id: 4,
-        method: 'tools/call',
-        params: { name: 'get_agent_status', arguments: { participant: queryWorkerBId } },
-      },
-      sessionA,
+        id: 2,
+        method: 'resources/read',
+        params: { uri },
+      });
+    const foreign = await read(foreignUri);
+    const unknown = await read(`hive://cells/${uuidv7()}`);
+
+    expect(foreign.body?.error?.code).toBe(-32602);
+    expect(foreign.body?.error).toEqual(unknown.body?.error);
+  });
+
+  it('never crosses identities between concurrent requests with different Bearers', async () => {
+    const whoAmI = async (jwt: string, id: number) =>
+      parseToolResult<{ participant_id: string }>(
+        await rpc(world.baseUrl, jwt, {
+          jsonrpc: '2.0',
+          id,
+          method: 'tools/call',
+          params: { name: 'get_agent_config', arguments: {} },
+        }),
+      ).participant_id;
+
+    const rounds = Array.from({ length: 25 }, (_, i) => i);
+    const results = await Promise.all(
+      rounds.flatMap((i) => [whoAmI(world.jwtA, 2 * i + 1), whoAmI(world.jwtB, 2 * i + 2)]),
     );
-    const status3 = parseToolResult<{
-      participant_id: string;
-      presence: 'online' | 'offline';
-      last_connected_at: string | null;
-    }>(status3Rpc);
-    expect(status3.presence).toBe('offline');
-    expect(status3.last_connected_at).not.toBeNull();
-    // The persisted timestamp should match the one observed while online —
-    // the subscribe was the most recent connection event.
-    expect(status3.last_connected_at).toBe(status2.last_connected_at);
+
+    results.forEach((participantId, i) => {
+      expect(participantId).toBe(i % 2 === 0 ? world.workerAId : world.workerBId);
+    });
+  });
+
+  it('send_message and read_mailbox speak stored_at, including the pagination cursor', async () => {
+    const send = async (body: string) =>
+      parseToolResult<Record<string, unknown>>(
+        await rpc(world.baseUrl, world.jwtA, {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'send_message',
+            arguments: { recipient: world.workerBId, type: 'notification', body },
+          },
+        }),
+      );
+
+    const sent = await send('one');
+    await send('two');
+    expect(Object.keys(sent).sort()).toEqual(['message_id', 'replayed', 'sent_at', 'stored_at']);
+
+    const read = (args: unknown) =>
+      rpc(world.baseUrl, world.jwtB, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'read_mailbox', arguments: args },
+      });
+    const page = parseToolResult<{
+      messages: { id: string; state: string; stored_at: string }[];
+      next_cursor: { stored_at: string; message_id: string } | null;
+    }>(await read({ filter: { state: 'stored' }, pagination: { limit: 1 } }));
+
+    expect(page.messages[0]?.state).toBe('stored');
+    expect(page.messages[0]?.stored_at).toBeTruthy();
+    expect(Object.keys(page.next_cursor ?? {}).sort()).toEqual(['message_id', 'stored_at']);
+
+    const nextPage = parseToolResult<{ messages: { id: string }[] }>(
+      await read({ pagination: { limit: 1, cursor: page.next_cursor } }),
+    );
+    expect(nextPage.messages).toHaveLength(1);
+    expect(nextPage.messages[0]?.id).not.toBe(page.messages[0]?.id);
+
+    const legacyFilter = await read({ filter: { state: 'delivered' } });
+    expect(legacyFilter.body?.error?.code).toBe(-32602);
+  });
+
+  it('read_mailbox: an unresolved filter.from is an invalid input', async () => {
+    const outcome = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'read_mailbox',
+        arguments: { filter: { from: 'nobody@nowhere.example' } },
+      },
+    });
+
+    expect(outcome.body?.error?.code).toBe(-32602);
+  });
+
+  it('the 8 tools work through a real SDK 2.x client on the 2026-07-28 revision', async () => {
+    const connect = async (jwt: string) => {
+      const transport = new StreamableHTTPClientTransport(new URL(`${world.baseUrl}/mcp`), {
+        requestInit: { headers: { authorization: `Bearer ${jwt}` } },
+      });
+      const client = new Client(
+        { name: 'hive-smoke-sdk', version: '0' },
+        { versionNegotiation: { mode: { pin: PROTOCOL_VERSION } } },
+      );
+      await client.connect(transport);
+      return client;
+    };
+    const call = async <T>(client: Client, name: string, args: Record<string, unknown> = {}) => {
+      const result = await client.callTool({ name, arguments: args });
+      expect(result.isError ?? false).toBe(false);
+      return result.structuredContent as T;
+    };
+
+    const a = await connect(world.jwtA);
+    const b = await connect(world.jwtB);
+    try {
+      expect(a.getNegotiatedProtocolVersion()).toBe(PROTOCOL_VERSION);
+      expect((await a.listTools()).tools).toHaveLength(8);
+
+      const config = await call<{ participant_id: string }>(a, 'get_agent_config');
+      expect(config.participant_id).toBe(world.workerAId);
+
+      const sent = await call<{ message_id: string }>(a, 'send_message', {
+        recipient: world.workerBId,
+        type: 'request',
+        body: 'ping',
+      });
+      const unread = await call<{ unread_count: number }>(b, 'check_unread_messages');
+      expect(unread.unread_count).toBe(1);
+
+      const mailbox = await call<{ messages: { id: string }[] }>(b, 'read_mailbox');
+      expect(mailbox.messages[0]?.id).toBe(sent.message_id);
+
+      await call(b, 'reply_to', {
+        message_id: sent.message_id,
+        type: 'response',
+        body: 'pong',
+      });
+      const marked = await call<{ marked: string[] }>(b, 'mark_read', {
+        message_ids: [sent.message_id],
+      });
+      expect(marked.marked).toEqual([sent.message_id]);
+
+      const agents = await call<{ agents: { id: string }[] }>(a, 'list_agents');
+      expect(agents.agents.map((agent) => agent.id)).toContain(world.workerBId);
+
+      const status = await call<{ presence: string }>(a, 'get_agent_status', {
+        participant: world.workerBId,
+      });
+      expect(status.presence).toBe('offline');
+    } finally {
+      await a.close();
+      await b.close();
+    }
   });
 });
 
@@ -1150,32 +1188,16 @@ describe('MCP smoke E2E (PRY-018 observability ACs)', () => {
   });
 
   it('AC1, AC2, AC6: every HTTP request emits http_request_completed at info with unique requestId, and happy-path info events fire', async () => {
-    // initialize → notifications/initialized → get_agent_config — three HTTP requests.
-    const init = await rpc(world.baseUrl, world.jwtA, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'pry-018-ac', version: '0' },
-      },
-    });
-    expect(init.status).toBe(200);
-    const sessionId = init.sessionId as string;
-    await sendNotification(world.baseUrl, world.jwtA, 'notifications/initialized', sessionId);
+    // Three HTTP requests, so each one can be told apart by its requestId.
+    await rpc(world.baseUrl, world.jwtA, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    await rpc(world.baseUrl, world.jwtA, { jsonrpc: '2.0', id: 3, method: 'tools/list' });
 
-    const cfg = await rpc(
-      world.baseUrl,
-      world.jwtA,
-      {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: { name: 'get_agent_config', arguments: {} },
-      },
-      sessionId,
-    );
+    const cfg = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'get_agent_config', arguments: {} },
+    });
     expect(cfg.status).toBe(200);
 
     const lines = capture.getLines();
@@ -1198,12 +1220,8 @@ describe('MCP smoke E2E (PRY-018 observability ACs)', () => {
     expect(typeof sample['statusCode']).toBe('number');
     expect(typeof sample['durationMs']).toBe('number');
 
-    // AC6: happy-path info events emitted (mcp_session_opened, auth_credential_verified,
+    // AC6: happy-path info events emitted (auth_credential_verified,
     // mcp_tool_dispatch_success).
-    const openedEvents = lines.filter((l) => l['event'] === 'mcp_session_opened');
-    expect(openedEvents.length).toBeGreaterThanOrEqual(1);
-    expect(openedEvents[0]!['level']).toBe(30);
-
     const verified = lines.filter((l) => l['event'] === 'auth_credential_verified');
     expect(verified.length).toBeGreaterThanOrEqual(1);
     expect(verified[0]!['level']).toBe(30);
@@ -1217,14 +1235,11 @@ describe('MCP smoke E2E (PRY-018 observability ACs)', () => {
     await rpc(world.baseUrl, world.jwtA, {
       jsonrpc: '2.0',
       id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'pry-018-redact', version: '0' },
-      },
+      method: 'tools/call',
+      params: { name: 'get_agent_config', arguments: {} },
     });
     const lines = capture.getLines();
+    expect(lines.length).toBeGreaterThan(0);
     // No log line carries the raw bearer token. The DEFAULT_REDACT_PATHS cover
     // `authorization`, `req.headers.authorization`, `*.authorization`. Search
     // the serialised JSON for the JWT prefix `eyJ` — appears only inside JWT
@@ -1240,6 +1255,12 @@ describe('MCP smoke E2E (PRY-018 observability ACs)', () => {
   });
 
   it('AC3: audit_log row request_id matches the audit_recorded log line requestId for the same request', async () => {
+    await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'get_agent_config', arguments: {} },
+    });
     // Workers in the smoke world only have cell.send + cell.read capabilities;
     // they cannot drive a flow that triggers the audit recorder via the MCP
     // surface (admin operations are CLI-only in Slice 0). The visibility deny
@@ -1248,16 +1269,6 @@ describe('MCP smoke E2E (PRY-018 observability ACs)', () => {
     // log line carries a `requestId` field (string or null), and when present
     // it is a UUIDv7. The cross-check "matches the SQLite row" is exercised
     // by the CI smoke job (milestone 9) which spawns a real server process.
-    await rpc(world.baseUrl, world.jwtA, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'pry-018-ac3', version: '0' },
-      },
-    });
     const lines = capture.getLines();
     // Each audit_recorded line has a requestId field (string | null) — the
     // contract from the recorder's structured logger call.

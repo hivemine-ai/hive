@@ -19,7 +19,6 @@ const TARGET_ID = '01900000-0000-7000-8000-000000000002' as UUIDv7;
 const HIVE_ID = '01900000-0000-7000-8000-000000000003' as UUIDv7;
 const COLONY_ID = '01900000-0000-7000-8000-000000000004' as UUIDv7;
 const REQUEST_ID = '01900000-0000-7000-8000-000000000005' as UUIDv7;
-const SESSION_ID = '01900000-0000-7000-8000-000000000006' as UUIDv7;
 
 function makeCtx(): RequestContext {
   return {
@@ -37,16 +36,6 @@ function makeCtx(): RequestContext {
       current: { state: 'active', isAdmin: true },
     },
     requestId: REQUEST_ID,
-    sessionState: {
-      sessionId: 'sid',
-      identity: {} as RequestContext['identity'],
-      connectionId: SESSION_ID,
-      subscription: null,
-      notifierRef: null,
-      establishedAt: new Date(),
-      lastSeenAt: new Date(),
-      invalidated: false,
-    },
   };
 }
 
@@ -100,20 +89,18 @@ function buildDeps(
   const getPresenceMock = vi
     .fn()
     .mockReturnValue(opts.presence ?? { online: false, sessionCount: 0, sessionsSubscribedAt: [] });
-  const getParticipantStateMock = vi
-    .fn()
-    .mockResolvedValue(
-      opts.participantState === undefined
-        ? {
-            kind: 'worker',
-            state: 'active',
-            isAdmin: null,
-            hiveId: HIVE_ID,
-            colonyId: COLONY_ID,
-            ownerId: null,
-          }
-        : opts.participantState,
-    );
+  const getParticipantStateMock = vi.fn().mockResolvedValue(
+    opts.participantState === undefined
+      ? {
+          kind: 'worker',
+          state: 'active',
+          isAdmin: null,
+          hiveId: HIVE_ID,
+          colonyId: COLONY_ID,
+          ownerId: null,
+        }
+      : opts.participantState,
+  );
   const findAgentByIdMock = vi.fn().mockResolvedValue(opts.agent ?? null);
 
   const participantsRepo = {
@@ -181,22 +168,38 @@ describe('GetAgentStatusInputSchema', () => {
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('createGetAgentStatusHandler', () => {
-  it('online — returns max(sessionsSubscribedAt) ISO string', async () => {
-    const t1 = new Date('2026-05-01T10:00:00.000Z');
-    const t2 = new Date('2026-05-01T11:30:00.000Z');
-    const t3 = new Date('2026-05-01T11:00:00.000Z');
+  it('online — reads last_connected_at from the persisted column', async () => {
+    const subscribedAt = new Date('2026-04-30T12:00:00Z');
+    const lastRequestAt = new Date('2026-04-30T13:00:00Z');
     const deps = buildDeps({
-      presence: { online: true, sessionCount: 3, sessionsSubscribedAt: [t1, t2, t3] },
+      presence: { online: true, sessionCount: 1, sessionsSubscribedAt: [subscribedAt] },
       participantState: { state: 'active' },
+      agent: makeAgent({ lastConnectedAt: lastRequestAt }),
     });
     const handler = createGetAgentStatusHandler(deps);
-    const out = await invoke(handler, { participant: 'worker-1@admin.test-hive' }, makeCtx());
+
+    const out = await handler({ participant: TARGET_ID }, makeCtx());
+
     expect(out).toEqual({
       participant_id: TARGET_ID,
       presence: 'online',
-      last_connected_at: t2.toISOString(),
+      last_connected_at: lastRequestAt.toISOString(),
     });
-    expect(deps.findAgentByIdMock).not.toHaveBeenCalled();
+  });
+
+  it('an agent that only calls tools is offline, with a recent last_connected_at', async () => {
+    const lastRequestAt = new Date('2026-04-30T13:00:00Z');
+    const deps = buildDeps({
+      presence: { online: false, sessionCount: 0, sessionsSubscribedAt: [] },
+      participantState: { state: 'active' },
+      agent: makeAgent({ lastConnectedAt: lastRequestAt }),
+    });
+    const handler = createGetAgentStatusHandler(deps);
+
+    const out = await handler({ participant: TARGET_ID }, makeCtx());
+
+    expect(out.presence).toBe('offline');
+    expect(out.last_connected_at).toBe(lastRequestAt.toISOString());
   });
 
   it('online but participantState=suspended → reported as offline', async () => {
@@ -280,17 +283,6 @@ describe('createGetAgentStatusHandler', () => {
     });
   });
 
-  it('online edge case: presence.online=true but sessionsSubscribedAt empty → null (no crash)', async () => {
-    const deps = buildDeps({
-      presence: { online: true, sessionCount: 0, sessionsSubscribedAt: [] },
-      participantState: { state: 'active' },
-    });
-    const handler = createGetAgentStatusHandler(deps);
-    const out = await invoke(handler, { participant: 'worker-1@admin.test-hive' }, makeCtx());
-    expect(out.presence).toBe('online');
-    expect(out.last_connected_at).toBeNull();
-  });
-
   it('participantState=null (deleted between visibility and state read) → offline + null', async () => {
     const deps = buildDeps({
       presence: { online: false, sessionCount: 0, sessionsSubscribedAt: [] },
@@ -327,17 +319,6 @@ describe('createGetAgentStatusHandler', () => {
     const handler = createGetAgentStatusHandler(deps);
     const out = await invoke(handler, { participant: 'admin@test-hive' }, makeCtx());
     expect(out.last_connected_at).toBeNull();
-  });
-
-  it('does not invoke findAgentById on the online path (avoid extra DB hit)', async () => {
-    const t = new Date('2026-05-01T10:00:00.000Z');
-    const deps = buildDeps({
-      presence: { online: true, sessionCount: 1, sessionsSubscribedAt: [t] },
-      participantState: { state: 'active' },
-    });
-    const handler = createGetAgentStatusHandler(deps);
-    await invoke(handler, { participant: 'worker-1@admin.test-hive' }, makeCtx());
-    expect(deps.findAgentByIdMock).not.toHaveBeenCalled();
   });
 
   it('thrown error has the expected CellError shape (isCellError true)', async () => {

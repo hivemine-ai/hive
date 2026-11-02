@@ -10,7 +10,7 @@ export const SendMessageInputSchema = z
     recipient: z.string().min(1),
     type: z.enum(['request', 'response', 'notification']),
     body: z.string().min(1),
-    action: z.record(z.unknown()).nullish(),
+    action: z.record(z.string(), z.unknown()).nullish(),
     reply_to: z.string().optional(),
     ttl_ms: z.number().int().positive().optional(),
     idempotency_key: z.string().optional(),

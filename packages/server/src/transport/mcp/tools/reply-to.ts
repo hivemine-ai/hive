@@ -10,7 +10,7 @@ export const ReplyToInputSchema = z
     message_id: z.string().uuid(),
     type: z.enum(['request', 'response', 'notification']),
     body: z.string().min(1),
-    action: z.record(z.unknown()).nullish(),
+    action: z.record(z.string(), z.unknown()).nullish(),
     ttl_ms: z.number().int().positive().optional(),
     idempotency_key: z.string().optional(),
   })

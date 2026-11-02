@@ -3,7 +3,9 @@ import { describe, it, expect, vi, type Mock } from 'vitest';
 import { AuthError } from '#domain/auth/index.js';
 import type { IdentityContext, Verifier } from '#domain/auth/index.js';
 
-import { verifyBearerHeader } from './auth-binding.js';
+import type { Logger } from '#observability/logger.js';
+
+import { createLastConnectedRefresher, verifyBearerHeader } from './auth-binding.js';
 
 interface MockVerifier {
   verify: Mock<Verifier['verify']>;
@@ -71,5 +73,67 @@ describe('verifyBearerHeader', () => {
 
     await expect(verifyBearerHeader(verifier, undefined)).rejects.toBeInstanceOf(AuthError);
     expect(verifier.verify).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe('createLastConnectedRefresher', () => {
+  const worker = { participantId: 'worker-1', kind: 'worker' } as unknown as IdentityContext;
+  const scout = { participantId: 'scout-1', kind: 'scout' } as unknown as IdentityContext;
+  const keeper = { participantId: 'keeper-1', kind: 'hivekeeper' } as unknown as IdentityContext;
+  const logger = { warn: vi.fn() } as unknown as Logger;
+
+  function build(updateAgentLastConnectedAt = vi.fn(() => Promise.resolve())) {
+    let nowMs = Date.parse('2026-11-02T12:00:00.000Z');
+    const refresher = createLastConnectedRefresher({
+      participantsRepo: { updateAgentLastConnectedAt },
+      logger,
+      throttleMs: 1_000,
+      now: () => new Date(nowMs),
+    });
+    return {
+      refresher,
+      updateAgentLastConnectedAt,
+      advance: (ms: number) => {
+        nowMs += ms;
+      },
+    };
+  }
+
+  it('writes for Workers and Scouts, never for Hivekeepers', () => {
+    const { refresher, updateAgentLastConnectedAt } = build();
+
+    refresher.refresh(worker);
+    refresher.refresh(scout);
+    refresher.refresh(keeper);
+
+    expect(updateAgentLastConnectedAt.mock.calls.map((c: unknown[]) => c[0])).toEqual([
+      'worker-1',
+      'scout-1',
+    ]);
+  });
+
+  it('throttles per participant', () => {
+    const { refresher, updateAgentLastConnectedAt, advance } = build();
+
+    refresher.refresh(worker);
+    advance(999);
+    refresher.refresh(worker);
+    expect(updateAgentLastConnectedAt).toHaveBeenCalledTimes(1);
+
+    advance(1);
+    refresher.refresh(worker);
+    expect(updateAgentLastConnectedAt).toHaveBeenCalledTimes(2);
+  });
+
+  it('never rejects, logs a failed write, and retries on the next request', async () => {
+    const failing = vi.fn(() => Promise.reject(new Error('database is locked')));
+    const { refresher } = build(failing);
+
+    refresher.refresh(worker);
+    await new Promise((resolve) => setImmediate(resolve));
+    refresher.refresh(worker);
+
+    expect(logger.warn).toHaveBeenCalled();
+    expect(failing).toHaveBeenCalledTimes(2);
   });
 });

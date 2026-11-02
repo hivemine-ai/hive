@@ -25,7 +25,7 @@ export interface McpServerNotifier {
 }
 
 export interface McpSubscriberHandleDeps {
-  /** Identity captured at session-accept time. Inmutable. */
+  /** Identity captured when the stream was accepted. Inmutable. */
   callerContext: IdentityContext;
   /**
    * WeakRef to the MCP Server (or any structural McpServerNotifier).
@@ -76,7 +76,7 @@ export function buildChannelMeta(notification: WaggleNotification): Record<strin
 }
 
 /**
- * Concrete handle implementing `SubscriberHandle` for an MCP session.
+ * Concrete handle implementing `SubscriberHandle` for an MCP stream.
  *
  * Lifecycle:
  *   - `deliver(notification)` is invoked by the Waggle pipeline (online or
