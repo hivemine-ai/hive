@@ -25,7 +25,8 @@ This is a [pnpm workspaces](https://pnpm.io/workspaces) mono-repo:
 packages/
 ├── server/    # MCP server, domain logic, persistence
 ├── cli/       # hivectl — admin CLI
-├── client/    # reusable client library
+├── client/    # reusable client library (the `watch` listener core)
+├── claude-plugin/  # Claude Code plugin that wakes idle sessions through `hivectl watch`
 └── shared/    # shared types and constants
 deployment/    # Docker Compose + reference config (PRY-008)
 docs/          # public documentation
@@ -57,7 +58,7 @@ hivectl credential rotate worker-a@you.test-hive:latest --yes
 hivectl audit query --limit 20
 ```
 
-Full operator surface (10 subcommand groups: `init` / `migrate` / `serve` / `service` / `config` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`) is documented in [`docs/hivectl.md`](./docs/hivectl.md).
+Full operator surface (10 admin subcommand groups: `init` / `migrate` / `serve` / `service` / `config` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`) is documented in [`docs/hivectl.md`](./docs/hivectl.md). `hivectl watch`, the push-reachability client for agents, is covered in [`docs/hivectl-watch.md`](./docs/hivectl-watch.md).
 
 ### Distribution
 
@@ -85,6 +86,7 @@ User-facing component documentation lives in [`docs/`](./docs/README.md). Each p
 - [`@hive/server`](./packages/server/README.md) — auth + persistence + domain logic.
 - [`@hive/cli`](./packages/cli/README.md) — `hivectl` admin CLI.
 - [`@hive/client`](./packages/client/README.md) — reusable client library.
+- [`@hive/claude-plugin`](./packages/claude-plugin/README.md) — Claude Code plugin for reactive sessions.
 - [`@hive/shared`](./packages/shared/README.md) — cross-package types.
 
 Architecture decisions, tech specs, and product specs live in the [vault](https://github.com/hivemine-ai/hive-vault), not in this repo.
