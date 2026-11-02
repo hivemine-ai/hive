@@ -1,0 +1,202 @@
+// The mod's brain, free of any host API so it can be tested in plain Node. The
+// register module wires it to `$.process`, `$.prompt` and `$.ui`.
+//
+// Two jobs:
+//  1. keep `hivectl watch` alive and turn each metadata line into a turn;
+//  2. keep one flag while a turn is active and, at `turn.complete`, ask
+//     `hivectl watch --once` whether anything is still unread.
+// There is no queue and no resend: the mailbox is the source of truth.
+
+import { buildPrompt, parseEventLine } from './event-line.js';
+
+const EXIT_USER_ERROR = 1;
+const EXIT_PRECONDITION = 4;
+const EXIT_INTERRUPTED = 130;
+const BACKOFF_MIN_MS = 1000;
+const BACKOFF_MAX_MS = 60_000;
+/** A watch that stayed up this long counts as healthy and resets the backoff. */
+const HEALTHY_MS = 60_000;
+/** Consecutive short-lived runs before the user is warned. */
+const CRASH_WARNING_AFTER = 5;
+const STDERR_TAIL_CHARS = 4000;
+
+/**
+ * @typedef {{ stream: 'stdout' | 'stderr', text: string }} Piece
+ * @typedef {{ code: number | null, signal: string | null }} ExitInfo
+ * @typedef {{
+ *   next(): Promise<IteratorResult<Piece, ExitInfo>>,
+ *   return(): Promise<unknown>,
+ * }} SpawnedProcess
+ * @typedef {{
+ *   spawn(argv: readonly string[]): SpawnedProcess,
+ *   run(argv: readonly string[]): Promise<{ exitCode: number, stdout: string, stderr: string }>,
+ *   submit(text: string): Promise<{ drop?: string } | void>,
+ *   toast(text: string): void,
+ *   sleep(ms: number): Promise<void>,
+ *   now(): number,
+ * }} Host
+ * @typedef {{ hivectl: string, server: string, credentialFile: string }} Options
+ */
+
+/**
+ * @param {{ options: Options, host: Host }} deps
+ */
+export function createController({ options, host }) {
+  let started = false;
+  let stopped = false;
+  let turnActive = false;
+  let onceRunning = false;
+  let flag = false;
+  /** Bumped on every flag raise, so a raise during `--once` is never cleared by it. */
+  let flagSeq = 0;
+  /** @type {SpawnedProcess | undefined} */
+  let child;
+
+  /** `hivectl watch [extra] --server ... [--credential-file ...]` */
+  const watchArgv = (/** @type {string[]} */ extra = []) => [
+    options.hivectl,
+    'watch',
+    ...extra,
+    '--server',
+    options.server,
+    ...(options.credentialFile === '' ? [] : ['--credential-file', options.credentialFile]),
+  ];
+
+  const raiseFlag = () => {
+    flag = true;
+    flagSeq += 1;
+  };
+
+  /** Submits a turn. Resolves true when the host accepted it. */
+  async function submitTurn(/** @type {import('./event-line.js').WatchEvent} */ event) {
+    try {
+      const result = await host.submit(buildPrompt(event));
+      if (result && typeof result === 'object' && result.drop !== undefined) return false;
+      turnActive = true;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function onWatchLine(/** @type {string} */ raw) {
+    const event = parseEventLine(raw.trim());
+    if (event === null) return;
+    if (turnActive || onceRunning) {
+      raiseFlag();
+      return;
+    }
+    if (!(await submitTurn(event))) raiseFlag();
+  }
+
+  async function runOnce() {
+    if (onceRunning || !flag) return;
+    onceRunning = true;
+    const seqAtStart = flagSeq;
+    try {
+      const result = await host.run(watchArgv(['--once']));
+      if (result.exitCode !== 0) return;
+      const lines = result.stdout.split('\n').filter((l) => l.trim() !== '');
+      const event = lines.length > 0 ? parseEventLine(/** @type {string} */ (lines[0])) : null;
+      if (event !== null) {
+        if (!(await submitTurn(event))) return;
+      }
+      if (flagSeq === seqAtStart) flag = false;
+    } catch {
+      // Keep the flag: the next turn.complete or event retries.
+    } finally {
+      onceRunning = false;
+    }
+  }
+
+  /** Reads one watch process to its end. Returns its exit info and stderr tail. */
+  async function consume(/** @type {SpawnedProcess} */ proc) {
+    let stdoutBuffer = '';
+    let stderrTail = '';
+    for (;;) {
+      const step = await proc.next();
+      if (step.done) return { exit: step.value, stderrTail };
+      const piece = step.value;
+      if (piece.stream === 'stderr') {
+        stderrTail = (stderrTail + piece.text).slice(-STDERR_TAIL_CHARS);
+        continue;
+      }
+      stdoutBuffer += piece.text;
+      const lines = stdoutBuffer.split('\n');
+      stdoutBuffer = lines.pop() ?? '';
+      for (const l of lines) void onWatchLine(l);
+    }
+  }
+
+  function describeFailure(/** @type {string} */ stderrTail, /** @type {number | null} */ code) {
+    const match = /^error: (WATCH_[A-Z_]+)(?::\s*(.*))?$/m.exec(stderrTail);
+    if (match)
+      return `hivectl watch stopped with ${match[1]}${match[2] ? `: ${match[2]}` : ''}. It will not restart; fix the cause and reload the plugin.`;
+    return `hivectl watch stopped with exit code ${String(code)} and will not restart; fix the cause and reload the plugin.`;
+  }
+
+  async function supervise() {
+    let backoff = BACKOFF_MIN_MS;
+    let shortRuns = 0;
+    let warned = false;
+    while (!stopped) {
+      const startedAt = host.now();
+      let outcome;
+      try {
+        child = host.spawn(watchArgv());
+        outcome = await consume(child);
+      } catch (err) {
+        if (stopped) return;
+        const reason = err instanceof Error ? err.message : String(err);
+        host.toast(
+          `Could not start hivectl watch (${reason}). Check that hivectl is installed and on PATH.`,
+        );
+        return;
+      }
+      child = undefined;
+      if (stopped) return;
+      const { exit, stderrTail } = outcome;
+      if (exit.code === EXIT_INTERRUPTED) return;
+      if (exit.code === EXIT_PRECONDITION || exit.code === EXIT_USER_ERROR) {
+        host.toast(describeFailure(stderrTail, exit.code));
+        return;
+      }
+      const lived = host.now() - startedAt;
+      if (lived >= HEALTHY_MS) {
+        backoff = BACKOFF_MIN_MS;
+        shortRuns = 0;
+      } else {
+        shortRuns += 1;
+      }
+      if (shortRuns >= CRASH_WARNING_AFTER && !warned) {
+        warned = true;
+        host.toast(
+          'hivectl watch keeps crashing; it is being restarted with backoff. Check its stderr.',
+        );
+      }
+      await host.sleep(backoff);
+      backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
+    }
+  }
+
+  return {
+    start() {
+      if (started) return;
+      started = true;
+      void supervise();
+    },
+    onTurnStart() {
+      turnActive = true;
+    },
+    onTurnComplete() {
+      turnActive = false;
+      void runOnce();
+    },
+    async stop() {
+      stopped = true;
+      const proc = child;
+      child = undefined;
+      if (proc) await proc.return().catch(() => {});
+    },
+  };
+}

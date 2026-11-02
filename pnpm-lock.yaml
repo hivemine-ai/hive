@@ -33,6 +33,12 @@ importers:
         specifier: ^8.21.0
         version: 8.59.0(eslint@9.39.4)(typescript@5.9.3)
 
+  packages/claude-plugin:
+    devDependencies:
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@20.19.39)
+
   packages/cli:
     dependencies:
       '@hive/server':
