@@ -2,7 +2,7 @@
 
 > Open-source MCP server for collaborative AI agents.
 >
-> **Status:** v0.1 — under active development. Not yet released.
+> **Status:** v0.2.0 in preparation. The current release is v0.1.9.
 
 Hive is a self-hostable Model Context Protocol (MCP) server that gives teams of AI agents a shared mailbox, an identity model, and a notification fabric.
 
@@ -12,7 +12,7 @@ Hive is a self-hostable Model Context Protocol (MCP) server that gives teams of 
 - **Language:** TypeScript (strict)
 - **Database:** **SQLite (default, via CLI — zero infra)** or PostgreSQL 16+ (opt-in, for Docker / production deploys)
 - **Persistence layer:** [Kysely](https://kysely.dev) (type-safe SQL, multi-dialect) + `better-sqlite3` (default) or `pg` (opt-in)
-- **MCP transport:** [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) over Streamable HTTP, hosted by [`fastify`](https://fastify.dev). Full 8-tool catalog ships in v0.1: `get_agent_config`, `send_message`, `reply_to`, `read_mailbox`, `mark_read`, `check_unread_messages`, `list_agents`, `get_agent_status`.
+- **MCP transport:** [`@modelcontextprotocol/server`](https://github.com/modelcontextprotocol/typescript-sdk) 2.x, MCP revision `2026-07-28` only (stateless, no `initialize`, no sessions, no legacy fallback), hosted by [`fastify`](https://fastify.dev). Push is `subscriptions/listen`. The 8-tool catalog: `get_agent_config`, `send_message`, `reply_to`, `read_mailbox`, `mark_read`, `check_unread_messages`, `list_agents`, `get_agent_status`.
 - **CLI framework:** [`commander`](https://github.com/tj/commander.js) (subcommand tree) + [`yaml`](https://eemeli.org/yaml/) (output) + [`chalk`](https://github.com/chalk/chalk) (terminal palette, single source in `output/colors.ts` per ADR-021) for `hivectl`. Migrations via `Kysely.Migrator` (portable SQLite/PG).
 - **Containerization:** Docker + Docker Compose, _optional_ — only needed for Postgres-backed deploys
 - **Package manager:** pnpm 10 (see `packageManager` field)
@@ -45,7 +45,7 @@ hivectl init --admin-email you@example.com --output-credential admin.jwt
 hivectl serve
 # → Listening on http://127.0.0.1:8443/mcp
 
-# Endpoints: POST/GET/DELETE /mcp, GET /healthz, GET /readyz, GET /.well-known/jwks.json
+# Endpoints: POST /mcp (GET and DELETE answer 405), GET /healthz, GET /readyz, GET /.well-known/jwks.json
 # See docs/mcp-server.md for the full operator guide.
 ```
 
@@ -59,6 +59,20 @@ hivectl audit query --limit 20
 ```
 
 Full operator surface (10 admin subcommand groups: `init` / `migrate` / `serve` / `service` / `config` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`) is documented in [`docs/hivectl.md`](./docs/hivectl.md). `hivectl watch`, the push-reachability client for agents, is covered in [`docs/hivectl-watch.md`](./docs/hivectl-watch.md).
+
+### Reactive agents
+
+An agent is `online` while it holds a `subscriptions/listen` stream, and `hivectl watch` is the client that holds it. To wake an idle Claude Code session or a headless worker when mail arrives, see [`docs/reactive-agents.md`](./docs/reactive-agents.md); in short:
+
+```bash
+# Interactive Claude Code session: the hive-wake plugin runs `watch` for you.
+claude --plugin-dir ./packages/claude-plugin
+
+# Headless worker: one `claude -p --resume` run per event.
+hivectl watch --server https://hive.example.com/mcp --exec packages/claude-plugin/worker/claude-wake.sh
+```
+
+> **v0.2.0 is a breaking release** (modern protocol only, `delivered_at` renamed to `stored_at`, retired `HIVE_PRESENCE_*` variables). Read the `[Unreleased]` section of the [CHANGELOG](./CHANGELOG.md) before upgrading from v0.1.x.
 
 ### Distribution
 
