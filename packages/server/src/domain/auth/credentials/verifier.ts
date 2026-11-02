@@ -10,7 +10,8 @@
 //      JWTClaimValidationFailed (iss/aud) → CREDENTIAL_INAUTHENTIC{iss_aud_mismatch}
 //      kid lookup miss                → CREDENTIAL_INAUTHENTIC{kid_unknown}
 //      JOSEAlgNotAllowed / JWSInvalid / JWTInvalid → CREDENTIAL_INAUTHENTIC{malformed}
-// 4. blocklist.contains(jti)?   → CREDENTIAL_REVOKED
+// 4. await blocklist.contains(jti)? → CREDENTIAL_REVOKED; a database failure propagates
+//    unmapped (fail closed, wire -32603), it is never reported as an auth failure
 // 5. participantsRepo.findById(sub)
 // 6. exists?                    → PARTICIPANT_NOT_FOUND
 // 7. state == 'active'?         → PARTICIPANT_NOT_ACTIVE{subCode: state}
@@ -104,7 +105,7 @@ export function createVerifier(deps: VerifierDeps): Verifier {
       if (!jti || typeof jti !== 'string') {
         throw fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'malformed' }));
       }
-      if (deps.blocklist.contains(jti)) {
+      if (await deps.blocklist.contains(jti)) {
         throw fail(deps, new AuthError('CREDENTIAL_REVOKED'));
       }
 

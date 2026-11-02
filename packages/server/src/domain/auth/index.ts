@@ -52,7 +52,7 @@ export type {
   ParticipantsReadRepoOptions,
 } from './participants/repository.js';
 
-export { loadBlocklist } from './credentials/blocklist.js';
+export { createBlocklist } from './credentials/blocklist.js';
 export type { AddRevocationInput, Blocklist } from './credentials/blocklist.js';
 
 export { createVerifier } from './credentials/verifier.js';

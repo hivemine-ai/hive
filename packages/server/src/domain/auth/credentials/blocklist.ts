@@ -1,17 +1,17 @@
-// Credential blocklist — in-memory Set + persistent table.
-// Per the Auth + Identity tech spec:
-//   - The hot path (`contains`) is a synchronous Set lookup, called once per request.
-//   - Mutations (`add`) go to Postgres/SQLite first; only on success do we mutate the Set
-//     (DB is the source of truth).
-//   - At boot, the Set is preloaded from rows whose credential_expires_at > now —
-//     expired rows do not need to live in memory because step 3 of the verifier already
-//     rejects expired tokens with CREDENTIAL_EXPIRED.
+// Persistent credential blocklist backed by the credential_revocations table.
+//
+// The database is the only source of truth: hivectl revokes and rotates from another
+// process, so any copy held by the server would miss those writes (INC-2026-008).
+// `contains` costs one primary key lookup per verify and, on a database failure,
+// rejects instead of answering, so verify fails closed.
 
 import type { Kysely } from 'kysely';
 
 import { dateToIso } from '#persistence/type-mappers.js';
 import type { Database } from '#persistence/schema.js';
 import type { UUIDv7 } from '../types.js';
+
+const DEFAULT_CLOCK_TOLERANCE_SECONDS = 5;
 
 export interface AddRevocationInput {
   jti: UUIDv7;
@@ -20,53 +20,37 @@ export interface AddRevocationInput {
   reason?: string;
 }
 
-export interface Blocklist {
-  /** O(1) sync lookup. Hot path called once per verify. */
-  contains(jti: UUIDv7): boolean;
+export interface BlocklistOptions {
+  /** Must match the verifier: jose accepts a token until `exp + clockTolerance`. */
+  clockToleranceSeconds?: number;
+}
 
-  /**
-   * Persists the revocation in the DB and mutates the in-memory Set on success.
-   * Idempotent: re-adding the same `jti` is a no-op (ON CONFLICT DO NOTHING).
-   */
+export interface Blocklist {
+  /** Primary key lookup, not filtered by expiry. Hot path, called once per verify. */
+  contains(jti: UUIDv7): Promise<boolean>;
+
+  /** Idempotent: re-adding the same `jti` is a no-op (ON CONFLICT DO NOTHING). */
   add(input: AddRevocationInput): Promise<void>;
 
   /**
-   * Bulk-deletes rows whose credential has expired. Returns the number of rows removed.
-   * The in-memory Set is NOT mutated for performance — expired tokens fail the verifier's
-   * step 3 (exp check) before ever reaching the blocklist test, so over-reporting is harmless.
+   * Deletes rows whose credential expired more than the clock tolerance ago and returns
+   * how many were removed. The margin is what makes purging safe: every deleted row
+   * belongs to a token that verify already rejects with CREDENTIAL_EXPIRED.
    */
   purgeExpired(now?: Date): Promise<number>;
-
-  /**
-   * Records a jti as revoked in the in-memory Set without writing to DB. Used by the rotator
-   * and revoker after they have already INSERTed the row inside their own transactions.
-   * Idempotent.
-   */
-  recordAdded(jti: UUIDv7): void;
-
-  /** Test helper: returns the current in-memory Set size. */
-  size(): number;
 }
 
-/**
- * Boot the blocklist: read non-expired revocations from DB into a Set, then return the
- * stateful object. The caller owns the lifecycle.
- */
-export async function loadBlocklist(
-  db: Kysely<Database>,
-  now: Date = new Date(),
-): Promise<Blocklist> {
-  const set = new Set<string>();
-  const rows = await db
-    .selectFrom('credential_revocations')
-    .select('jti')
-    .where('credential_expires_at', '>', dateToIso(now))
-    .execute();
-  for (const r of rows) set.add(r.jti);
+export function createBlocklist(db: Kysely<Database>, options: BlocklistOptions = {}): Blocklist {
+  const toleranceMs = (options.clockToleranceSeconds ?? DEFAULT_CLOCK_TOLERANCE_SECONDS) * 1000;
 
   return {
-    contains(jti: UUIDv7): boolean {
-      return set.has(jti);
+    async contains(jti: UUIDv7): Promise<boolean> {
+      const row = await db
+        .selectFrom('credential_revocations')
+        .select('jti')
+        .where('jti', '=', jti)
+        .executeTakeFirst();
+      return row !== undefined;
     },
     async add(input: AddRevocationInput): Promise<void> {
       await db
@@ -79,20 +63,14 @@ export async function loadBlocklist(
         })
         .onConflict((oc) => oc.column('jti').doNothing())
         .execute();
-      set.add(input.jti);
     },
     async purgeExpired(at: Date = new Date()): Promise<number> {
+      const cutoff = new Date(at.getTime() - toleranceMs);
       const result = await db
         .deleteFrom('credential_revocations')
-        .where('credential_expires_at', '<=', dateToIso(at))
+        .where('credential_expires_at', '<', dateToIso(cutoff))
         .executeTakeFirst();
       return Number(result.numDeletedRows ?? 0n);
-    },
-    recordAdded(jti: UUIDv7): void {
-      set.add(jti);
-    },
-    size(): number {
-      return set.size;
     },
   };
 }

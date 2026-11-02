@@ -30,7 +30,7 @@ import {
   createParticipantsWriteRepo,
   createVerifier,
   generateKeypair,
-  loadBlocklist,
+  createBlocklist,
   writeKeypairToDisk,
   type CallerContext,
   type IdentityContext,
@@ -188,7 +188,7 @@ async function seedSmokeWorld(): Promise<SmokeWorld> {
   const credC = await issuer.issueCredential({ participantId: workerC.id });
 
   // ── verifier (REAL) producing REAL IdentityContext from each JWT ──
-  const blocklist = await loadBlocklist(db);
+  const blocklist = createBlocklist(db);
   const signingKeys = new Map<string, SigningKey>([[signingKey.kid, signingKey]]);
   // `buildJwkSet` is called for parity with how the API layer composes the
   // verifier — it surfaces any JWK serialization issue at seed time.

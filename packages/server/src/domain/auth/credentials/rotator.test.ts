@@ -4,7 +4,7 @@ import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
 import { isAuthError } from '../errors.js';
 import type { AuthError } from '../errors.js';
 import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
-import { loadBlocklist } from './blocklist.js';
+import { createBlocklist } from './blocklist.js';
 import { createIssuer } from './issuer.js';
 import { createRotator } from './rotator.js';
 import { createVerifier } from './verifier.js';
@@ -29,7 +29,7 @@ describe('rotator', () => {
       defaultTtlMs: 60_000,
       db: world.db,
     });
-    const blocklist = await loadBlocklist(world.db);
+    const blocklist = createBlocklist(world.db);
     const rotator = createRotator({
       signingKey: world.signingKey,
       blocklist,
@@ -48,8 +48,8 @@ describe('rotator', () => {
 
     expect(rotated.jti).not.toBe(original.jti);
     expect(rotated.kid).toBe(world.signingKey.kid);
-    expect(blocklist.contains(original.jti)).toBe(true);
-    expect(blocklist.contains(rotated.jti)).toBe(false);
+    expect(await blocklist.contains(original.jti)).toBe(true);
+    expect(await blocklist.contains(rotated.jti)).toBe(false);
 
     // The original credential row is marked revoked_at.
     const originalRow = await world.db
@@ -69,7 +69,7 @@ describe('rotator', () => {
       defaultTtlMs: 60_000,
       db: world.db,
     });
-    const blocklist = await loadBlocklist(world.db);
+    const blocklist = createBlocklist(world.db);
     const rotator = createRotator({
       signingKey: world.signingKey,
       blocklist,
@@ -113,7 +113,7 @@ describe('rotator', () => {
       defaultTtlMs: 60_000,
       db: world.db,
     });
-    const blocklist = await loadBlocklist(world.db);
+    const blocklist = createBlocklist(world.db);
     const rotator = createRotator({
       signingKey: world.signingKey,
       blocklist,
@@ -133,5 +133,56 @@ describe('rotator', () => {
     } catch (err) {
       expect((err as AuthError).code).toBe('CREDENTIAL_ALREADY_REVOKED');
     }
+  });
+
+  it('a valid, non-revoked credential can be rotated', async () => {
+    const issuer = createIssuer({
+      signingKey: world.signingKey,
+      participantsRepo: createParticipantsReadRepo(world.db),
+      hiveStableIdentifier: world.hiveId,
+      defaultTtlMs: 60_000,
+      db: world.db,
+    });
+    const original = await issuer.issueCredential({ participantId: world.workerAgentId });
+    const rotator = createRotator({
+      signingKey: world.signingKey,
+      blocklist: createBlocklist(world.db),
+      hiveStableIdentifier: world.hiveId,
+      defaultTtlMs: 60_000,
+      db: world.db,
+    });
+
+    const rotated = await rotator.rotateCredential({ currentJti: original.jti });
+
+    expect(rotated.jti).not.toBe(original.jti);
+  });
+
+  it('rolls back the new credential when a concurrent rotation already revoked the jti', async () => {
+    const issuer = createIssuer({
+      signingKey: world.signingKey,
+      participantsRepo: createParticipantsReadRepo(world.db),
+      hiveStableIdentifier: world.hiveId,
+      defaultTtlMs: 60_000,
+      db: world.db,
+    });
+    const original = await issuer.issueCredential({ participantId: world.workerAgentId });
+    const realBlocklist = createBlocklist(world.db);
+    await realBlocklist.add({ jti: original.jti, credentialExpiresAt: original.expiresAt });
+    const credentialsBefore = await world.db.selectFrom('credentials').select('jti').execute();
+
+    // The pre-check passed for both rotations: simulate losing the race after it.
+    const rotator = createRotator({
+      signingKey: world.signingKey,
+      blocklist: { ...realBlocklist, contains: () => Promise.resolve(false) },
+      hiveStableIdentifier: world.hiveId,
+      defaultTtlMs: 60_000,
+      db: world.db,
+    });
+
+    await expect(rotator.rotateCredential({ currentJti: original.jti })).rejects.toMatchObject({
+      code: 'CREDENTIAL_ALREADY_REVOKED',
+    });
+    const credentialsAfter = await world.db.selectFrom('credentials').select('jti').execute();
+    expect(credentialsAfter).toHaveLength(credentialsBefore.length);
   });
 });

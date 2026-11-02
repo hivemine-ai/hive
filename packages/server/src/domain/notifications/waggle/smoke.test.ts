@@ -32,7 +32,7 @@ import {
   createParticipantsWriteRepo,
   createVerifier,
   generateKeypair,
-  loadBlocklist,
+  createBlocklist,
   type CallerContext,
   type IdentityContext,
   type ParticipantsWriteRepo,
@@ -203,7 +203,7 @@ async function seedSmokeWorld(): Promise<SmokeWorld> {
   const credA = await issuer.issueCredential({ participantId: workerA.id });
   const credB = await issuer.issueCredential({ participantId: workerB.id });
 
-  const blocklist = await loadBlocklist(db);
+  const blocklist = createBlocklist(db);
   const signingKeys = new Map<string, SigningKey>([[signingKey.kid, signingKey]]);
   buildJwkSet(signingKeys.values());
   const verifier = createVerifier({

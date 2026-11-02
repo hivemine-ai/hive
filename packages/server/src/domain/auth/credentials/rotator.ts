@@ -2,7 +2,7 @@
 // Per the Auth + Identity tech spec:
 //   - Pre-condition: blocklist.contains(currentJti) === false → else CREDENTIAL_ALREADY_REVOKED.
 //   - The transaction inserts the new credential row + revocation row in one shot.
-//   - On commit, the in-memory Set is updated via `blocklist.recordAdded(currentJti)`.
+//   - A second rotation that lost the race on the same jti rolls back and fails.
 
 import type { Kysely } from 'kysely';
 import { v7 as uuidv7 } from 'uuid';
@@ -47,7 +47,7 @@ export function createRotator(deps: RotatorDeps): Rotator {
   return {
     async rotateCredential(input): Promise<IssuedCredential> {
       // Pre-check: cheap and avoids a transaction on the unhappy path.
-      if (deps.blocklist.contains(input.currentJti)) {
+      if (await deps.blocklist.contains(input.currentJti)) {
         throw new AuthError('CREDENTIAL_ALREADY_REVOKED');
       }
 
@@ -143,7 +143,7 @@ export function createRotator(deps: RotatorDeps): Rotator {
           })
           .execute();
 
-        await tx
+        const revocation = await tx
           .insertInto('credential_revocations')
           .values({
             jti: input.currentJti,
@@ -152,7 +152,13 @@ export function createRotator(deps: RotatorDeps): Rotator {
             credential_expires_at: currentRow.expires_at,
           })
           .onConflict((oc) => oc.column('jti').doNothing())
-          .execute();
+          .executeTakeFirst();
+
+        // Two rotations can both pass the pre-check. Exactly one inserts the row;
+        // the loser throws here, which rolls back the credential it just inserted.
+        if ((revocation.numInsertedOrUpdatedRows ?? 0n) === 0n) {
+          throw new AuthError('CREDENTIAL_ALREADY_REVOKED');
+        }
 
         await tx
           .updateTable('credentials')
@@ -160,9 +166,6 @@ export function createRotator(deps: RotatorDeps): Rotator {
           .where('jti', '=', input.currentJti)
           .execute();
       });
-
-      // Mutate the in-memory Set after the TX commits.
-      deps.blocklist.recordAdded(input.currentJti);
 
       if (deps.logger) {
         deps.logger.info(

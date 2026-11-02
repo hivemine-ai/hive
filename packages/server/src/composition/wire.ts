@@ -32,7 +32,7 @@ import {
   createRevoker,
   createRotator,
   loadAllKeypairs,
-  loadBlocklist,
+  createBlocklist,
   createVerifier,
 } from '#domain/auth/index.js';
 import type {
@@ -161,7 +161,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       `No signing keypairs found in ${cfg.keysDir}. Run 'hivectl init' first to bootstrap the Hive.`,
     );
   }
-  const blocklist = await loadBlocklist(db);
+  const blocklist = createBlocklist(db);
 
   const participantsRepo = createParticipantsReadRepo(db, dbConfig.dialect);
   // Resolve hiveId — the verifier needs the canonical hive identifier.
@@ -509,7 +509,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   // lands (Slice 1+), the active selection happens here.
   const activeSigningKey = signingKeys.values().next().value as SigningKey;
 
-  const blocklist = await loadBlocklist(db);
+  const blocklist = createBlocklist(db);
 
   const hiveRow = await db.selectFrom('hives').select(['id', 'name']).executeTakeFirst();
   if (!hiveRow) {
@@ -548,7 +548,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     db,
     logger,
   });
-  const revoker = createRevoker({ blocklist, db, logger });
+  const revoker = createRevoker({ db, logger });
 
   const snapshotWriter = createSnapshotWriter({
     db,

@@ -7,7 +7,7 @@ import type { AuthError } from '../errors.js';
 import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
 import { createIssuer } from './issuer.js';
 import { createVerifier } from './verifier.js';
-import { loadBlocklist } from './blocklist.js';
+import { createBlocklist } from './blocklist.js';
 
 describe('issuer', () => {
   let world: SeedWorld;
@@ -80,7 +80,7 @@ describe('issuer', () => {
       defaultTtlMs: 60_000,
       db: world.db,
     });
-    const blocklist = await loadBlocklist(world.db);
+    const blocklist = createBlocklist(world.db);
     const verifier = createVerifier({
       signingKeys: new Map([[world.signingKey.kid, world.signingKey]]),
       blocklist,

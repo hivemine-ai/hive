@@ -18,7 +18,7 @@ import {
   createVerifier,
   isAuthError,
   loadAllKeypairs,
-  loadBlocklist,
+  createBlocklist,
   type AuthError,
   type CallerContext,
   type DbConfig,
@@ -62,7 +62,7 @@ describe('PRY-002 smoke E2E (SQLite file)', () => {
     const db = createDb(dbConfig);
     try {
       const repo = createParticipantsReadRepo(db);
-      const blocklist = await loadBlocklist(db);
+      const blocklist = createBlocklist(db);
       const signingKeys = await loadAllKeypairs({ keysDir });
       const verifier = createVerifier({
         signingKeys,
@@ -148,7 +148,7 @@ describe('PRY-002 smoke E2E (SQLite file)', () => {
         db,
       });
       const issued = await issuer.issueCredential({ participantId: worker.id });
-      const blocklist = await loadBlocklist(db);
+      const blocklist = createBlocklist(db);
       const signingKeys = await loadAllKeypairs({ keysDir });
       const verifier = createVerifier({
         signingKeys,
@@ -174,7 +174,7 @@ describe('PRY-002 smoke E2E (SQLite file)', () => {
     const db = createDb(dbConfig);
     try {
       const readRepo = createParticipantsReadRepo(db);
-      const blocklist = await loadBlocklist(db);
+      const blocklist = createBlocklist(db);
       const signingKeys = await loadAllKeypairs({ keysDir });
       const issuer = createIssuer({
         signingKey: init.signingKey,
@@ -222,7 +222,7 @@ describe('PRY-002 smoke E2E (SQLite file)', () => {
     const db = createDb(dbConfig);
     try {
       const readRepo = createParticipantsReadRepo(db);
-      const blocklist = await loadBlocklist(db);
+      const blocklist = createBlocklist(db);
       const signingKeys = await loadAllKeypairs({ keysDir });
       const issuer = createIssuer({
         signingKey: init.signingKey,
@@ -231,7 +231,7 @@ describe('PRY-002 smoke E2E (SQLite file)', () => {
         defaultTtlMs: 60_000,
         db,
       });
-      const revoker = createRevoker({ blocklist, db });
+      const revoker = createRevoker({ db });
       const verifier = createVerifier({
         signingKeys,
         blocklist,
@@ -261,7 +261,7 @@ describe('PRY-002 smoke E2E (SQLite file)', () => {
     try {
       const readRepo = createParticipantsReadRepo(db);
       const writeRepo = createParticipantsWriteRepo(db);
-      const blocklist = await loadBlocklist(db);
+      const blocklist = createBlocklist(db);
       const signingKeys = await loadAllKeypairs({ keysDir });
       const issuer = createIssuer({
         signingKey: init.signingKey,

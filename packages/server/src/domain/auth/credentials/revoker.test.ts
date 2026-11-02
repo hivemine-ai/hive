@@ -4,7 +4,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
 import type { AuthError } from '../errors.js';
 import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
-import { loadBlocklist } from './blocklist.js';
+import { createBlocklist } from './blocklist.js';
 import { createIssuer } from './issuer.js';
 import { createRevoker } from './revoker.js';
 import { createVerifier } from './verifier.js';
@@ -29,8 +29,8 @@ describe('revoker', () => {
       defaultTtlMs: 60_000,
       db: world.db,
     });
-    const blocklist = await loadBlocklist(world.db);
-    const revoker = createRevoker({ blocklist, db: world.db });
+    const blocklist = createBlocklist(world.db);
+    const revoker = createRevoker({ db: world.db });
     const verifier = createVerifier({
       signingKeys: new Map([[world.signingKey.kid, world.signingKey]]),
       blocklist,
@@ -41,9 +41,9 @@ describe('revoker', () => {
     const issued = await issuer.issueCredential({
       participantId: world.adminHivekeeperId,
     });
-    expect(blocklist.contains(issued.jti)).toBe(false);
+    expect(await blocklist.contains(issued.jti)).toBe(false);
     await revoker.revokeCredential({ jti: issued.jti, reason: 'leak' });
-    expect(blocklist.contains(issued.jti)).toBe(true);
+    expect(await blocklist.contains(issued.jti)).toBe(true);
 
     try {
       await verifier.verify(`Bearer ${issued.jwt}`);
@@ -54,8 +54,7 @@ describe('revoker', () => {
   });
 
   it('throws INVALID_STATE_TRANSITION{credential_not_found} when the jti never existed', async () => {
-    const blocklist = await loadBlocklist(world.db);
-    const revoker = createRevoker({ blocklist, db: world.db });
+    const revoker = createRevoker({ db: world.db });
     try {
       await revoker.revokeCredential({ jti: uuidv7() });
       expect.fail('expected throw');
@@ -75,14 +74,14 @@ describe('revoker', () => {
       defaultTtlMs: 60_000,
       db: world.db,
     });
-    const blocklist = await loadBlocklist(world.db);
-    const revoker = createRevoker({ blocklist, db: world.db });
+    const blocklist = createBlocklist(world.db);
+    const revoker = createRevoker({ db: world.db });
 
     const issued = await issuer.issueCredential({
       participantId: world.adminHivekeeperId,
     });
     await revoker.revokeCredential({ jti: issued.jti });
     await expect(revoker.revokeCredential({ jti: issued.jti })).resolves.toBeUndefined();
-    expect(blocklist.contains(issued.jti)).toBe(true);
+    expect(await blocklist.contains(issued.jti)).toBe(true);
   });
 });
