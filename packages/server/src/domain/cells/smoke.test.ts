@@ -30,7 +30,7 @@ import {
   createParticipantsWriteRepo,
   createVerifier,
   generateKeypair,
-  loadBlocklist,
+  createBlocklist,
   writeKeypairToDisk,
   type CallerContext,
   type IdentityContext,
@@ -188,7 +188,7 @@ async function seedSmokeWorld(): Promise<SmokeWorld> {
   const credC = await issuer.issueCredential({ participantId: workerC.id });
 
   // ── verifier (REAL) producing REAL IdentityContext from each JWT ──
-  const blocklist = await loadBlocklist(db);
+  const blocklist = createBlocklist(db);
   const signingKeys = new Map<string, SigningKey>([[signingKey.kid, signingKey]]);
   // `buildJwkSet` is called for parity with how the API layer composes the
   // verifier — it surfaces any JWK serialization issue at seed time.
@@ -276,11 +276,11 @@ describe('PRY-003 Cell Store Slice 0 — smoke E2E', () => {
     expect(result.replayed).toBe(false);
     expect(result.messageId).toMatch(/^[0-9a-f-]{36}$/);
     expect(result.sentAt).toBeInstanceOf(Date);
-    expect(result.deliveredAt).toBeInstanceOf(Date);
+    expect(result.storedAt).toBeInstanceOf(Date);
   });
 
-  // ── AC-1 step 5: workerB readMailbox returns the delivered message ──
-  it('14d. workerB readMailbox shows the delivered message from workerA', async () => {
+  // ── AC-1 step 5: workerB readMailbox returns the stored message ──
+  it('14d. workerB readMailbox shows the stored message from workerA', async () => {
     await world.sender.sendMessage({
       callerContext: world.ctxA,
       recipientId: world.workerB.id,
@@ -291,7 +291,7 @@ describe('PRY-003 Cell Store Slice 0 — smoke E2E', () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]?.from).toBe(world.workerA.id);
     expect(messages[0]?.body).toBe('hello');
-    expect(messages[0]?.state).toBe('delivered');
+    expect(messages[0]?.state).toBe('stored');
     expect(messages[0]?.readAt).toBeNull();
   });
 
@@ -317,7 +317,7 @@ describe('PRY-003 Cell Store Slice 0 — smoke E2E', () => {
   });
 
   // ── AC-5: summarizeUnreadForCell — workerA msg is read, workerC sends two ──
-  it('14f. summarizeUnreadForCell — counts only delivered, groups by sender', async () => {
+  it('14f. summarizeUnreadForCell — counts only stored, groups by sender', async () => {
     // workerA's message → mark read so it doesn't count.
     const aMsg = await world.sender.sendMessage({
       callerContext: world.ctxA,

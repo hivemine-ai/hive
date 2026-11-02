@@ -7,7 +7,7 @@
 //   - Real participants write repo with the real cells hook (cell row created
 //     atomically with each createAgent / createHivekeeper).
 //   - Real Issuer + Verifier (Ed25519) producing real `IdentityContext`s.
-//   - Real Sender (PRY-003) firing real `messageDelivered` events.
+//   - Real Sender (PRY-003) firing real `messageStored` events.
 //   - Real Waggle Pipeline + Presence Registry constructed via the production
 //     factory (`createNotificationsForProduction`).
 //   - Visibility STUB (`stubVisibilityEngine`) — sufficient: the visibility
@@ -32,7 +32,7 @@ import {
   createParticipantsWriteRepo,
   createVerifier,
   generateKeypair,
-  loadBlocklist,
+  createBlocklist,
   type CallerContext,
   type IdentityContext,
   type ParticipantsWriteRepo,
@@ -203,7 +203,7 @@ async function seedSmokeWorld(): Promise<SmokeWorld> {
   const credA = await issuer.issueCredential({ participantId: workerA.id });
   const credB = await issuer.issueCredential({ participantId: workerB.id });
 
-  const blocklist = await loadBlocklist(db);
+  const blocklist = createBlocklist(db);
   const signingKeys = new Map<string, SigningKey>([[signingKey.kid, signingKey]]);
   buildJwkSet(signingKeys.values());
   const verifier = createVerifier({

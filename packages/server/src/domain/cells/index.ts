@@ -46,7 +46,7 @@ export type {
   CellEventMap,
   CellEventName,
   CellEvents,
-  MessageDeliveredEvent,
+  MessageStoredEvent,
 } from './events.js';
 
 export { createSender, DEFAULT_SENDER_CONFIG } from './send.js';

@@ -279,7 +279,7 @@ describe('cells repository', () => {
         ownerKind: 'agent',
         hiveId: world.hiveId,
       });
-      // Insert 3 messages with monotonically increasing delivered_at to make ordering deterministic.
+      // Insert 3 messages with monotonically increasing stored_at to make ordering deterministic.
       const baseTime = new Date('2026-04-26T10:00:00.000Z').getTime();
       const messages: Message[] = [];
       for (let i = 0; i < 3; i++) {
@@ -294,9 +294,9 @@ describe('cells repository', () => {
           replyTo: null,
           ttl: null,
           sentAt: new Date(baseTime + i * 1000),
-          deliveredAt: new Date(baseTime + i * 1000),
+          storedAt: new Date(baseTime + i * 1000),
           readAt: null,
-          state: 'delivered',
+          state: 'stored',
           expiredAt: null,
         };
         await repo.insertMessage(m);
@@ -321,12 +321,12 @@ describe('cells repository', () => {
       expect(reqMsg?.from).toBe(world.hivekeeperB);
       expect(reqMsg?.to).toBe(world.agentA);
       expect(reqMsg?.body).toBe('body-0');
-      expect(reqMsg?.state).toBe('delivered');
+      expect(reqMsg?.state).toBe('stored');
       expect(reqMsg?.readAt).toBeNull();
-      expect(reqMsg?.deliveredAt).toBeInstanceOf(Date);
+      expect(reqMsg?.storedAt).toBeInstanceOf(Date);
     });
 
-    it('listMessages applies the unreadOnly filter (state=delivered)', async () => {
+    it('listMessages applies the unreadOnly filter (state=stored)', async () => {
       const repo = createCellsRepo(world.db);
       const { cell, messages } = await setupCellWithMessages(repo);
       // Mark the middle one as read.
@@ -343,7 +343,7 @@ describe('cells repository', () => {
         { cursor: null, limit: 10 },
       );
       expect(unread.length).toBe(2);
-      expect(unread.every((m) => m.state === 'delivered')).toBe(true);
+      expect(unread.every((m) => m.state === 'stored')).toBe(true);
     });
 
     it('listMessages applies the types filter', async () => {
@@ -370,13 +370,13 @@ describe('cells repository', () => {
         cell.id,
         {},
         {
-          cursor: { deliveredAt: last.deliveredAt, messageId: last.id },
+          cursor: { storedAt: last.storedAt, messageId: last.id },
           limit: 2,
         },
       );
       expect(page2.length).toBe(1);
       // Page 2 is strictly older than the cursor.
-      expect(page2[0]?.deliveredAt.getTime()).toBeLessThanOrEqual(last.deliveredAt.getTime());
+      expect(page2[0]?.storedAt.getTime()).toBeLessThanOrEqual(last.storedAt.getTime());
       // No overlap with page 1.
       expect(page1.find((m) => m.id === page2[0]?.id)).toBeUndefined();
     });
@@ -430,14 +430,14 @@ describe('cells repository', () => {
       expect(result).toEqual({ unreadCount: 0, distinctSenderIds: [] });
     });
 
-    it('counts all delivered messages and orders distinct senders by MAX(delivered_at) DESC, sender ASC', async () => {
+    it('counts all stored messages and orders distinct senders by MAX(stored_at) DESC, sender ASC', async () => {
       const repo = createCellsRepo(world.db);
       const cell = await repo.createCell({
         ownerId: world.agentA,
         ownerKind: 'agent',
         hiveId: world.hiveId,
       });
-      // Three senders. Make MAX(delivered_at) deterministic per sender so we can assert ordering:
+      // Three senders. Make MAX(stored_at) deterministic per sender so we can assert ordering:
       //   senderA: 3 messages, latest at t=4000  → MAX = 4000
       //   senderB: 2 messages, latest at t=5000  → MAX = 5000  (newest, first)
       //   senderC: 1 message,  latest at t=3000  → MAX = 3000  (oldest, last)
@@ -467,9 +467,9 @@ describe('cells repository', () => {
           replyTo: null,
           ttl: null,
           sentAt: new Date(baseTime + s.tOffset),
-          deliveredAt: new Date(baseTime + s.tOffset),
+          storedAt: new Date(baseTime + s.tOffset),
           readAt: null,
-          state: 'delivered',
+          state: 'stored',
           expiredAt: null,
         };
         await repo.insertMessage(m);
@@ -480,14 +480,14 @@ describe('cells repository', () => {
       expect(result.distinctSenderIds).toEqual([senderB, senderA, senderC]);
     });
 
-    it('counts only messages with state=delivered (excludes read and expired)', async () => {
+    it('counts only messages with state=stored (excludes read and expired)', async () => {
       const repo = createCellsRepo(world.db);
       const cell = await repo.createCell({
         ownerId: world.agentA,
         ownerKind: 'agent',
         hiveId: world.hiveId,
       });
-      const senderD = uuidv7(); // delivered (×2)
+      const senderD = uuidv7(); // stored (×2)
       const senderR = uuidv7(); // read     (×2)
       const senderE = uuidv7(); // expired  (×1)
       const baseTime = new Date('2026-04-26T10:00:00.000Z').getTime();
@@ -505,7 +505,7 @@ describe('cells repository', () => {
           replyTo: null,
           ttl: null,
           sentAt: new Date(baseTime + i * 1000),
-          deliveredAt: new Date(baseTime + i * 1000),
+          storedAt: new Date(baseTime + i * 1000),
           readAt: state === 'read' ? new Date(baseTime + i * 1000 + 100) : null,
           state,
           expiredAt: state === 'expired' ? new Date(baseTime + i * 1000 + 200) : null,
@@ -514,8 +514,8 @@ describe('cells repository', () => {
         await repo.insertMessage(m);
         return id;
       };
-      await seedOne(senderD, 'delivered');
-      await seedOne(senderD, 'delivered');
+      await seedOne(senderD, 'stored');
+      await seedOne(senderD, 'stored');
       await seedOne(senderR, 'read');
       await seedOne(senderR, 'read');
       await seedOne(senderE, 'expired');
@@ -525,7 +525,7 @@ describe('cells repository', () => {
       expect(result.distinctSenderIds).toEqual([senderD]);
     });
 
-    it('returns { 0, [] } silently when the cell is closed and has no delivered messages', async () => {
+    it('returns { 0, [] } silently when the cell is closed and has no stored messages', async () => {
       const repo = createCellsRepo(world.db);
       const cell = await repo.createCell({
         ownerId: world.agentA,
@@ -537,7 +537,7 @@ describe('cells repository', () => {
       expect(result).toEqual({ unreadCount: 0, distinctSenderIds: [] });
     });
 
-    it('reports delivered messages even if the cell was later closed (query is not gated by cell state)', async () => {
+    it('reports stored messages even if the cell was later closed (query is not gated by cell state)', async () => {
       // Edge case: per tech spec line 139, no normal caller invokes summarizeUnreadForCell
       // on a closed Cell (Waggle suppresses push beforehand). The query is not cell-state-gated;
       // it simply reports what the index sees. This test pins that behavior.
@@ -559,9 +559,9 @@ describe('cells repository', () => {
         replyTo: null,
         ttl: null,
         sentAt: new Date('2026-04-26T10:00:00.000Z'),
-        deliveredAt: new Date('2026-04-26T10:00:00.000Z'),
+        storedAt: new Date('2026-04-26T10:00:00.000Z'),
         readAt: null,
-        state: 'delivered',
+        state: 'stored',
         expiredAt: null,
       };
       await repo.insertMessage(m);
@@ -592,9 +592,9 @@ describe('cells repository', () => {
         replyTo: null,
         ttl: null,
         sentAt: new Date('2026-04-26T10:00:00.000Z'),
-        deliveredAt: new Date('2026-04-26T10:00:01.000Z'),
+        storedAt: new Date('2026-04-26T10:00:01.000Z'),
         readAt: null,
-        state: 'delivered',
+        state: 'stored',
         expiredAt: null,
       };
       await repo.insertMessage(m);
@@ -607,7 +607,7 @@ describe('cells repository', () => {
       expect(found?.toParticipantId).toBe(world.agentA);
       expect(found?.type).toBe('request');
       expect(found?.body).toBe('hello');
-      expect(found?.state).toBe('delivered');
+      expect(found?.state).toBe('stored');
       expect(found?.expiredAt).toBeNull();
     });
 
@@ -634,9 +634,9 @@ describe('cells repository', () => {
         replyTo: null,
         ttl: null,
         sentAt: new Date(),
-        deliveredAt: new Date(),
+        storedAt: new Date(),
         readAt: null,
-        state: 'delivered',
+        state: 'stored',
         expiredAt: null,
       };
       await repo.insertMessage(m);
@@ -674,9 +674,9 @@ describe('cells repository', () => {
         replyTo: null,
         ttl: null,
         sentAt: new Date(),
-        deliveredAt: new Date(),
+        storedAt: new Date(),
         readAt: null,
-        state: 'delivered',
+        state: 'stored',
         expiredAt: null,
       };
       await repo.insertMessage(m);
@@ -710,9 +710,9 @@ describe('cells repository', () => {
         replyTo: null,
         ttl: null,
         sentAt: new Date('2026-04-26T10:00:00.000Z'),
-        deliveredAt: new Date('2026-04-26T10:00:00.000Z'),
+        storedAt: new Date('2026-04-26T10:00:00.000Z'),
         readAt: null,
-        state: 'delivered',
+        state: 'stored',
         expiredAt: null,
       };
       await repo.insertMessage(earlier);
@@ -730,7 +730,7 @@ describe('cells repository', () => {
         replyTo: earlierId,
         ttl: 60_000,
         sentAt: replyAt,
-        deliveredAt: replyAt,
+        storedAt: replyAt,
         readAt,
         state: 'read',
         expiredAt: null,
@@ -744,7 +744,7 @@ describe('cells repository', () => {
       expect(found?.ttl).toBe(60_000);
       expect(found?.readAt).toBeInstanceOf(Date);
       expect(found?.readAt?.toISOString()).toBe(readAt.toISOString());
-      expect(found?.deliveredAt.toISOString()).toBe(replyAt.toISOString());
+      expect(found?.storedAt.toISOString()).toBe(replyAt.toISOString());
       expect(found?.sentAt.toISOString()).toBe(replyAt.toISOString());
       expect(found?.state).toBe('read');
       expect(found?.expiredAt).toBeNull();

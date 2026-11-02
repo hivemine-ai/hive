@@ -32,7 +32,7 @@ import {
   createRevoker,
   createRotator,
   loadAllKeypairs,
-  loadBlocklist,
+  createBlocklist,
   createVerifier,
 } from '#domain/auth/index.js';
 import type {
@@ -68,6 +68,7 @@ import {
   type SnapshotWriter,
 } from './snapshot-writer.js';
 import { createVisibilityEngineForProduction } from './visibility-engine-factory.js';
+import { createLastConnectedRefresher } from '#transport/mcp/auth-binding.js';
 import { createMcpTransport } from '#transport/mcp/server.js';
 import { createHttpHost } from '#transport/mcp/http-host.js';
 import type { HttpHost } from '#transport/mcp/http-host.js';
@@ -87,6 +88,10 @@ export interface WireConfig {
   keysDir?: string;
   /** Default 100. Hard cap server-side for `list_agents.pagination.limit` (PRY-029). */
   listAgentsMaxPageSize?: number;
+  /** From HIVE_MCP_ALLOWED_ORIGINS. Default empty: only clients without Origin pass. */
+  allowedOrigins?: string[];
+  /** From HIVE_MCP_ALLOWED_HOSTS. Default empty: Host is not validated. */
+  allowedHosts?: string[];
 }
 
 export interface WireDeps {
@@ -138,7 +143,19 @@ export function resolveWireConfigFromEnv(
         min: 1,
         max: 1000,
       }),
+    allowedOrigins: overrides.allowedOrigins ?? parseCsvEnv(env['HIVE_MCP_ALLOWED_ORIGINS']),
+    allowedHosts:
+      overrides.allowedHosts ??
+      parseCsvEnv(env['HIVE_MCP_ALLOWED_HOSTS']).map((host) => host.toLowerCase()),
   };
+}
+
+function parseCsvEnv(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 /**
@@ -161,7 +178,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       `No signing keypairs found in ${cfg.keysDir}. Run 'hivectl init' first to bootstrap the Hive.`,
     );
   }
-  const blocklist = await loadBlocklist(db);
+  const blocklist = createBlocklist(db);
 
   const participantsRepo = createParticipantsReadRepo(db, dbConfig.dialect);
   // Resolve hiveId — the verifier needs the canonical hive identifier.
@@ -228,7 +245,6 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
   // 7. MCP transport.
   const mcpTransport = createMcpTransport({
-    verifier,
     participantsRepo,
     cellsRepo,
     sender,
@@ -244,6 +260,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     {
       mcpTransport,
       verifier,
+      lastConnected: createLastConnectedRefresher({ participantsRepo, logger }),
       db,
       signingKeysProvider: () => signingKeys.values() as Iterable<SigningKey>,
       logger,
@@ -253,6 +270,8 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       host: cfg.httpHost,
       port: cfg.httpPort,
       readyzDbTimeoutMs: cfg.readyzDbTimeoutMs,
+      allowedOrigins: cfg.allowedOrigins,
+      allowedHosts: cfg.allowedHosts,
     },
   );
 
@@ -509,7 +528,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   // lands (Slice 1+), the active selection happens here.
   const activeSigningKey = signingKeys.values().next().value as SigningKey;
 
-  const blocklist = await loadBlocklist(db);
+  const blocklist = createBlocklist(db);
 
   const hiveRow = await db.selectFrom('hives').select(['id', 'name']).executeTakeFirst();
   if (!hiveRow) {
@@ -548,7 +567,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     db,
     logger,
   });
-  const revoker = createRevoker({ blocklist, db, logger });
+  const revoker = createRevoker({ db, logger });
 
   const snapshotWriter = createSnapshotWriter({
     db,

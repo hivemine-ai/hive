@@ -24,7 +24,7 @@ export interface WaggleNotification {
   cellId: UUIDv7;
   recipientId: UUIDv7;
   /**
-   * Number of messages in `state='delivered'` at emission time. Excludes
+   * Number of messages in `state='stored'` at emission time. Excludes
    * `expired` and `read`. Guaranteed >= 1 by contract: if it would be 0, no
    * Waggle is emitted ("empty Cell at replay/flush: do not emit").
    */
@@ -39,7 +39,7 @@ export interface WaggleNotification {
    * Internal Waggle ID (telemetry). NOT a dedup primitive: two Waggles with
    * the same content have distinct waggleIds. Clients MUST NOT use waggleId
    * to dedup — the at-least-once contract plus documented races (subscribe +
-   * messageDelivered + replay in flight, double-flush on window race) can
+   * messageStored + replay in flight, double-flush on window race) can
    * deliver multiple notifications reflecting the same Cell state. Idempotency
    * happens client-side by re-reading `read_mailbox` or `check_unread_messages`.
    */

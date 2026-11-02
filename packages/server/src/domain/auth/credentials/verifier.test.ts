@@ -13,9 +13,10 @@ import { isAuthError } from '../errors.js';
 import type { AuthError, AuthErrorCode } from '../errors.js';
 import { generateKeypair } from '#domain/auth/keys/keypair-store.js';
 import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
-import { loadBlocklist } from './blocklist.js';
+import { createBlocklist } from './blocklist.js';
 import { createIssuer } from './issuer.js';
 import { createVerifier } from './verifier.js';
+import { dateToIso } from '#persistence/type-mappers.js';
 
 interface SignTokenOptions {
   iat?: number;
@@ -69,6 +70,17 @@ async function expectAuthError(
   }
 }
 
+async function issueFor(world: SeedWorld) {
+  const issuer = createIssuer({
+    signingKey: world.signingKey,
+    participantsRepo: createParticipantsReadRepo(world.db),
+    hiveStableIdentifier: world.hiveId,
+    defaultTtlMs: 60_000,
+    db: world.db,
+  });
+  return issuer.issueCredential({ participantId: world.workerAgentId });
+}
+
 describe('verifier', () => {
   let world: SeedWorld;
 
@@ -83,10 +95,10 @@ describe('verifier', () => {
   function buildVerifier() {
     const signingKeys = new Map([[world.signingKey.kid, world.signingKey]]);
     const repo = createParticipantsReadRepo(world.db);
-    return loadBlocklist(world.db).then((blocklist) =>
+    return Promise.resolve(
       createVerifier({
         signingKeys,
-        blocklist,
+        blocklist: createBlocklist(world.db),
         participantsRepo: repo,
         hiveStableIdentifier: world.hiveId,
       }),
@@ -217,9 +229,50 @@ describe('verifier', () => {
 
   // ---------- Step 4: blocklist ----------
 
+  it('a valid, non-revoked credential passes step 4 of verify', async () => {
+    const verifier = await buildVerifier();
+    const issued = await issueFor(world);
+
+    await expect(verifier.verify(`Bearer ${issued.jwt}`)).resolves.toMatchObject({
+      participantId: world.workerAgentId,
+    });
+  });
+
+  it('sees a revocation written after the verifier was built, without a reload', async () => {
+    const verifier = await buildVerifier();
+    const issued = await issueFor(world);
+    await verifier.verify(`Bearer ${issued.jwt}`);
+
+    await world.db
+      .insertInto('credential_revocations')
+      .values({
+        jti: issued.jti,
+        revoked_by: null,
+        reason: null,
+        credential_expires_at: dateToIso(issued.expiresAt),
+      })
+      .execute();
+
+    await expectAuthError(verifier.verify(`Bearer ${issued.jwt}`), 'CREDENTIAL_REVOKED');
+  });
+
+  it('fails closed: a database failure in step 4 propagates and is not an AuthError', async () => {
+    const signingKeys = new Map([[world.signingKey.kid, world.signingKey]]);
+    const infraFailure = new Error('database is locked');
+    const verifier = createVerifier({
+      signingKeys,
+      blocklist: { ...createBlocklist(world.db), contains: () => Promise.reject(infraFailure) },
+      participantsRepo: createParticipantsReadRepo(world.db),
+      hiveStableIdentifier: world.hiveId,
+    });
+    const issued = await issueFor(world);
+
+    await expect(verifier.verify(`Bearer ${issued.jwt}`)).rejects.toBe(infraFailure);
+  });
+
   it('CREDENTIAL_REVOKED when jti is in the blocklist', async () => {
     const repo = createParticipantsReadRepo(world.db);
-    const blocklist = await loadBlocklist(world.db);
+    const blocklist = createBlocklist(world.db);
     const jti = uuidv7();
     await blocklist.add({
       jti,
@@ -304,7 +357,7 @@ describe('verifier', () => {
       defaultTtlMs: 60_000,
       db: world.db,
     });
-    const blocklist = await loadBlocklist(world.db);
+    const blocklist = createBlocklist(world.db);
     const verifier = createVerifier({
       signingKeys: new Map([[world.signingKey.kid, world.signingKey]]),
       blocklist,

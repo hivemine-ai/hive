@@ -1,13 +1,13 @@
 // Composition root for the Waggle pipeline + Presence Registry — wires the
 // real implementation from its dependencies. The wiring is synchronous and
 // MUST complete BEFORE the MCP server accepts its first connection (per the
-// tech spec: the first `messageDelivered` is only possible after a
+// tech spec: the first `messageStored` is only possible after a
 // `sendMessage` from an authenticated client, which requires an accepted MCP
 // session, which requires this wiring already in place).
 //
 // CRITICAL: the event emitter of cellStore MUST preserve sync semantics —
 // the race analysis in the Waggle Pipeline + Presence Registry tech spec
-// assumes `cellStore.events.emit('messageDelivered', event)` invokes all
+// assumes `cellStore.events.emit('messageStored', event)` invokes all
 // listeners synchronously in the same tick before `emit` returns. The
 // in-tree `createCellEvents` (Cell Store) already satisfies this; if it is
 // ever swapped for an async-emit lib the race analysis must be revisited.
@@ -230,7 +230,7 @@ export function createNotificationsForProduction(
 
   // Subscribe BEFORE returning — the wiring is synchronous so the first event
   // emitted after this call is observed by the pipeline.
-  deps.cellEvents.on('messageDelivered', (event) => pipeline.handleMessageDelivered(event));
+  deps.cellEvents.on('messageStored', (event) => pipeline.handleMessageStored(event));
   deps.cellEvents.on('cellClosed', (event) => pipeline.handleCellClosed(event));
 
   return { presenceRegistry, pipeline, builder, consolidator, replay };

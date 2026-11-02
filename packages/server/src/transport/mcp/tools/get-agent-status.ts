@@ -64,51 +64,25 @@ export function createGetAgentStatusHandler(deps: GetAgentStatusDeps) {
     }
 
     // Step 3: pull both presence + DB state. Both are indispensable: presence
-    // alone cannot detect `suspended` (an agent may be holding sessions yet be
-    // administratively offline); state alone cannot detect "online effective".
+    // alone cannot detect `suspended` (an agent may hold a stream yet be
+    // administratively offline); state alone cannot detect "reachable by push".
     const presence = deps.presenceRegistry.getPresence(targetId);
     const participantState = await deps.participantsRepo.getParticipantState(targetId);
 
-    // Step 4: resolve effective presence. Per the product spec Tool 7 —
-    // `online` iff the registry sees a live session AND the DB state is
-    // `active`. A suspended/revoked agent that still holds an open session
-    // reports as `offline` (state internal — never crosses the wire).
+    // Step 4: `online` means reachable by push: the registry sees a stream on the
+    // caller-owned mailbox AND the DB state is `active`. An agent that only calls
+    // tools holds no stream, so it reports `offline` however recent its last request.
     const isStateActive = participantState !== null && participantState.state === 'active';
     const effectiveOnline = presence.online && isStateActive;
 
-    if (effectiveOnline) {
-      // Step 5a: derive last_connected_at from the live sessions. A guard for
-      // the inconsistency edge case (online with empty sessions) returns null
-      // rather than crashing — see PRY-030 risks table.
-      const max = maxOf(presence.sessionsSubscribedAt);
-      return {
-        participant_id: targetId,
-        presence: 'online',
-        last_connected_at: max !== null ? max.toISOString() : null,
-      };
-    }
-
-    // Step 5b: offline path. Read the persisted column. Hivekeepers never have
-    // an `agents` row, so `findAgentById` returns null → the wire field stays
-    // null. (The visibility check above already authorizes the read.)
+    // Step 5: last_connected_at is the last authenticated request, read from the
+    // persisted column for both presences. Hivekeepers have no `agents` row, so
+    // the wire field stays null.
     const agent = await deps.participantsRepo.findAgentById(targetId);
     return {
       participant_id: targetId,
-      presence: 'offline',
-      last_connected_at:
-        agent !== null && agent.lastConnectedAt !== null
-          ? agent.lastConnectedAt.toISOString()
-          : null,
+      presence: effectiveOnline ? 'online' : 'offline',
+      last_connected_at: agent?.lastConnectedAt?.toISOString() ?? null,
     };
   };
-}
-
-function maxOf(timestamps: readonly Date[]): Date | null {
-  if (timestamps.length === 0) return null;
-  let latest = timestamps[0]!;
-  for (let i = 1; i < timestamps.length; i++) {
-    const t = timestamps[i]!;
-    if (t.getTime() > latest.getTime()) latest = t;
-  }
-  return latest;
 }

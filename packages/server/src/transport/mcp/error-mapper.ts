@@ -1,29 +1,20 @@
-import { ZodError, type ZodIssue } from 'zod';
+import { ProtocolError } from '@modelcontextprotocol/server';
+import { ZodError } from 'zod';
 
 import { AuthError } from '#domain/auth/index.js';
 import { CellError } from '#domain/cells/index.js';
 import { WaggleError } from '#domain/notifications/index.js';
+import type { Logger } from '#observability/logger.js';
 
 import {
   MCP_ERR_FORBIDDEN,
   MCP_ERR_INTERNAL,
   MCP_ERR_INVALID_PARAMS,
   MCP_ERR_RECIPIENT_UNREACHABLE,
+  MCP_ERR_SENDER_QUOTA_EXCEEDED,
   MCP_ERR_UNAUTHORIZED,
 } from './error-codes.js';
 import type { MappedError } from './types.js';
-
-// Transport-local error class for session lifecycle failures. Exported so the
-// SessionStore can throw it and callers can import from a single module.
-export class SessionError extends Error {
-  readonly code: 'SESSION_NOT_FOUND' | 'SESSION_INVALIDATED';
-
-  constructor(code: 'SESSION_NOT_FOUND' | 'SESSION_INVALIDATED') {
-    super(code);
-    this.name = 'SessionError';
-    this.code = code;
-  }
-}
 
 /**
  * Translates any thrown value from domain or transport into a `MappedError`.
@@ -102,6 +93,18 @@ export function mapDomainError(err: unknown): MappedError {
       };
     }
 
+    if (err.code === 'SENDER_QUOTA_EXCEEDED') {
+      return {
+        wire: {
+          code: MCP_ERR_SENDER_QUOTA_EXCEEDED,
+          message: 'sender quota exceeded',
+          ...(err.data !== undefined && { data: err.data }),
+        },
+        domainCode: err.code,
+        subCode: err.subCode ?? null,
+      };
+    }
+
     if (err.code === 'INTERNAL_INCONSISTENCY') {
       return {
         wire: { code: MCP_ERR_INTERNAL, message: 'internal error' },
@@ -125,16 +128,6 @@ export function mapDomainError(err: unknown): MappedError {
         wire: { code: MCP_ERR_INVALID_PARAMS, message: 'invalid input' },
         domainCode: err.code,
         subCode: err.subCode ?? null,
-      };
-    }
-  }
-
-  if (err instanceof SessionError) {
-    if (err.code === 'SESSION_NOT_FOUND' || err.code === 'SESSION_INVALIDATED') {
-      return {
-        wire: { code: MCP_ERR_UNAUTHORIZED, message: 'authentication required' },
-        domainCode: err.code,
-        subCode: null,
       };
     }
   }
@@ -171,10 +164,25 @@ export function mapDomainError(err: unknown): MappedError {
  * The path array is joined with '.' (zod-native, simplest format). Array index
  * paths surface as `"message_ids.3"`; root-level errors as the empty string.
  */
-function sanitizeZodIssue(issue: ZodIssue): { path: string; code: string; message: string } {
+function sanitizeZodIssue(issue: ZodError['issues'][number]): {
+  path: string;
+  code: string;
+  message: string;
+} {
   return {
-    path: issue.path.join('.'),
+    path: issue.path.map(String).join('.'),
     code: issue.code,
     message: issue.message,
   };
+}
+
+/** Logs the rich context of a failure and returns the error that crosses the wire. */
+export function toProtocolError(err: unknown, logger: Logger): ProtocolError {
+  if (err instanceof ProtocolError) return err;
+  const mapped = mapDomainError(err);
+  logger.warn(
+    { event: 'mcp_tool_error', domainCode: mapped.domainCode, subCode: mapped.subCode },
+    mapped.wire.message,
+  );
+  return new ProtocolError(mapped.wire.code, mapped.wire.message, mapped.wire.data);
 }

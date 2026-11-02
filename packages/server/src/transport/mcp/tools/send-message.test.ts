@@ -31,7 +31,7 @@ function buildStubSender(): { sender: Sender; state: StubSenderState } {
       return Promise.resolve({
         messageId: FIXED_MESSAGE_ID,
         sentAt: FIXED_SENT_AT,
-        deliveredAt: FIXED_DELIVERED_AT,
+        storedAt: FIXED_DELIVERED_AT,
         replayed: false,
       });
     },

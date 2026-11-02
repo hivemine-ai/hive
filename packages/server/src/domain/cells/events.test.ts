@@ -1,24 +1,24 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createCellEvents } from './events.js';
-import type { CellClosedEvent, MessageDeliveredEvent } from './events.js';
+import type { CellClosedEvent, MessageStoredEvent } from './events.js';
 
 describe('createCellEvents', () => {
-  describe('messageDelivered', () => {
+  describe('messageStored', () => {
     it('roundtrips a payload from emit to on listeners', () => {
       const events = createCellEvents();
       const listener = vi.fn();
-      events.on('messageDelivered', listener);
+      events.on('messageStored', listener);
 
-      const payload: MessageDeliveredEvent = {
+      const payload: MessageStoredEvent = {
         messageId: '019dffff-0000-0000-0000-00000000aaaa',
         cellId: '019dffff-0000-0000-0000-00000000bbbb',
         recipientId: '019dffff-0000-0000-0000-00000000cccc',
         fromParticipantId: '019dffff-0000-0000-0000-00000000dddd',
         type: 'request',
-        deliveredAt: new Date('2026-04-26T10:00:00.000Z'),
+        storedAt: new Date('2026-04-26T10:00:00.000Z'),
       };
-      events.emit('messageDelivered', payload);
+      events.emit('messageStored', payload);
 
       expect(listener).toHaveBeenCalledTimes(1);
       expect(listener).toHaveBeenCalledWith(payload);
@@ -28,16 +28,16 @@ describe('createCellEvents', () => {
       const events = createCellEvents();
       const a = vi.fn();
       const b = vi.fn();
-      events.on('messageDelivered', a);
-      events.on('messageDelivered', b);
+      events.on('messageStored', a);
+      events.on('messageStored', b);
 
-      events.emit('messageDelivered', {
+      events.emit('messageStored', {
         messageId: '019dffff-0000-0000-0000-00000000aaaa',
         cellId: '019dffff-0000-0000-0000-00000000bbbb',
         recipientId: '019dffff-0000-0000-0000-00000000cccc',
         fromParticipantId: '019dffff-0000-0000-0000-00000000dddd',
         type: 'notification',
-        deliveredAt: new Date(),
+        storedAt: new Date(),
       });
 
       expect(a).toHaveBeenCalledTimes(1);
@@ -68,16 +68,16 @@ describe('createCellEvents', () => {
     it('removes a previously attached listener', () => {
       const events = createCellEvents();
       const listener = vi.fn();
-      events.on('messageDelivered', listener);
-      events.off('messageDelivered', listener);
+      events.on('messageStored', listener);
+      events.off('messageStored', listener);
 
-      events.emit('messageDelivered', {
+      events.emit('messageStored', {
         messageId: '019dffff-0000-0000-0000-00000000aaaa',
         cellId: '019dffff-0000-0000-0000-00000000bbbb',
         recipientId: '019dffff-0000-0000-0000-00000000cccc',
         fromParticipantId: '019dffff-0000-0000-0000-00000000dddd',
         type: 'response',
-        deliveredAt: new Date(),
+        storedAt: new Date(),
       });
 
       expect(listener).not.toHaveBeenCalled();
@@ -87,17 +87,17 @@ describe('createCellEvents', () => {
       const events = createCellEvents();
       const a = vi.fn();
       const b = vi.fn();
-      events.on('messageDelivered', a);
-      events.on('messageDelivered', b);
-      events.off('messageDelivered', a);
+      events.on('messageStored', a);
+      events.on('messageStored', b);
+      events.off('messageStored', a);
 
-      events.emit('messageDelivered', {
+      events.emit('messageStored', {
         messageId: '019dffff-0000-0000-0000-00000000aaaa',
         cellId: '019dffff-0000-0000-0000-00000000bbbb',
         recipientId: '019dffff-0000-0000-0000-00000000cccc',
         fromParticipantId: '019dffff-0000-0000-0000-00000000dddd',
         type: 'response',
-        deliveredAt: new Date(),
+        storedAt: new Date(),
       });
 
       expect(a).not.toHaveBeenCalled();
@@ -127,24 +127,24 @@ describe('createCellEvents', () => {
       const onError = vi.fn();
       const survivor = vi.fn();
 
-      events.on('messageDelivered', () => {
+      events.on('messageStored', () => {
         throw new Error('sync boom');
       });
-      events.on('messageDelivered', () =>
+      events.on('messageStored', () =>
         // returning a rejecting Promise must reach onError, not unhandledRejection.
         Promise.reject(new Error('async boom')),
       );
-      events.on('messageDelivered', survivor);
+      events.on('messageStored', survivor);
 
-      const payload: MessageDeliveredEvent = {
+      const payload: MessageStoredEvent = {
         messageId: '019dffff-0000-0000-0000-00000000aaaa',
         cellId: '019dffff-0000-0000-0000-00000000bbbb',
         recipientId: '019dffff-0000-0000-0000-00000000cccc',
         fromParticipantId: '019dffff-0000-0000-0000-00000000dddd',
         type: 'request',
-        deliveredAt: new Date(),
+        storedAt: new Date(),
       };
-      events.emit('messageDelivered', payload, onError);
+      events.emit('messageStored', payload, onError);
 
       // Survivor still ran (a failing listener does NOT short-circuit fan-out).
       expect(survivor).toHaveBeenCalledTimes(1);
@@ -165,19 +165,19 @@ describe('createCellEvents', () => {
 
     it('does not throw to the caller when a listener fails and no onError is provided', async () => {
       const events = createCellEvents();
-      events.on('messageDelivered', () => {
+      events.on('messageStored', () => {
         throw new Error('silently swallowed');
       });
-      events.on('messageDelivered', () => Promise.reject(new Error('also swallowed')));
+      events.on('messageStored', () => Promise.reject(new Error('also swallowed')));
 
       expect(() =>
-        events.emit('messageDelivered', {
+        events.emit('messageStored', {
           messageId: '019dffff-0000-0000-0000-00000000aaaa',
           cellId: '019dffff-0000-0000-0000-00000000bbbb',
           recipientId: '019dffff-0000-0000-0000-00000000cccc',
           fromParticipantId: '019dffff-0000-0000-0000-00000000dddd',
           type: 'notification',
-          deliveredAt: new Date(),
+          storedAt: new Date(),
         }),
       ).not.toThrow();
       // Drain microtasks so the async reject has a chance to surface (it shouldn't).

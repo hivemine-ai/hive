@@ -19,13 +19,13 @@ import type { UUIDv7 } from '#domain/auth/types.js';
 
 import type { MessageType } from './types.js';
 
-export interface MessageDeliveredEvent {
+export interface MessageStoredEvent {
   messageId: UUIDv7;
   cellId: UUIDv7;
   recipientId: UUIDv7;
   fromParticipantId: UUIDv7;
   type: MessageType;
-  deliveredAt: Date;
+  storedAt: Date;
 }
 
 export interface CellClosedEvent {
@@ -36,7 +36,7 @@ export interface CellClosedEvent {
 }
 
 export interface CellEventMap {
-  messageDelivered: MessageDeliveredEvent;
+  messageStored: MessageStoredEvent;
   cellClosed: CellClosedEvent;
 }
 

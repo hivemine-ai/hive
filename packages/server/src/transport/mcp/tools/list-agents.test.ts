@@ -64,7 +64,6 @@ function buildCtx(overrides: Partial<RequestContext> = {}): RequestContext {
   return {
     identity: buildIdentity(),
     requestId: REQUEST_ID,
-    sessionState: {} as RequestContext['sessionState'],
     ...overrides,
   };
 }

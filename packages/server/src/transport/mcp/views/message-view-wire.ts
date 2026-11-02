@@ -21,14 +21,14 @@ export interface MessageViewWire {
   reply_to: string | null;
   ttl_ms: number | null;
   sent_at: string;
-  delivered_at: string;
+  stored_at: string;
   read_at: string | null;
-  state: 'sent' | 'delivered' | 'read' | 'expired';
+  state: 'sent' | 'stored' | 'read' | 'expired';
 }
 
 export interface ReadMailboxWireOutput {
   messages: MessageViewWire[];
-  next_cursor: { delivered_at: string; message_id: string } | null;
+  next_cursor: { stored_at: string; message_id: string } | null;
 }
 
 /** Adapt a single MessageView to wire form (with action depth re-check). */
@@ -43,7 +43,7 @@ export function adaptMessageView(message: MessageView): MessageViewWire {
     reply_to: message.replyTo,
     ttl_ms: message.ttl,
     sent_at: message.sentAt.toISOString(),
-    delivered_at: message.deliveredAt.toISOString(),
+    stored_at: message.storedAt.toISOString(),
     read_at: message.readAt !== null ? message.readAt.toISOString() : null,
     state: message.state,
   };
@@ -58,7 +58,7 @@ export function adaptMailbox(messages: MessageView[], pageLimit: number): ReadMa
           const last = messages[messages.length - 1];
           if (!last) return null;
           return {
-            delivered_at: last.deliveredAt.toISOString(),
+            stored_at: last.storedAt.toISOString(),
             message_id: last.id,
           };
         })()

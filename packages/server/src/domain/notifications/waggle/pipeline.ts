@@ -1,5 +1,5 @@
 // Waggle pipeline — orchestrates the online path. Subscribed by composition
-// root to the Cell Store event emitter (`messageDelivered`, `cellClosed`).
+// root to the Cell Store event emitter (`messageStored`, `cellClosed`).
 // Per the tech spec § "waggle/pipeline.ts": handlers NEVER throw to the
 // caller (Cell Store fires-and-forgets the event); failures funnel through
 // the structured logger.
@@ -7,7 +7,7 @@
 import type { UUIDv7 } from '#domain/auth/types.js';
 import type { Logger } from '#observability/logger.js';
 
-import type { CellClosedEvent, CellsRepo, MessageDeliveredEvent } from '#domain/cells/index.js';
+import type { CellClosedEvent, CellsRepo, MessageStoredEvent } from '#domain/cells/index.js';
 import type { ParticipantsReadRepo } from '#domain/auth/index.js';
 
 import type { PresenceRegistry } from '#domain/notifications/presence/registry.js';
@@ -25,8 +25,8 @@ export interface PipelineDeps {
 }
 
 export interface Pipeline {
-  /** Subscribed to `cellStore.events.on('messageDelivered', ...)`. Sync; never throws. */
-  handleMessageDelivered(event: MessageDeliveredEvent): void;
+  /** Subscribed to `cellStore.events.on('messageStored', ...)`. Sync; never throws. */
+  handleMessageStored(event: MessageStoredEvent): void;
   /** Subscribed to `cellStore.events.on('cellClosed', ...)`. Sync; never throws. */
   handleCellClosed(event: CellClosedEvent): void;
   /** Invoked by the consolidator at window expiry. */
@@ -49,7 +49,7 @@ export function createPipeline(deps: PipelineDeps): Pipeline {
     );
   }
 
-  function logHandlerFailed(event: MessageDeliveredEvent, err: unknown): void {
+  function logHandlerFailed(event: MessageStoredEvent, err: unknown): void {
     deps.logger.error(
       {
         event: 'waggle_handle_message_delivered_failed',
@@ -142,7 +142,7 @@ export function createPipeline(deps: PipelineDeps): Pipeline {
   };
 
   return {
-    handleMessageDelivered(event) {
+    handleMessageStored(event) {
       // The handler MUST be sync to match the EventEmitter sync contract
       // documented in the spec. The async work is fired-and-forgotten — any
       // failure is captured by the inner try/catch and logged.

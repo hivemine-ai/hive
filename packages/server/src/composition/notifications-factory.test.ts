@@ -130,7 +130,7 @@ describe('createNotificationsForProduction wiring', () => {
     expect(result.replay).toBeDefined();
   });
 
-  it('subscribes pipeline.handleMessageDelivered to cellEvents.messageDelivered', () => {
+  it('subscribes pipeline.handleMessageStored to cellEvents.messageStored', () => {
     const cellEvents = createCellEvents();
     const result = createNotificationsForProduction(
       {
@@ -142,17 +142,17 @@ describe('createNotificationsForProduction wiring', () => {
       { quietWindowMs: 10_000 },
     );
 
-    // Sanity: emitting a messageDelivered should NOT throw — the subscription
+    // Sanity: emitting a messageStored should NOT throw — the subscription
     // is in place. We do not assert behavioural side-effects (the rig is
     // mocked to return null for everything); we just confirm the wire exists.
     expect(() =>
-      cellEvents.emit('messageDelivered', {
+      cellEvents.emit('messageStored', {
         messageId: 'aaaa',
         cellId: 'bbbb',
         recipientId: 'cccc',
         fromParticipantId: 'dddd',
         type: 'notification',
-        deliveredAt: new Date(),
+        storedAt: new Date(),
       }),
     ).not.toThrow();
     expect(result.pipeline).toBeDefined();

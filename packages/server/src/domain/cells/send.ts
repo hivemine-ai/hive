@@ -7,7 +7,7 @@
 //      + INSERT messages + ON CONFLICT-protected idempotency_keys insert. The
 //      cell guard runs INSIDE the TX (PRY-010 fix for the TOCTOU window between
 //      the previous out-of-TX guard and the cascade closeCellsByOwner UPDATE).
-//   4. Post-commit emit `messageDelivered` (best-effort — emit failure does NOT
+//   4. Post-commit emit `messageStored` (best-effort — emit failure does NOT
 //      rollback per tech spec line 408-409; per-listener errors funnel to
 //      onEmitError, including async rejections from PRY-010 events refactor).
 //
@@ -96,7 +96,7 @@ class IdempotencyConflictSentinel extends Error {
 interface IdempotencyHit {
   messageId: UUIDv7;
   sentAt: Date;
-  deliveredAt: Date;
+  storedAt: Date;
 }
 
 const VALID_TYPES: ReadonlyArray<MessageType> = ['request', 'response', 'notification'];
@@ -121,11 +121,7 @@ export function createSender(deps: SenderDeps): Sender {
     const row = await executor
       .selectFrom('idempotency_keys as ik')
       .innerJoin('messages as m', 'm.id', 'ik.message_id')
-      .select([
-        'ik.message_id as messageId',
-        'm.sent_at as sentAt',
-        'm.delivered_at as deliveredAt',
-      ])
+      .select(['ik.message_id as messageId', 'm.sent_at as sentAt', 'm.stored_at as storedAt'])
       .where('ik.sender_id', '=', senderId)
       .where('ik.recipient_id', '=', recipientId)
       .where('ik.key', '=', key)
@@ -134,7 +130,7 @@ export function createSender(deps: SenderDeps): Sender {
     return {
       messageId: row.messageId,
       sentAt: new Date(row.sentAt),
-      deliveredAt: new Date(row.deliveredAt),
+      storedAt: new Date(row.storedAt),
     };
   }
 
@@ -190,7 +186,7 @@ export function createSender(deps: SenderDeps): Sender {
         return {
           messageId: existing.messageId,
           sentAt: existing.sentAt,
-          deliveredAt: existing.deliveredAt,
+          storedAt: existing.storedAt,
           replayed: true,
         };
       }
@@ -242,9 +238,9 @@ export function createSender(deps: SenderDeps): Sender {
           replyTo: input.replyTo ?? null,
           ttl: input.ttl ?? null,
           sentAt,
-          deliveredAt: sentAt,
+          storedAt: sentAt,
           readAt: null,
-          state: 'delivered',
+          state: 'stored',
           expiredAt: null,
         };
 
@@ -269,7 +265,7 @@ export function createSender(deps: SenderDeps): Sender {
         return {
           messageId,
           sentAt,
-          deliveredAt: sentAt,
+          storedAt: sentAt,
           replayed: false,
         };
       });
@@ -289,7 +285,7 @@ export function createSender(deps: SenderDeps): Sender {
         return {
           messageId: winning.messageId,
           sentAt: winning.sentAt,
-          deliveredAt: winning.deliveredAt,
+          storedAt: winning.storedAt,
           replayed: true,
         };
       }
@@ -303,14 +299,14 @@ export function createSender(deps: SenderDeps): Sender {
       throw new CellError('INTERNAL_INCONSISTENCY', { subCode: 'cell_id_unresolved' });
     }
     deps.events.emit(
-      'messageDelivered',
+      'messageStored',
       {
         messageId: result.messageId,
         cellId: resolvedCellId,
         recipientId: input.recipientId,
         fromParticipantId: senderId,
         type: input.type,
-        deliveredAt: result.deliveredAt,
+        storedAt: result.storedAt,
       },
       deps.onEmitError,
     );
