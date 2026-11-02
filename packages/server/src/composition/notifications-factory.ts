@@ -12,7 +12,7 @@
 // in-tree `createCellEvents` (Cell Store) already satisfies this; if it is
 // ever swapped for an async-emit lib the race analysis must be revisited.
 
-import type { ParticipantsReadRepo } from '#domain/auth/index.js';
+import type { ParticipantStateChange, ParticipantsReadRepo } from '#domain/auth/index.js';
 import type { CellEvents, CellsRepo } from '#domain/cells/index.js';
 import {
   createBuilder,
@@ -20,6 +20,7 @@ import {
   createPipeline,
   createPresenceRegistry,
   createReplay,
+  createSenderThrottle,
 } from '#domain/notifications/index.js';
 import type {
   Builder,
@@ -27,6 +28,7 @@ import type {
   Pipeline,
   PresenceRegistry,
   Replay,
+  SenderThrottle,
 } from '#domain/notifications/index.js';
 import { parseIntEnv } from '#observability/env.js';
 import type { Logger } from '#observability/logger.js';
@@ -45,6 +47,10 @@ export interface NotificationsFactoryOptions {
   replayDelayMs?: number;
   /** Default 16. */
   maxSessionsPerParticipant?: number;
+  /** Default 5 (provisional). */
+  senderWakeupsPerWindow?: number;
+  /** Default 60000ms (provisional). */
+  senderWindowMs?: number;
 }
 
 export interface Notifications {
@@ -52,12 +58,19 @@ export interface Notifications {
   pipeline: Pipeline;
   builder: Builder;
   consolidator: Consolidator;
+  senderThrottle: SenderThrottle;
   replay: Replay;
+  /** Wired to the state signal of Auth. Best-effort and idempotent. */
+  handleParticipantStateChanged(change: ParticipantStateChange): void;
+  /** Cancels the timers of the subsystem. */
+  stop(): void;
 }
 
 const DEFAULT_QUIET_WINDOW_MS = 500;
 const DEFAULT_REPLAY_DELAY_MS = 0;
 const DEFAULT_MAX_SESSIONS = 16;
+const DEFAULT_SENDER_WAKEUPS_PER_WINDOW = 5;
+const DEFAULT_SENDER_WINDOW_MS = 60_000;
 
 export function resolveNotificationsConfig(
   env: NodeJS.ProcessEnv,
@@ -66,12 +79,14 @@ export function resolveNotificationsConfig(
   quietWindowMs: number;
   replayDelayMs: number;
   maxSessionsPerParticipant: number;
+  senderWakeupsPerWindow: number;
+  senderWindowMs: number;
 } {
   const quietWindowMs =
     options.quietWindowMs ??
     parseIntEnv(env['HIVE_WAGGLE_QUIET_WINDOW_MS'], DEFAULT_QUIET_WINDOW_MS, {
       name: 'HIVE_WAGGLE_QUIET_WINDOW_MS',
-      min: 0,
+      min: 1,
     });
   const replayDelayMs =
     options.replayDelayMs ??
@@ -86,7 +101,31 @@ export function resolveNotificationsConfig(
       min: 1,
     });
 
-  return { quietWindowMs, replayDelayMs, maxSessionsPerParticipant };
+  const senderWakeupsPerWindow =
+    options.senderWakeupsPerWindow ??
+    parseIntEnv(env['HIVE_WAGGLE_SENDER_WAKEUPS_PER_WINDOW'], DEFAULT_SENDER_WAKEUPS_PER_WINDOW, {
+      name: 'HIVE_WAGGLE_SENDER_WAKEUPS_PER_WINDOW',
+      min: 1,
+    });
+  const senderWindowMs =
+    options.senderWindowMs ??
+    parseIntEnv(env['HIVE_WAGGLE_SENDER_WINDOW_MS'], DEFAULT_SENDER_WINDOW_MS, {
+      name: 'HIVE_WAGGLE_SENDER_WINDOW_MS',
+      min: 1,
+    });
+  if (senderWindowMs < quietWindowMs) {
+    throw new Error(
+      `HIVE_WAGGLE_SENDER_WINDOW_MS (${String(senderWindowMs)}) must be >= HIVE_WAGGLE_QUIET_WINDOW_MS (${String(quietWindowMs)})`,
+    );
+  }
+
+  return {
+    quietWindowMs,
+    replayDelayMs,
+    maxSessionsPerParticipant,
+    senderWakeupsPerWindow,
+    senderWindowMs,
+  };
 }
 
 /**
@@ -102,24 +141,30 @@ export function createNotificationsForProduction(
 
   const builder = createBuilder({ cellsRepo: deps.cellsRepo });
 
-  const replay = createReplay(
-    {
-      cellsRepo: deps.cellsRepo,
-      participantsRepo: deps.participantsRepo,
-      builder,
-      logger: deps.logger,
-    },
-    { replayDelayMs: config.replayDelayMs },
-  );
+  // Forward reference: the registry calls the replay on ready(), and the replay asks
+  // the registry whether the stream is still open before delivering.
+  let replayRef: Replay | null = null;
 
   const presenceRegistry = createPresenceRegistry({
     maxSessionsPerParticipant: config.maxSessionsPerParticipant,
     logger: deps.logger,
     participantsRepo: deps.participantsRepo,
     onReady: ({ participantId, subscriptionId, handle }) => {
-      replay.scheduleReplayFor(participantId, handle, subscriptionId);
+      replayRef?.scheduleReplayFor(participantId, handle, subscriptionId);
     },
   });
+
+  const replay = createReplay(
+    {
+      cellsRepo: deps.cellsRepo,
+      participantsRepo: deps.participantsRepo,
+      builder,
+      presenceRegistry,
+      logger: deps.logger,
+    },
+    { replayDelayMs: config.replayDelayMs },
+  );
+  replayRef = replay;
 
   // Forward reference for the consolidator → pipeline.flushCell wire. The
   // pipeline depends on the consolidator (for `absorb`); the consolidator
@@ -128,7 +173,7 @@ export function createNotificationsForProduction(
   let pipelineRef: Pipeline | null = null;
   const consolidator = createConsolidator(
     { quietWindowMs: config.quietWindowMs },
-    async (cellId) => {
+    async (cellId, absorbedCount) => {
       if (!pipelineRef) {
         // Defensive — should be unreachable: pipelineRef is assigned
         // synchronously two lines below before any timer can fire.
@@ -138,9 +183,17 @@ export function createNotificationsForProduction(
         );
         return;
       }
-      await pipelineRef.flushCell(cellId);
+      await pipelineRef.flushCell(cellId, absorbedCount);
     },
   );
+
+  const senderThrottle = createSenderThrottle({
+    wakeupsPerWindow: config.senderWakeupsPerWindow,
+    windowMs: config.senderWindowMs,
+    onDeferredWake: (wake) => {
+      void pipelineRef?.handleDeferredWake(wake);
+    },
+  });
 
   const pipeline = createPipeline({
     presenceRegistry,
@@ -148,6 +201,7 @@ export function createNotificationsForProduction(
     cellsRepo: deps.cellsRepo,
     builder,
     consolidator,
+    senderThrottle,
     logger: deps.logger,
   });
   pipelineRef = pipeline;
@@ -157,5 +211,27 @@ export function createNotificationsForProduction(
   deps.cellEvents.on('messageStored', (event) => pipeline.handleMessageStored(event));
   deps.cellEvents.on('cellClosed', (event) => pipeline.handleCellClosed(event));
 
-  return { presenceRegistry, pipeline, builder, consolidator, replay };
+  return {
+    presenceRegistry,
+    pipeline,
+    builder,
+    consolidator,
+    senderThrottle,
+    replay,
+    handleParticipantStateChanged({ participantId, newState }) {
+      if (newState === 'active') {
+        for (const stream of presenceRegistry.listOpenStreams(participantId)) {
+          replay.scheduleReplayFor(participantId, stream.handle, stream.subscriptionId);
+        }
+        return;
+      }
+      presenceRegistry.closeParticipantStreams(
+        participantId,
+        newState === 'suspended' ? 'participant_suspended' : 'participant_revoked',
+      );
+    },
+    stop() {
+      senderThrottle.stop();
+    },
+  };
 }

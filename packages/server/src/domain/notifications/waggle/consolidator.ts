@@ -1,16 +1,24 @@
-// Quiet-window consolidator — one window per Cell at a time. Per the tech spec
-// "waggle/consolidator.ts" section + the "window-expired-pre-flush" technical
-// edge case: the `windows.delete(cellId)` runs in the timer callback's
-// `finally` AFTER the flush completes, so events arriving during the flush
-// see the window still alive and absorb (no double-flush).
+// Quiet-window consolidator — one window per Cell at a time.
+//
+// Anti lost-wakeup invariant: no absorb may end up without a future window covering it.
+// `generation` grows on every absorb. When a flush ends, a grown generation re-arms the
+// window instead of deleting it, so an event absorbed after the flush read the mailbox
+// still wakes the agent. The extra Waggle may repeat an observable state (same eventId):
+// at-least-once, and a client can drop it by eventId.
 
 import type { UUIDv7 } from '#domain/auth/types.js';
 
 import type { MessageStoredEvent } from '#domain/cells/index.js';
 
+import type { DeferredWakeEvent } from './types.js';
+
 interface WindowEntry {
   cellId: UUIDv7;
   openedAt: Date;
+  /** Admitted events absorbed; deferred wakes do not count. */
+  absorbedCount: number;
+  /** +1 on every absorb, deferred wakes included. */
+  generation: number;
   timer: NodeJS.Timeout;
 }
 
@@ -20,49 +28,71 @@ export interface ConsolidatorConfig {
 }
 
 /** Callback the consolidator invokes when the window expires. */
-export type FlushCallback = (cellId: UUIDv7) => Promise<void>;
+export type FlushCallback = (cellId: UUIDv7, absorbedCount: number) => Promise<void>;
 
 export interface Consolidator {
-  /** Idempotent within a window — extra absorbs while a window is open are
-   *  silently discarded; the eventual flush queries the live Cell state. */
-  absorb(event: MessageStoredEvent): void;
-  /** Synchronous cancellation — `clearTimeout` + map delete. Used by
-   *  `handleCellClosed`. No flush occurs after cancel. */
+  /** Registers the event in the open window of its Cell, or opens one. */
+  absorb(event: MessageStoredEvent | DeferredWakeEvent): void;
+  /** Synchronous cancellation — `clearTimeout` + map delete. No flush occurs after cancel. */
   cancelWindow(cellId: UUIDv7): void;
   /** Test helper — current number of open windows. */
   __activeWindowCount(): number;
 }
 
+function isDeferredWake(event: MessageStoredEvent | DeferredWakeEvent): event is DeferredWakeEvent {
+  return (event as DeferredWakeEvent).kind === 'deferred_wake';
+}
+
 export function createConsolidator(config: ConsolidatorConfig, flush: FlushCallback): Consolidator {
   const windows = new Map<UUIDv7, WindowEntry>();
 
+  function arm(cellId: UUIDv7): NodeJS.Timeout {
+    return setTimeout(() => {
+      void onWindowElapsed(cellId);
+    }, config.quietWindowMs);
+  }
+
+  async function onWindowElapsed(cellId: UUIDv7): Promise<void> {
+    const entry = windows.get(cellId);
+    if (entry === undefined) return;
+    const snapshot = { generation: entry.generation, absorbed: entry.absorbedCount };
+    try {
+      await flush(cellId, snapshot.absorbed);
+    } catch {
+      // Swallow — the flush callback owns its logging; this is a timer path, and a
+      // rejection here would become an unhandledRejection.
+    } finally {
+      // Identity, not only generation: a window cancelled and reopened during the flush
+      // owns its own timer and must be left alone.
+      if (windows.get(cellId) === entry) {
+        if (entry.generation > snapshot.generation) {
+          entry.absorbedCount -= snapshot.absorbed;
+          entry.generation = 1;
+          entry.openedAt = new Date();
+          entry.timer = arm(cellId);
+        } else {
+          windows.delete(cellId);
+        }
+      }
+    }
+  }
+
   return {
     absorb(event) {
-      if (windows.has(event.cellId)) {
-        // Window already open. The eventual flush re-queries `summarizeUnreadForCell`
-        // so the new message is captured in the consolidated payload.
+      const admitted = isDeferredWake(event) ? 0 : 1;
+      const entry = windows.get(event.cellId);
+      if (entry !== undefined) {
+        entry.generation += 1;
+        entry.absorbedCount += admitted;
         return;
       }
-      const cellId = event.cellId;
-      const timer = setTimeout(() => {
-        // Run the flush inside an async IIFE so the timer callback itself stays
-        // sync. The flush callback is best-effort: any rejection is caught here
-        // so it cannot escape as `unhandledRejection`. The pipeline's own
-        // `flushCell` already logs failures internally; this catch is the
-        // last-line defense for callers that pass a thrower (mostly tests).
-        void (async () => {
-          try {
-            await flush(cellId);
-          } catch {
-            // Swallow — caller is responsible for logging via its own scope.
-          } finally {
-            // Delete LAST so events arriving while flush is in flight see the
-            // window still open (and absorb), avoiding double-flush.
-            windows.delete(cellId);
-          }
-        })();
-      }, config.quietWindowMs);
-      windows.set(cellId, { cellId, openedAt: new Date(), timer });
+      windows.set(event.cellId, {
+        cellId: event.cellId,
+        openedAt: new Date(),
+        absorbedCount: admitted,
+        generation: 1,
+        timer: arm(event.cellId),
+      });
     },
 
     cancelWindow(cellId) {

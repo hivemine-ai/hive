@@ -6,7 +6,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { stopWithDrainTimeout, warnIfStdoutConsumerMissing } from './wire.js';
+import {
+  resolveWireConfigFromEnv,
+  stopWithDrainTimeout,
+  warnIfStdoutConsumerMissing,
+} from './wire.js';
 
 describe('stopWithDrainTimeout', () => {
   let unhandledHandler: (reason: unknown) => void;
@@ -146,5 +150,32 @@ describe('warnIfStdoutConsumerMissing (AC8)', () => {
     const logger = { warn } as unknown as Parameters<typeof warnIfStdoutConsumerMissing>[0];
     warnIfStdoutConsumerMissing(logger, { writableEnded: false, destroyed: false });
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveWireConfigFromEnv — listen', () => {
+  it('uses the provisional defaults', () => {
+    expect(resolveWireConfigFromEnv({})).toMatchObject({
+      listenKeepAliveIntervalMs: 15_000,
+      listenStallTimeoutMs: 30_000,
+      reverifyIntervalSeconds: 60,
+      maxUnreadPerSender: 500,
+    });
+  });
+
+  it('fails at boot when the stall timeout does not beat the 45 s of hivectl watch', () => {
+    expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_STALL_TIMEOUT_MS: '45000' })).toThrow(
+      /HIVE_LISTEN_STALL_TIMEOUT_MS/,
+    );
+    expect(
+      resolveWireConfigFromEnv({ HIVE_LISTEN_STALL_TIMEOUT_MS: '44999' }).listenStallTimeoutMs,
+    ).toBe(44_999);
+  });
+
+  it('accepts 0 to disable the periodic re-verification, and rejects a quota of 0', () => {
+    expect(
+      resolveWireConfigFromEnv({ HIVE_MCP_REVERIFY_INTERVAL_SECONDS: '0' }).reverifyIntervalSeconds,
+    ).toBe(0);
+    expect(() => resolveWireConfigFromEnv({ HIVE_CELL_MAX_UNREAD_PER_SENDER: '0' })).toThrow();
   });
 });

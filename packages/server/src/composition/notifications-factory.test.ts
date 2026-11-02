@@ -88,6 +88,8 @@ describe('resolveNotificationsConfig', () => {
       'maxSessionsPerParticipant',
       'quietWindowMs',
       'replayDelayMs',
+      'senderWakeupsPerWindow',
+      'senderWindowMs',
     ]);
   });
 });

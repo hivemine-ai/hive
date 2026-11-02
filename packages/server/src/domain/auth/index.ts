@@ -70,6 +70,13 @@ export type { Revoker, RevokerDeps, RevokeCredentialInput } from './credentials/
 export { createCredentialsReadRepo } from './credentials/repository.js';
 export type { CredentialRow, CredentialsReadRepo } from './credentials/repository.js';
 
+export { createParticipantStateSignal } from './participants/state-signal.js';
+export type {
+  ParticipantStateChange,
+  ParticipantStateListener,
+  ParticipantStateSignal,
+} from './participants/state-signal.js';
+
 export { createParticipantsWriteRepo } from './participants/repository.write.js';
 export type {
   CreateAgentInput,

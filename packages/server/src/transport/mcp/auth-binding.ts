@@ -30,7 +30,7 @@ export interface AuthenticatedRequest {
  *   to the wire via `mapDomainError`). Infrastructure failures propagate as they are.
  */
 export async function verifyBearerHeader(
-  verifier: Verifier,
+  verifier: Pick<Verifier, 'verify'>,
   authorizationHeader: string | undefined,
 ): Promise<AuthenticatedRequest> {
   const identity = await verifier.verify(authorizationHeader);

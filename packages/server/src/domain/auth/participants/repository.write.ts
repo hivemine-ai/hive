@@ -23,6 +23,7 @@ import type { UUIDv7 } from '../types.js';
 
 import type { Agent, Hivekeeper } from './entities.js';
 import { noopCellsHook, type CellsRepoHook } from './cells-hook.js';
+import type { ParticipantStateSignal } from './state-signal.js';
 import type { AuditCursor } from './repository.js';
 
 // ---------- Shared mappers (kept local to the write module to avoid circular import) ----------
@@ -101,10 +102,18 @@ export interface RevokeHivekeeperResult {
   closedCellIds: UUIDv7[];
 }
 
+interface CascadeOutcome extends RevokeHivekeeperResult {
+  keeperRevoked: boolean;
+}
+
 export interface ParticipantsWriteRepo {
   createHivekeeper(input: CreateHivekeeperInput, caller: CallerContext): Promise<Hivekeeper>;
   createAgent(input: CreateAgentInput, caller: CallerContext): Promise<Agent>;
   revokeAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
+  /** `active` to `suspended`. Any other starting state is a no-op. Agents only. */
+  suspendAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
+  /** `suspended` to `active`. Any other starting state is a no-op. */
+  resumeAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
   /**
    * Revoke a Hivekeeper and cascade-revoke all owned Agents + close their Cells in
    * the same transaction. Snapshots the effective retention policy on the keeper's
@@ -122,6 +131,8 @@ export interface ParticipantsWriteRepoOptions {
   // Cross-domain hook into Cell Store. In Slice 0 (PRY-002), defaults to noopCellsHook;
   // PRY-003 will wire the real one at composition root.
   cellsHook?: CellsRepoHook;
+  // Post-commit signal consumed by the Waggle wiring. Optional: `hivectl` has no streams.
+  stateSignal?: ParticipantStateSignal;
   // Injectable clock for tests.
   now?: () => Date;
 }
@@ -133,6 +144,21 @@ export function createParticipantsWriteRepo(
   const listMaxPageSize = opts.listMaxPageSize ?? 200;
   const cellsHook = opts.cellsHook ?? noopCellsHook;
   const clock = opts.now ?? (() => new Date());
+
+  async function moveAgentState(
+    id: UUIDv7,
+    from: 'active' | 'suspended',
+    to: 'active' | 'suspended',
+  ): Promise<void> {
+    const moved = await db
+      .updateTable('agents')
+      .set({ state: to })
+      .where('id', '=', id)
+      .where('state', '=', from)
+      .returning('id')
+      .executeTakeFirst();
+    if (moved) opts.stateSignal?.emit({ participantId: id, newState: to });
+  }
 
   return {
     async createHivekeeper(input, caller): Promise<Hivekeeper> {
@@ -229,10 +255,20 @@ export function createParticipantsWriteRepo(
       return result;
     },
 
+    async suspendAgent(id, caller): Promise<void> {
+      requireAdminCaller(caller);
+      await moveAgentState(id, 'active', 'suspended');
+    },
+
+    async resumeAgent(id, caller): Promise<void> {
+      requireAdminCaller(caller);
+      await moveAgentState(id, 'suspended', 'active');
+    },
+
     async revokeAgent(id, caller): Promise<void> {
       requireAdminCaller(caller);
 
-      await db.transaction().execute(async (tx) => {
+      const revoked = await db.transaction().execute(async (tx): Promise<boolean> => {
         // Defense in depth: ensure target is an Agent, not a Hivekeeper.
         const hk = await tx
           .selectFrom('hivekeepers')
@@ -253,11 +289,11 @@ export function createParticipantsWriteRepo(
           .executeTakeFirst();
         if (!row) {
           // Caller asked to revoke an unknown id. Treat as no-op idempotent (no Agent to revoke).
-          return;
+          return false;
         }
         if (row.state === 'revoked') {
           // Idempotent.
-          return;
+          return false;
         }
 
         const now = clock();
@@ -268,14 +304,16 @@ export function createParticipantsWriteRepo(
           .execute();
 
         await cellsHook.closeCell(tx, { ownerId: id });
+        return true;
       });
+      if (revoked) opts.stateSignal?.emit({ participantId: id, newState: 'revoked' });
     },
 
     async revokeHivekeeperWithCascade(id, caller): Promise<RevokeHivekeeperResult> {
       const adminIdentity = requireAdminCaller(caller);
       const setBy = adminIdentity?.participantId ?? null;
 
-      return await db.transaction().execute<RevokeHivekeeperResult>(async (tx) => {
+      const outcome = await db.transaction().execute<CascadeOutcome>(async (tx) => {
         // Defense in depth: ensure target is a Hivekeeper, not an Agent.
         // Mirrors the symmetric guard in revokeAgent.
         const ag = await tx
@@ -303,7 +341,7 @@ export function createParticipantsWriteRepo(
           .executeTakeFirst();
         if (!keeperRow) {
           // Either the keeper doesn't exist OR is already revoked. Idempotent return.
-          return { revokedAgentIds: [], closedCellIds: [] };
+          return { keeperRevoked: false, revokedAgentIds: [], closedCellIds: [] };
         }
         const hiveId = keeperRow.hive_id;
 
@@ -392,10 +430,20 @@ export function createParticipantsWriteRepo(
           .execute();
 
         return {
+          keeperRevoked: true,
           revokedAgentIds,
           closedCellIds: closedRows.map((r) => r.id),
         };
       });
+
+      const { keeperRevoked, ...result } = outcome;
+      if (keeperRevoked) {
+        opts.stateSignal?.emit({ participantId: id, newState: 'revoked' });
+        for (const agentId of result.revokedAgentIds) {
+          opts.stateSignal?.emit({ participantId: agentId, newState: 'revoked' });
+        }
+      }
+      return result;
     },
 
     async listHivekeepers(filter): Promise<ListHivekeepersResult> {

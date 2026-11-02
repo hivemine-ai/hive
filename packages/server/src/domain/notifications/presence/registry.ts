@@ -91,6 +91,8 @@ export interface PresenceRegistry {
     fn: (handle: SubscriberHandle) => Promise<void>,
     onError?: (handle: SubscriberHandle, err: unknown) => void,
   ): Promise<void>;
+  /** `open` streams of the participant, for a replay per stream on resume. */
+  listOpenStreams(participantId: UUIDv7): ReadyHookInput[];
   /** Forced close of every stream of the participant (revocation / suspension). Idempotent. */
   closeParticipantStreams(
     participantId: UUIDv7,
@@ -375,6 +377,14 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
           }
         }
       }
+    },
+
+    listOpenStreams(participantId) {
+      const presence = presenceMap.get(participantId);
+      if (presence === undefined) return [];
+      return Array.from(presence.subscriberByConnection.values())
+        .filter((sub) => sub.state === 'open')
+        .map((sub) => ({ participantId, subscriptionId: sub.subscriptionId, handle: sub.handle }));
     },
 
     closeParticipantStreams(participantId, reason) {

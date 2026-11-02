@@ -364,6 +364,72 @@ describe('PRY-005 Waggle + Presence Slice 0 — smoke E2E', () => {
     expect(w.senderIds).toContain(world.workerA.id);
   });
 
+  describe('the acknowledgment boundary', () => {
+    const sendToB = (body: string) =>
+      world.sender.sendMessage({
+        callerContext: world.ctxA,
+        recipientId: world.workerB.id,
+        type: 'notification',
+        body,
+      });
+
+    it('stored before the acknowledgment arrives by replay, stored after by online; none lost', async () => {
+      const handle = mockHandle(world.ctxB);
+      const sub = await world.notifications.presenceRegistry.subscribe({
+        callerContext: world.ctxB,
+        handle,
+      });
+
+      // `pending`: the acknowledgment has not been written yet.
+      await sendToB('on the boundary');
+      await sleep(FLUSH_GRACE_MS);
+      expect(handle.captured).toHaveLength(0);
+
+      sub.ready();
+      await sleep(FLUSH_GRACE_MS);
+      expect(handle.captured.map((w) => [w.kind, w.unreadCount])).toEqual([['replay', 1]]);
+
+      await sendToB('right after');
+      await sleep(FLUSH_GRACE_MS);
+      expect(handle.captured.map((w) => [w.kind, w.unreadCount])).toEqual([
+        ['replay', 1],
+        ['online', 2],
+      ]);
+    });
+
+    it('a failed replay closes the stream, and the reconnection gets it', async () => {
+      await sendToB('queued');
+      const failing = mockHandle(world.ctxB);
+      const closes: StreamCloseReason[] = [];
+      const close = failing.close.bind(failing);
+      failing.close = (reason) => {
+        closes.push(reason);
+        close(reason);
+      };
+      failing.deliver = () => Promise.reject(new Error('socket dead'));
+      const sub = await world.notifications.presenceRegistry.subscribe({
+        callerContext: world.ctxB,
+        handle: failing,
+      });
+
+      sub.ready();
+      await sleep(FLUSH_GRACE_MS);
+
+      expect(closes).toEqual(['replay_failed']);
+      expect(world.notifications.presenceRegistry.getPresence(world.workerB.id).online).toBe(false);
+
+      const fresh = mockHandle(world.ctxB);
+      const again = await world.notifications.presenceRegistry.subscribe({
+        callerContext: world.ctxB,
+        handle: fresh,
+      });
+      again.ready();
+      await sleep(FLUSH_GRACE_MS);
+
+      expect(fresh.captured.map((w) => w.kind)).toEqual(['replay']);
+    });
+  });
+
   // ── Combined Steps 4-9 — full demo path ──
   it('full Slice 0 demo: subscribe → online → close → re-subscribe → replay', async () => {
     // Step 4

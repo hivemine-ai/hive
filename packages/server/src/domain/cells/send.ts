@@ -4,7 +4,7 @@
 //   1. Validate input shape (body size, ttl, replyTo, idempotencyKey, action).
 //   2. Idempotency lookup — replay-safe within the configured TTL.
 //   3. Atomic TX: recipient cell guard (with FOR SHARE on PG) + visibility check
-//      + INSERT messages + ON CONFLICT-protected idempotency_keys insert. The
+//      + per-sender quota + INSERT messages + ON CONFLICT-protected idempotency_keys insert. The
 //      cell guard runs INSIDE the TX (PRY-010 fix for the TOCTOU window between
 //      the previous out-of-TX guard and the cascade closeCellsByOwner UPDATE).
 //   4. Post-commit emit `messageStored` (best-effort — emit failure does NOT
@@ -15,6 +15,7 @@
 // same wire error `RECIPIENT_UNREACHABLE`. The `subCode` is informative only
 // (logged) and never reaches the wire — that's the API layer's responsibility.
 
+import { sql } from 'kysely';
 import type { Kysely, Transaction } from 'kysely';
 import { v7 as uuidv7, validate as uuidValidate, version as uuidVersion } from 'uuid';
 
@@ -44,6 +45,8 @@ export interface SenderConfig {
   maxActionBytes: number;
   /** Default 256 chars. */
   idempotencyKeyMaxLength: number;
+  /** Unread messages one sender may keep in one mailbox. Default 500 (provisional). */
+  maxUnreadPerSender: number;
   /**
    * DB dialect — controls whether the in-TX cell-guard SELECT emits `FOR SHARE`.
    *   - 'postgres': emits FOR SHARE so a concurrent `closeCellsByOwner` (which
@@ -62,6 +65,7 @@ export const DEFAULT_SENDER_CONFIG: SenderConfig = {
   maxBodyBytes: 65536,
   maxActionBytes: 16384,
   idempotencyKeyMaxLength: 256,
+  maxUnreadPerSender: 500,
   dialect: 'sqlite',
 };
 
@@ -154,6 +158,39 @@ export function createSender(deps: SenderDeps): Sender {
     return (result.numInsertedOrUpdatedRows ?? 0n) > 0n;
   }
 
+  // Count and INSERT share the transaction, so they must exclude concurrent sends of
+  // the same pair. better-sqlite3 runs one transaction at a time; Postgres needs the
+  // advisory lock, which `FOR SHARE` on the Cell does not replace.
+  async function enforceSenderQuota(
+    tx: Transaction<Database>,
+    cellId: UUIDv7,
+    senderId: UUIDv7,
+    recipientId: UUIDv7,
+  ): Promise<void> {
+    if (config.dialect === 'postgres') {
+      await sql`select pg_advisory_xact_lock(hashtextextended(${`${senderId}:${cellId}`}, 0))`.execute(
+        tx,
+      );
+    }
+    const limit = config.maxUnreadPerSender;
+    const current = await deps.cellsRepo.countUnreadFromSender(cellId, senderId, tx);
+    if (current < limit) return;
+    deps.logger?.warn(
+      {
+        event: 'cell_sender_quota_exceeded',
+        participantId: senderId,
+        recipientId,
+        limit,
+        currentUnread: current,
+      },
+      'sender quota exceeded',
+    );
+    throw new CellError('SENDER_QUOTA_EXCEEDED', {
+      subCode: 'pair_unread_cap',
+      data: { limit, current },
+    });
+  }
+
   async function sendMessage(input: SendMessageInput): Promise<SendResult> {
     // ── 1. validate input shape ──
     validateBodySize(input.body, config.maxBodyBytes);
@@ -227,6 +264,8 @@ export function createSender(deps: SenderDeps): Sender {
           throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'visibility_denied' });
         }
 
+        await enforceSenderQuota(tx, recipientCellRow.id, senderId, input.recipientId);
+
         const message: Message = {
           id: messageId,
           cellId: recipientCellRow.id,
@@ -288,6 +327,23 @@ export function createSender(deps: SenderDeps): Sender {
           storedAt: winning.storedAt,
           replayed: true,
         };
+      }
+      // The loser of an idempotency race can reach the quota check: the key it lost to
+      // is the answer, not the quota.
+      if (
+        err instanceof CellError &&
+        err.code === 'SENDER_QUOTA_EXCEEDED' &&
+        input.idempotencyKey !== undefined
+      ) {
+        const winning = await idempotencyLookup(senderId, input.recipientId, input.idempotencyKey);
+        if (winning) {
+          return {
+            messageId: winning.messageId,
+            sentAt: winning.sentAt,
+            storedAt: winning.storedAt,
+            replayed: true,
+          };
+        }
       }
       throw err;
     }

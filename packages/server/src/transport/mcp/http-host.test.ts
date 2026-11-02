@@ -10,6 +10,7 @@ import type { CellsRepo, Reader, Sender } from '#domain/cells/index.js';
 import type { PresenceRegistry } from '#domain/notifications/index.js';
 import type { VisibilityEngine } from '#domain/visibility/index.js';
 import { createLogger } from '#observability/logger.js';
+import type { Logger } from '#observability/logger.js';
 
 import type { LastConnectedRefresher } from './auth-binding.js';
 import {
@@ -38,17 +39,19 @@ interface StubOptions {
   listenEdge?: ListenEdge;
   lastConnected?: LastConnectedRefresher;
   host?: HttpHostOptions;
+  logger?: Logger;
+  cellsRepo?: Partial<CellsRepo>;
 }
 
 let current: HttpHost | undefined;
 
 async function startHost(options: StubOptions = {}): Promise<string> {
-  const logger = createLogger({ level: 'silent' });
+  const logger = options.logger ?? createLogger({ level: 'silent' });
   const mcpTransport = createMcpTransport({
     participantsRepo: {
       getParticipantState: () => Promise.resolve({ state: 'active' }),
     } as unknown as ParticipantsReadRepo,
-    cellsRepo: {} as CellsRepo,
+    cellsRepo: (options.cellsRepo ?? {}) as CellsRepo,
     sender: (options.sender ?? {}) as Sender,
     reader: (options.reader ?? {}) as Reader,
     visibilityEngine: {} as VisibilityEngine,
@@ -281,6 +284,28 @@ describe('error codes on the wire', () => {
   });
 });
 
+describe('resources for a caller without a Cell', () => {
+  const noCell = { findCellByOwner: () => Promise.resolve(null) };
+
+  it('resources/list answers an empty list', async () => {
+    const url = await startHost({ cellsRepo: noCell });
+    const res = await post(url, 'resources/list');
+    expect(((await res.json()) as { result: { resources: unknown[] } }).result.resources).toEqual(
+      [],
+    );
+  });
+
+  it('resources/read answers the same -32602 as a foreign URI', async () => {
+    const url = await startHost({ cellsRepo: noCell });
+    const uri = 'hive://cells/any';
+    const res = await post(url, 'resources/read', { uri }, { 'mcp-name': uri });
+    expect(((await res.json()) as RpcError).error).toMatchObject({
+      code: -32602,
+      message: 'invalid input',
+    });
+  });
+});
+
 describe('listen edge', () => {
   const listen = (url: string) =>
     post(url, 'subscriptions/listen', {
@@ -317,6 +342,54 @@ describe('listen edge', () => {
     expect(onResponse).toHaveBeenCalledTimes(1);
     expect(onResponse.mock.calls[0]?.[0]).toMatchObject({ identity: IDENTITY });
     abort.abort();
+  });
+
+  it('tells the edge once the acknowledgment reached the response', async () => {
+    const onAcknowledged = vi.fn();
+    const url = await startHost({
+      listenEdge: { authorize: () => null, onResponse: () => ({ onAcknowledged }) },
+    });
+
+    const res = await post(url, 'subscriptions/listen', {
+      notifications: { resourceSubscriptions: [] },
+    });
+    await res.text();
+
+    expect(onAcknowledged).toHaveBeenCalledOnce();
+  });
+
+  it('a throwing edge is logged and answers 500, without a stream', async () => {
+    const logger = createLogger({ level: 'silent' });
+    const error = vi.spyOn(logger, 'error');
+    const url = await startHost({
+      logger,
+      listenEdge: {
+        authorize: () => Promise.reject(new Error('db down')),
+        onResponse: () => undefined,
+      },
+    });
+
+    const res = await listen(url);
+
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as RpcError).error.code).toBe(-32603);
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'mcp_handler_failed', err: 'db down' }),
+      expect.any(String),
+    );
+  });
+
+  it('a listen in a batch never reaches the SDK router unauthorized', async () => {
+    const onResponse = vi.fn();
+    const url = await startHost({ listenEdge: { authorize: () => null, onResponse } });
+
+    const res = await fetch(url, {
+      ...listenInit(),
+      body: JSON.stringify([JSON.parse(listenInit().body as string)]),
+    });
+
+    expect(res.headers.get('content-type')).not.toContain('text/event-stream');
+    expect(onResponse).not.toHaveBeenCalled();
   });
 
   it('is not consulted for any other method', async () => {

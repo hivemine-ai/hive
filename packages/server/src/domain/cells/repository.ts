@@ -144,6 +144,8 @@ export interface MarkMessageReadResult {
 export interface SummarizeUnreadResult {
   unreadCount: number;
   distinctSenderIds: UUIDv7[];
+  /** Newest unread message by `(stored_at, id)`; `null` iff `unreadCount === 0`. */
+  latestMessageId: UUIDv7 | null;
 }
 
 export interface CellsRepo {
@@ -205,13 +207,19 @@ export interface CellsRepo {
    *     (per tech spec — deterministic across SQLite/Postgres).
    *
    * Defense-in-depth: if there are no rows (e.g. closed Cell with no stored messages),
-   * returns `{ unreadCount: 0, distinctSenderIds: [] }` silently — no error. The query
+   * returns `{ unreadCount: 0, distinctSenderIds: [], latestMessageId: null }` silently — no error. The query
    * is NOT cell-state-gated; per the tech spec, no normal caller invokes this on a
    * closed Cell (Waggle suppresses push beforehand), so the contract simply reports
    * what the index sees. Does not invoke `computeMessageState`; transiently-expired
    * rows pending the materialization job may count (≤ HIVE_CELL_EXPIRATION_INTERVAL_SECONDS drift).
    */
   summarizeUnreadForCell(cellId: UUIDv7, executor?: DbExecutor): Promise<SummarizeUnreadResult>;
+
+  /**
+   * Stored messages of one sender in one Cell. Backs the per-sender quota of
+   * `sendMessage`, which reads it inside its transaction.
+   */
+  countUnreadFromSender(cellId: UUIDv7, senderId: UUIDv7, executor?: DbExecutor): Promise<number>;
 
   /**
    * PK lookup with cell-membership guard — consumed by PRY-005 MCP (`send_message`
@@ -428,6 +436,16 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
           // coercion below handles all three; the generic stays honest.
           eb.fn.countAll<string | number | bigint>().as('cnt'),
           eb.fn.max('stored_at').as('max_stored'),
+          // Scalar subquery: same filter as the aggregate, no second round trip.
+          eb
+            .selectFrom('messages as latest')
+            .select('latest.id')
+            .where('latest.cell_id', '=', cellId)
+            .where('latest.state', '=', 'stored')
+            .orderBy('latest.stored_at', 'desc')
+            .orderBy('latest.id', 'desc')
+            .limit(1)
+            .as('latest_message_id'),
         ])
         .where('cell_id', '=', cellId)
         .where('state', '=', 'stored')
@@ -438,7 +456,23 @@ export function createCellsRepo(db: Kysely<Database>): CellsRepo {
 
       const unreadCount = rows.reduce((acc, r) => acc + Number(r.cnt), 0);
       const distinctSenderIds = rows.map((r) => r.from_participant_id);
-      return { unreadCount, distinctSenderIds };
+      return {
+        unreadCount,
+        distinctSenderIds,
+        latestMessageId: rows[0]?.latest_message_id ?? null,
+      };
+    },
+
+    async countUnreadFromSender(cellId, senderId, executor) {
+      const exec = executor ?? db;
+      const row = await exec
+        .selectFrom('messages')
+        .select((eb) => eb.fn.countAll<string | number | bigint>().as('cnt'))
+        .where('cell_id', '=', cellId)
+        .where('from_participant_id', '=', senderId)
+        .where('state', '=', 'stored')
+        .executeTakeFirstOrThrow();
+      return Number(row.cnt);
     },
 
     async findMessageById(messageId, cellId, executor) {

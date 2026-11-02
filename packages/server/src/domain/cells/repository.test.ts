@@ -418,6 +418,60 @@ describe('cells repository', () => {
     });
   });
 
+  describe('countUnreadFromSender', () => {
+    it('counts only stored messages of that sender in that Cell', async () => {
+      const repo = createCellsRepo(world.db);
+      const cell = await repo.createCell({
+        ownerId: world.agentA,
+        ownerKind: 'agent',
+        hiveId: world.hiveId,
+      });
+      const other = await repo.createCell({
+        ownerId: world.agentB,
+        ownerKind: 'agent',
+        hiveId: world.hiveId,
+      });
+      const sender = uuidv7();
+      const at = new Date('2026-04-26T10:00:00.000Z');
+      const seed = async (cellId: string, from: string, state: Message['state']): Promise<void> => {
+        await repo.insertMessage({
+          id: uuidv7(),
+          cellId,
+          fromParticipantId: from,
+          toParticipantId: world.agentA,
+          type: 'notification',
+          body: 'x',
+          action: null,
+          replyTo: null,
+          ttl: null,
+          sentAt: at,
+          storedAt: at,
+          readAt: state === 'read' ? at : null,
+          state,
+          expiredAt: null,
+        });
+      };
+      await seed(cell.id, sender, 'stored');
+      await seed(cell.id, sender, 'stored');
+      await seed(cell.id, sender, 'read');
+      await seed(cell.id, sender, 'expired');
+      await seed(cell.id, uuidv7(), 'stored');
+      await seed(other.id, sender, 'stored');
+
+      expect(await repo.countUnreadFromSender(cell.id, sender)).toBe(2);
+    });
+
+    it('is 0 for a pair with no messages', async () => {
+      const repo = createCellsRepo(world.db);
+      const cell = await repo.createCell({
+        ownerId: world.agentA,
+        ownerKind: 'agent',
+        hiveId: world.hiveId,
+      });
+      expect(await repo.countUnreadFromSender(cell.id, uuidv7())).toBe(0);
+    });
+  });
+
   describe('summarizeUnreadForCell', () => {
     it('returns { 0, [] } for an empty cell with no messages', async () => {
       const repo = createCellsRepo(world.db);
@@ -427,7 +481,7 @@ describe('cells repository', () => {
         hiveId: world.hiveId,
       });
       const result = await repo.summarizeUnreadForCell(cell.id);
-      expect(result).toEqual({ unreadCount: 0, distinctSenderIds: [] });
+      expect(result).toEqual({ unreadCount: 0, distinctSenderIds: [], latestMessageId: null });
     });
 
     it('counts all stored messages and orders distinct senders by MAX(stored_at) DESC, sender ASC', async () => {
@@ -478,6 +532,46 @@ describe('cells repository', () => {
       const result = await repo.summarizeUnreadForCell(cell.id);
       expect(result.unreadCount).toBe(6);
       expect(result.distinctSenderIds).toEqual([senderB, senderA, senderC]);
+    });
+
+    it('latestMessageId is the newest unread by (stored_at, id), over the unread set only', async () => {
+      const repo = createCellsRepo(world.db);
+      const cell = await repo.createCell({
+        ownerId: world.agentA,
+        ownerKind: 'agent',
+        hiveId: world.hiveId,
+      });
+      const at = new Date('2026-04-26T10:00:00.000Z');
+      const seed = async (id: string, sender: string, state: Message['state']): Promise<void> => {
+        await repo.insertMessage({
+          id,
+          cellId: cell.id,
+          fromParticipantId: sender,
+          toParticipantId: world.agentA,
+          type: 'notification',
+          body: 'x',
+          action: null,
+          replyTo: null,
+          ttl: null,
+          sentAt: at,
+          storedAt: at,
+          readAt: state === 'read' ? at : null,
+          state,
+          expiredAt: null,
+        });
+      };
+      // Same stored_at on purpose: the id breaks the tie. The greatest id is read, so
+      // it must not win.
+      const lowest = '01900000-0000-7000-8000-000000000001';
+      const highestUnread = '01900000-0000-7000-8000-000000000002';
+      const read = '01900000-0000-7000-8000-000000000003';
+      await seed(lowest, uuidv7(), 'stored');
+      await seed(highestUnread, uuidv7(), 'stored');
+      await seed(read, uuidv7(), 'read');
+
+      const result = await repo.summarizeUnreadForCell(cell.id);
+      expect(result.latestMessageId).toBe(highestUnread);
+      expect(result.unreadCount).toBe(2);
     });
 
     it('counts only messages with state=stored (excludes read and expired)', async () => {
@@ -534,7 +628,7 @@ describe('cells repository', () => {
       });
       await repo.closeCell({ cellId: cell.id });
       const result = await repo.summarizeUnreadForCell(cell.id);
-      expect(result).toEqual({ unreadCount: 0, distinctSenderIds: [] });
+      expect(result).toEqual({ unreadCount: 0, distinctSenderIds: [], latestMessageId: null });
     });
 
     it('reports stored messages even if the cell was later closed (query is not gated by cell state)', async () => {
