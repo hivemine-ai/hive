@@ -24,6 +24,7 @@ import type { Logger } from '#observability/logger.js';
 import type { DbDialect } from '#persistence/db.js';
 import type { Database } from '#persistence/schema.js';
 
+import { ensureSafeAction, MAX_ACTION_DEPTH } from './action-safety.js';
 import { CellError } from './errors.js';
 import type { CellEvents } from './events.js';
 import type { CellsRepo } from './repository.js';
@@ -455,6 +456,8 @@ function validateIdempotencyKey(key: string | undefined, maxLength: number): voi
 
 function validateAction(action: ActionDescriptor | undefined, maxBytes: number): void {
   if (action === undefined) return;
+  // Depth first: JSON.stringify is recursive and would overflow on a deep value.
+  ensureSafeAction(action, MAX_ACTION_DEPTH);
   const serialized = JSON.stringify(action);
   const byteLength = Buffer.byteLength(serialized, 'utf8');
   if (byteLength > maxBytes) {

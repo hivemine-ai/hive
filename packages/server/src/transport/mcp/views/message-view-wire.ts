@@ -1,6 +1,5 @@
+import { ensureSafeAction, MAX_ACTION_DEPTH } from '#domain/cells/index.js';
 import type { MessageView } from '#domain/cells/index.js';
-
-import { ensureSafeAction, MAX_ACTION_DEPTH } from '../action-safety.js';
 
 /**
  * Wire shape of a Message — Date fields serialised as ISO 8601 UTC strings,

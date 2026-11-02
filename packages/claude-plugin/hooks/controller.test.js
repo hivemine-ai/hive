@@ -581,6 +581,110 @@ describe('retrying while idle', () => {
   });
 });
 
+describe('terminal exits of --once', () => {
+  async function idleWithFlag() {
+    const t = setup();
+    t.hold.on = true;
+    t.setSubmit(() => Promise.resolve({ drop: 'busy' }));
+    t.controller.start();
+    await flush();
+    t.procs[0].push('stdout', line('e1'));
+    await flush();
+    return t;
+  }
+
+  /** Lets the backoff run long enough to expose an unbounded retry. */
+  const drain = async (t, rounds = 8) => {
+    for (let i = 0; i < rounds; i += 1) await t.releaseSleeps();
+  };
+
+  it.each([
+    ['EXIT_USER_ERROR', 1],
+    ['EXIT_PRECONDITION', 4],
+    ['EXIT_INTERRUPTED', 130],
+  ])('stops the idle retry on %s', async (_name, exitCode) => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode, stdout: '', stderr: '' }));
+    await drain(t);
+    expect(t.calls.run).toHaveLength(1);
+  });
+
+  it('keeps retrying on an exit code that may be transient', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 2, stdout: '', stderr: '' }));
+    await drain(t);
+    expect(t.calls.run.length).toBeGreaterThan(1);
+  });
+
+  it('warns once with the WATCH_ code on a rejected credential', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() =>
+      Promise.resolve({
+        exitCode: 4,
+        stdout: '',
+        stderr: 'error: WATCH_CREDENTIAL_REJECTED: rejected\n',
+      }),
+    );
+    await drain(t);
+    t.controller.onTurnStart();
+    t.controller.onTurnComplete();
+    await flush();
+    expect(t.calls.toast).toHaveLength(1);
+    expect(t.calls.toast[0]).toContain('WATCH_CREDENTIAL_REJECTED');
+    expect(t.calls.toast[0]).toContain('--once');
+  });
+
+  it('does not warn on EXIT_INTERRUPTED', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 130, stdout: '', stderr: '' }));
+    await drain(t);
+    expect(t.calls.toast).toHaveLength(0);
+  });
+
+  it('keeps the flag, so the next turn.complete asks again and can recover', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 4, stdout: '', stderr: '' }));
+    await drain(t);
+    t.setSubmit(() => Promise.resolve({ text: 'ok' }));
+    t.setRun(() => Promise.resolve({ exitCode: 0, stdout: line('c', 2), stderr: '' }));
+    t.controller.onTurnStart();
+    t.controller.onTurnComplete();
+    await flush();
+    expect(t.calls.run).toHaveLength(2);
+    expect(t.calls.submit).toHaveLength(2);
+  });
+
+  it('resumes the idle retry when a later event proves the stream is alive', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 4, stdout: '', stderr: '' }));
+    await drain(t);
+    expect(t.calls.run).toHaveLength(1);
+    t.setRun(() => Promise.resolve({ exitCode: 2, stdout: '', stderr: '' }));
+    t.procs[0].push('stdout', line('e2'));
+    await flush();
+    await drain(t);
+    expect(t.calls.run.length).toBeGreaterThan(1);
+  });
+
+  it('warns again after a success, for a new failure episode', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 4, stdout: '', stderr: '' }));
+    await drain(t);
+    t.setSubmit(() => Promise.resolve({ text: 'ok' }));
+    t.setRun(() => Promise.resolve({ exitCode: 0, stdout: '', stderr: '' }));
+    t.controller.onTurnStart();
+    t.controller.onTurnComplete();
+    await flush();
+    t.controller.onTurnStart();
+    t.procs[0].push('stdout', line('e3'));
+    await flush();
+    t.setRun(() => Promise.resolve({ exitCode: 4, stdout: '', stderr: '' }));
+    t.controller.onTurnComplete();
+    await flush();
+    expect(t.calls.toast).toHaveLength(2);
+  });
+});
+
 describe('stop()', () => {
   it('does not submit a turn when stop arrives while --once is in flight', async () => {
     const t = setup();

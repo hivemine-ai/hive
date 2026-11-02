@@ -9,6 +9,7 @@ import { createDb } from '#persistence/db.js';
 import { migrateToLatest } from '#persistence/migrate.js';
 import type { Database } from '#persistence/schema.js';
 
+import { MAX_ACTION_DEPTH } from './action-safety.js';
 import { CellError, isCellError } from './errors.js';
 import { createCellEvents } from './events.js';
 import type { CellEvents, MessageStoredEvent } from './events.js';
@@ -527,6 +528,52 @@ describe('createSender / sendMessage', () => {
           action: { payload: big },
         }),
       ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'action_too_large' });
+    });
+
+    describe('action depth', () => {
+      const nestedAction = (depth: number): Record<string, unknown> => {
+        let action: Record<string, unknown> = { leaf: true };
+        for (let i = 1; i < depth; i += 1) action = { next: action };
+        return action;
+      };
+
+      it('action_too_deep: an action nested one level past the limit throws', async () => {
+        const { sender } = buildSender(world);
+        await expect(
+          sender.sendMessage({
+            callerContext: buildContext(world, world.workerA),
+            recipientId: world.workerB,
+            type: 'request',
+            body: 'x',
+            action: nestedAction(MAX_ACTION_DEPTH + 1),
+          }),
+        ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'action_too_deep' });
+      });
+
+      it('accepts an action exactly at the limit', async () => {
+        const { sender } = buildSender(world);
+        const sent = await sender.sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'request',
+          body: 'x',
+          action: nestedAction(MAX_ACTION_DEPTH),
+        });
+        expect(sent.messageId).toBeTruthy();
+      });
+
+      it('rejects a depth far beyond what JSON.stringify can walk without a stack overflow', async () => {
+        const { sender } = buildSender(world);
+        await expect(
+          sender.sendMessage({
+            callerContext: buildContext(world, world.workerA),
+            recipientId: world.workerB,
+            type: 'request',
+            body: 'x',
+            action: nestedAction(200_000),
+          }),
+        ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'action_too_deep' });
+      });
     });
 
     it('type_unknown: defensive runtime guard for callers that erase types', async () => {

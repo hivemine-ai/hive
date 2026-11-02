@@ -46,7 +46,7 @@ The credential itself is never an option and never reaches the plugin: it only p
   - on `EXIT_PRECONDITION` (4) or `EXIT_USER_ERROR` (1), including `WATCH_CREDENTIAL_REJECTED`, relaunching cannot fix it: the mod does not relaunch and shows a notice with the `WATCH_*` code taken from `watch`'s last stderr line;
   - on `EXIT_INTERRUPTED` (130) it does not relaunch;
   - if `hivectl` cannot be started at all, it shows a notice and does not relaunch.
-- **Idle retry.** If a prompt is rejected, or `--once` fails, while no turn is running, no `turn.complete` will come to recover the flag. The mod then retries `--once` with backoff (1 s doubling to 60 s) for as long as the flag is set. The retry is cancelled when a turn starts, when the flag clears, and when the session ends.
+- **Idle retry.** If a prompt is rejected, or `--once` fails, while no turn is running, no `turn.complete` will come to recover the flag. The mod then retries `--once` with backoff (1 s doubling to 60 s) for as long as the flag is set. The retry is cancelled when a turn starts, when the flag clears, and when the session ends. The retry stops on the exits that also keep `watch` from restarting (usage error, failed precondition such as a rejected credential, interrupted): the mod warns once, keeps the flag, and asks again at the next `turn.complete` or event.
 - **Session end.** At `session.end` the mod stops `watch` and drops its state; the next `session.start` begins from scratch.
 - Esc discards events that were waiting: Claude Code rejects `$.prompt.submit` after Esc until the next user input. The flag stays set and the next `turn.complete` or event recovers whatever is still unread.
 

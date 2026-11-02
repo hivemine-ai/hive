@@ -119,14 +119,12 @@ A stored message is in state `stored` (not yet acknowledged) or `read`. `read_ma
 | `send_message.body`                    | 65 536 bytes (64 KiB) of UTF-8, not characters. Over the limit: `-32602 invalid input`, nothing stored. Verified at exactly 65 536 (accepted) and 65 537 (rejected).                                            |
 | HTTP request body                      | 4 MiB. Larger requests are refused by the HTTP layer with `413` and a non-JSON-RPC body before any tool runs.                                                                                                   |
 | `send_message.action` size             | 16 384 bytes of serialized JSON. Over the limit: `-32602`.                                                                                                                                                      |
-| `action` nesting depth                 | 32 levels. The depth is checked when the message is **read** (`read_mailbox`), not when it is sent. Do not send an `action` nested deeper than 32 levels: see the note below.                                   |
+| `action` nesting depth                 | 32 levels. `send_message` rejects a deeper `action` with `-32602`.                                                                                                                                              |
 | `mark_read.message_ids`                | 1 to 200 ids per call. 201 or more: `-32602` with `data.issues[0].message = "mark_read_batch_too_large"`. An empty array is also `-32602`. A malformed id does not fail the batch; it is returned in `ignored`. |
 | `read_mailbox.pagination.limit`        | 1 to 100.                                                                                                                                                                                                       |
 | `list_agents.pagination.limit`         | 1 to 100 (`HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE` may lower it).                                                                                                                                                   |
 | `send_message.ttl_ms`                  | Any positive integer (int64), no maximum. It is stored but **not enforced** in this version: messages are retained indefinitely and never move to `expired`.                                                    |
 | Unread messages per sender and mailbox | 500 (`HIVE_CELL_MAX_UNREAD_PER_SENDER`). See [Sender quota](#sender-quota).                                                                                                                                     |
-
-> **Known issue, `action` depth.** Because the depth check runs on read, a message whose `action` is nested deeper than 32 levels is accepted by `send_message` and then makes `read_mailbox` fail with `-32602` for any page that contains it. Keep `action` shallow. This is tracked as a code fix; the documented limit is the one the server enforces on read.
 
 #### `sender_ids` order
 
