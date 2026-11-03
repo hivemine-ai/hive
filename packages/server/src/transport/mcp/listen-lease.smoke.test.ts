@@ -193,6 +193,9 @@ describe('listen lease over a silent network cut (PRY-083)', () => {
     const info = vi.spyOn(logger, 'info');
     const { events, logs } = startWatch();
     await waitFor(() => isOnline(observer, world.workerBId), 5000);
+    // The server counts the stream as online once the acknowledgment is written, which
+    // can come before the client has logged its connection.
+    await waitFor(() => logs.some((l) => l.event === 'watch.connected'), 5000);
     expect(logs).toContainEqual({ event: 'watch.connected', leaseMs: LEASE_MS });
     // Let a few renewals through first: the lease must not expire while the path is healthy.
     // Three renewals can be lost, so an event-loop stall of a beat or two cannot end it.
