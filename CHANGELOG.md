@@ -49,6 +49,7 @@ v0.2.0. Hive moves to MCP revision `2026-07-28` and gains stream-bound presence 
 - **INC-2026-007: a quiet worker no longer goes deaf.** See `subscriptions/listen` above.
 - On Postgres, the `FOR SHARE` cell guard of `send_message` never ran because the dialect was not passed to the sender; it does now.
 - `hivectl watch` no longer reports an HTTP 403 as a rejected credential: only the Origin/Host guard sends it, so it is retried as a transport failure with a message that names `HIVE_MCP_ALLOWED_ORIGINS` and `HIVE_MCP_ALLOWED_HOSTS`.
+- `hivectl watch` no longer waits on a server that does not answer while it closes a dead stream, which could hold up the reconnection after a network cut.
 - An event with more than 256 distinct senders is no longer dropped by `hivectl watch`: the list of senders is truncated and `count` stays exact.
 - The server refuses to start with `HIVE_LISTEN_KEEPALIVE_INTERVAL_MS` at or above `45000`, which would make `hivectl watch` reconnect in a loop.
 - `send_message` now rejects an `action` nested deeper than 32 levels with `-32602`. It used to accept it and then make `read_mailbox` fail for every page that contained the message.

@@ -85,8 +85,20 @@ export async function connectClient(options: SdkClientOptions): Promise<Client> 
 }
 
 export async function closeClient(client: Client, timeoutMs = 1000): Promise<void> {
+  await settleWithin(client.close(), timeoutMs);
+}
+
+/**
+ * Waits for a best-effort step, for at most `timeoutMs`. Closing talks to the
+ * server, and on a silent network that never answers, which must not hold up a
+ * reconnection.
+ */
+export async function settleWithin(step: Promise<unknown>, timeoutMs = 1000): Promise<void> {
   await Promise.race([
-    client.close().catch(() => {}),
+    step.then(
+      () => undefined,
+      () => undefined,
+    ),
     new Promise<void>((resolve) => setTimeout(resolve, timeoutMs).unref()),
   ]);
 }

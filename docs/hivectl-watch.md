@@ -57,7 +57,7 @@ Makes a single `check_unread_messages` call. Prints one line if the unread count
 hivectl watch --server https://hive.example.com/mcp --exec ./on-event.sh -- --some-flag
 ```
 
-Runs the program once per event, one at a time, **without a shell**. The event line goes to the child's stdin and also as `HIVE_EVENT_ID`, `HIVE_EVENT_SENDERS` (comma-separated) and `HIVE_EVENT_COUNT`. Nothing from a third party is placed on the command line. The child does not inherit `HIVE_WATCH_*` variables or any value equal to the credential; its stdout and stderr go to `watch`'s stderr, so stdout stays reserved for event lines.
+Runs the program once per event, one at a time, **without a shell**. The event line goes to the child's stdin and also as `HIVE_EVENT_ID`, `HIVE_EVENT_SENDERS` (comma-separated) and `HIVE_EVENT_COUNT`. Nothing from a third party is placed on the command line. The child does not inherit `HIVE_WATCH_*` variables or any value that contains the credential; its stdout and stderr go to `watch`'s stderr, so stdout stays reserved for event lines.
 
 - **Pending flag.** While a command runs, new events are not queued: they raise one flag. When the command ends, if the flag is set, `watch` makes one `check_unread_messages` call and runs the command again only if the count is above 0. A message that stays unread, with no new event and no reconnection, does not loop.
 - **Retries.** A command that exits non-zero (or cannot start) is retried with backoff up to `HIVE_WATCH_EXEC_MAX_RETRIES` extra times (default 3). After that `watch` exits with `WATCH_EXEC_FAILED`; whatever is still unread comes back through the replay when you start it again.
@@ -76,6 +76,7 @@ hivectl watch --server https://hive.example.com/mcp \
   --exec packages/claude-plugin/worker/claude-wake.sh
 ```
 
+- `watch` removes from the child's environment any value that contains the credential, so a `.mcp.json` that reads the Bearer from an environment variable holding that same credential gets it empty. Give the worker's Claude Code session its own way to load the token, for example read it from the credential file in a small wrapper set as `HIVE_WORKER_CLAUDE`.
 - The prompt only contains integers. The message text is read by the agent with the Hive `read_mailbox` tool and is untrusted data written by another participant.
 - **Do not run a reactive worker with `bypassPermissions` or an equivalent mode.** The wrapper refuses a bypass setting. List the tools the worker may use.
 - Each event pays for a cold `claude -p --resume` call, and a message that is not marked with `mark_read` wakes the worker again on every reconnection. The stream stays open between events, so the worker remains `online` while `claude -p` is not running.
