@@ -250,6 +250,19 @@ describe('listen lease over the 2.x SDK', () => {
     await done;
   });
 
+  it('a lease above 24 h is treated as no lease: no renewals', async () => {
+    await restart(20_000_000_000);
+    const { done } = startLoop();
+    await waitFor(() => listenKeys().length === 1);
+
+    await new Promise((r) => setTimeout(r, LEASE_MS * 2));
+
+    expect(server.leaseRequests.filter((r) => r.method === 'server/discover' && r.key)).toEqual([]);
+    expect(logs).toContainEqual({ event: 'watch.connected', leaseMs: null });
+    controller.abort();
+    await done;
+  });
+
   it('stops renewing when the stream ends, and the next connection uses a fresh key', async () => {
     await restart(LEASE_MS);
     const { done } = startLoop();

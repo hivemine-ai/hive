@@ -186,6 +186,33 @@ describe('resolveWireConfigFromEnv — listen', () => {
     expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '86400001' })).toThrow();
   });
 
+  it.each([
+    [-1, /HIVE_LISTEN_LEASE_MS must be an integer of 0 \(disabled\) or between 400 and 86400000/],
+    [Number.NaN, /HIVE_LISTEN_LEASE_MS must be an integer/],
+    [1.5, /HIVE_LISTEN_LEASE_MS must be an integer/],
+    [399, /between 400 and 86400000, got 399/],
+    [86_400_001, /between 400 and 86400000, got 86400001/],
+  ])('validates an override of %s like the env value', (leaseMs, message) => {
+    expect(() =>
+      resolveWireConfigFromEnv({}, { listenKeepAliveIntervalMs: 100, listenLeaseMs: leaseMs }),
+    ).toThrow(message);
+  });
+
+  it('rejects an env lease below the floor that keeps beats at a quarter of it', () => {
+    expect(() =>
+      resolveWireConfigFromEnv({
+        HIVE_LISTEN_LEASE_MS: '399',
+        HIVE_LISTEN_KEEPALIVE_INTERVAL_MS: '100',
+      }),
+    ).toThrow(/between 400 and 86400000/);
+    expect(
+      resolveWireConfigFromEnv({
+        HIVE_LISTEN_LEASE_MS: '400',
+        HIVE_LISTEN_KEEPALIVE_INTERVAL_MS: '100',
+      }).listenLeaseMs,
+    ).toBe(400);
+  });
+
   it('a disabled lease skips the keep-alive check', () => {
     expect(
       resolveWireConfigFromEnv({

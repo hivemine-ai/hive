@@ -231,19 +231,23 @@ function resolveStallTimeoutMs(env: NodeJS.ProcessEnv, overrides: WireConfig): n
 }
 
 const MAX_LEASE_MS = 24 * 60 * 60 * 1000;
-
 // The client renews every quarter of the lease, so three renewals can be lost before it
-// runs out. The lease must also outlast a keep-alive period, or an idle but healthy
-// stream would look the same as a dead one to anyone reading the logs.
+// runs out. It never renews faster than every 100 ms, hence the floor.
+const MIN_LEASE_MS = 400;
+
+// The lease must also outlast a keep-alive period, or an idle but healthy stream would
+// look the same as a dead one to anyone reading the logs. Env and override values go
+// through the same checks.
 function resolveLeaseMs(env: NodeJS.ProcessEnv, overrides: WireConfig): number {
   const leaseMs =
     overrides.listenLeaseMs ??
-    parseIntEnv(env['HIVE_LISTEN_LEASE_MS'], 60_000, {
-      name: 'HIVE_LISTEN_LEASE_MS',
-      min: 0,
-      max: MAX_LEASE_MS,
-    });
+    parseIntEnv(env['HIVE_LISTEN_LEASE_MS'], 60_000, { name: 'HIVE_LISTEN_LEASE_MS' });
   if (leaseMs === 0) return 0;
+  if (!Number.isInteger(leaseMs) || leaseMs < MIN_LEASE_MS || leaseMs > MAX_LEASE_MS) {
+    throw new Error(
+      `HIVE_LISTEN_LEASE_MS must be an integer of 0 (disabled) or between ${String(MIN_LEASE_MS)} and ${String(MAX_LEASE_MS)}, got ${String(leaseMs)}`,
+    );
+  }
   const keepAliveMs = resolveKeepAliveIntervalMs(env, overrides);
   if (leaseMs <= keepAliveMs) {
     throw new Error(

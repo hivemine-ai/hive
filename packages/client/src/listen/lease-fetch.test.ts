@@ -71,11 +71,24 @@ describe('leaseFetch', () => {
     expect(lease.leaseMs).toBeNull();
   });
 
-  it.each(['0', '-5', 'abc', '1.5', ''])('ignores a malformed lease header (%j)', async (value) => {
+  it.each(['0', '-5', 'abc', '1.5', '', 'NaN', '399', '86400001', '20000000000'])(
+    'ignores a malformed or out-of-range lease header (%j)',
+    async (value) => {
+      const { base } = recorder({ 'hive-listen-lease-ms': value });
+      const lease = createLease();
+      await leaseFetch(base, lease)('http://h/mcp', rpc('subscriptions/listen'));
+      expect(lease.leaseMs).toBeNull();
+    },
+  );
+
+  it.each([
+    ['400', 400],
+    ['86400000', 86_400_000],
+  ])('accepts the bounds of the range (%s)', async (value, expected) => {
     const { base } = recorder({ 'hive-listen-lease-ms': value });
     const lease = createLease();
     await leaseFetch(base, lease)('http://h/mcp', rpc('subscriptions/listen'));
-    expect(lease.leaseMs).toBeNull();
+    expect(lease.leaseMs).toBe(expected);
   });
 
   it('a discover carries the key only once a lease was granted: the probe never does', async () => {
@@ -112,7 +125,8 @@ describe('beatIntervalMs', () => {
     expect(beatIntervalMs(600)).toBe(150);
   });
 
-  it('never beats faster than the floor, whatever the server says', () => {
-    expect(beatIntervalMs(4)).toBe(100);
+  it('is always exactly a quarter, so three renewals can be lost', () => {
+    expect(beatIntervalMs(400)).toBe(100);
+    expect(beatIntervalMs(1000) * 4).toBe(1000);
   });
 });

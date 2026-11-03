@@ -467,6 +467,43 @@ describe('listen edge', () => {
       expect(JSON.stringify(await res.json())).toContain('supportedVersions');
     });
 
+    it('a renewal that matches no lease is logged at debug, without the key', async () => {
+      const logger = createLogger({ level: 'silent' });
+      const debug = vi.spyOn(logger, 'debug');
+      const url = await startHost({
+        logger,
+        listenEdge: { authorize: () => null, onResponse: () => undefined, renewLease: () => false },
+      });
+
+      await post(url, 'server/discover', {}, { 'hive-listen-lease': KEY });
+
+      const call = debug.mock.calls.find(
+        ([fields]) => (fields as { event?: string }).event === 'mcp_listen_lease_unmatched',
+      );
+      expect(call?.[0]).toEqual({
+        event: 'mcp_listen_lease_unmatched',
+        participantId: PARTICIPANT_ID,
+      });
+      expect(JSON.stringify(call)).not.toContain(KEY);
+    });
+
+    it('a renewal that matches logs nothing at debug', async () => {
+      const logger = createLogger({ level: 'silent' });
+      const debug = vi.spyOn(logger, 'debug');
+      const url = await startHost({
+        logger,
+        listenEdge: { authorize: () => null, onResponse: () => undefined, renewLease: () => true },
+      });
+
+      await post(url, 'server/discover', {}, { 'hive-listen-lease': KEY });
+
+      expect(
+        debug.mock.calls.some(
+          ([fields]) => (fields as { event?: string }).event === 'mcp_listen_lease_unmatched',
+        ),
+      ).toBe(false);
+    });
+
     it('server/discover without the header renews nothing', async () => {
       const renewLease = vi.fn(() => true);
       const url = await startHost({

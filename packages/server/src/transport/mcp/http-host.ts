@@ -214,7 +214,14 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
     const isListen = method === LISTEN_METHOD;
     const leaseKey = headerString(req.headers[LEASE_REQUEST_HEADER]);
     if (method === DISCOVER_METHOD && leaseKey !== undefined) {
-      deps.listenEdge?.renewLease({ key: leaseKey, identity });
+      const renewed = deps.listenEdge?.renewLease({ key: leaseKey, identity }) ?? false;
+      if (!renewed) {
+        // Never the key: it is the only thing that lets a request renew the stream.
+        deps.logger.debug(
+          { event: 'mcp_listen_lease_unmatched', participantId: identity.participantId },
+          'lease renewal matched no open stream',
+        );
+      }
     }
     const requestId = getRequestIdFromLogger(req.log as Logger) ?? uuidv7();
     const abort = new AbortController();

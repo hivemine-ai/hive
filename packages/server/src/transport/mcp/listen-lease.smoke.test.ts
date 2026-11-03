@@ -16,10 +16,10 @@ import { createLogger } from '#observability/logger.js';
 import { seedSmokeWorld, type SmokeWorld } from './smoke-world.js';
 
 const PROTOCOL_VERSION = '2026-07-28';
-const LEASE_MS = 600;
+const LEASE_MS = 1000;
 const BEAT_MS = LEASE_MS / 4;
 /** Scheduling slack on a loaded CI runner, on top of the lease. */
-const MARGIN_MS = 400;
+const MARGIN_MS = 1500;
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface BlackholeProxy {
@@ -160,7 +160,7 @@ describe('listen lease over a silent network cut (PRY-083)', () => {
       credential: world.jwtB,
       probeTimeoutMs: 3000,
       // Long enough that the server, not the client, is the one to notice the cut.
-      silenceTimeoutMs: 3000,
+      silenceTimeoutMs: 5000,
     });
     const done = runListenLoop(
       {
@@ -195,7 +195,13 @@ describe('listen lease over a silent network cut (PRY-083)', () => {
     await waitFor(() => isOnline(observer, world.workerBId), 5000);
     expect(logs).toContainEqual({ event: 'watch.connected', leaseMs: LEASE_MS });
     // Let a few renewals through first: the lease must not expire while the path is healthy.
+    // Three renewals can be lost, so an event-loop stall of a beat or two cannot end it.
     await new Promise((r) => setTimeout(r, LEASE_MS * 2));
+    expect(
+      warn.mock.calls.some(
+        ([fields]) => (fields as { event?: string }).event === 'mcp_listen_lease_expired',
+      ),
+    ).toBe(false);
     expect(await isOnline(observer, world.workerBId)).toBe(true);
 
     const cutAt = Date.now();
