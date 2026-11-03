@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { v7 as uuidv7 } from 'uuid';
 
+import { sql } from 'kysely';
 import type { Kysely } from 'kysely';
 
 import type { IdentityContext, UUIDv7 } from '#domain/auth/types.js';
@@ -33,8 +34,19 @@ interface SendWorld {
   cellB: UUIDv7;
 }
 
+// PRY-085: set HIVE_TEST_PG_URL to run this whole suite against Postgres (CI `postgres` job).
+// The `public` schema is recreated per world, so point it at a throwaway database.
+const PG_URL = process.env['HIVE_TEST_PG_URL'];
+
 async function seedSendWorld(): Promise<SendWorld> {
-  const db = createDb({ dialect: 'sqlite', url: 'sqlite::memory:' });
+  const db =
+    PG_URL !== undefined && PG_URL !== ''
+      ? createDb({ dialect: 'postgres', url: PG_URL, postgresPoolSize: 20 })
+      : createDb({ dialect: 'sqlite', url: 'sqlite::memory:' });
+  if (PG_URL !== undefined && PG_URL !== '') {
+    await sql`drop schema if exists public cascade`.execute(db);
+    await sql`create schema public`.execute(db);
+  }
   await migrateToLatest(db);
 
   const hiveId = uuidv7();
@@ -165,7 +177,7 @@ function buildSender(
     visibilityEngine: visibility,
     events: world.events,
     db: world.db,
-    ...(options.config !== undefined ? { config: options.config } : {}),
+    config: { dialect: PG_URL ? 'postgres' : 'sqlite', ...options.config },
     ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.onEmitError !== undefined ? { onEmitError: options.onEmitError } : {}),
     ...(options.logger !== undefined ? { logger: options.logger } : {}),
@@ -334,6 +346,23 @@ describe('createSender / sendMessage', () => {
       );
       expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
       expect(await countStored()).toBe(3);
+    });
+
+    it('many parallel sends from one sender never exceed the cap', async () => {
+      const cap = 5;
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: cap } });
+      const results = await Promise.allSettled(
+        Array.from({ length: 30 }, (_, i) =>
+          sender.sendMessage({
+            callerContext: buildContext(world, world.workerA),
+            recipientId: world.workerB,
+            type: 'notification',
+            body: `burst-${String(i)}`,
+          }),
+        ),
+      );
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(cap);
+      expect(await countStored()).toBe(cap);
     });
   });
 
