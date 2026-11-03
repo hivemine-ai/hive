@@ -5,7 +5,7 @@
 import { ListenError } from './errors.js';
 import { parseWaggleMeta } from './event.js';
 import type { CloseReason, ConnectHandlers, ListenConnection } from './listen-loop.js';
-import { closeClient, connectClient, toListenError } from './sdk-client.js';
+import { closeClient, connectClient, settleWithin, toListenError } from './sdk-client.js';
 import type { SdkClientOptions } from './sdk-client.js';
 
 export interface SdkConnectorOptions extends Omit<SdkClientOptions, 'onBytes'> {
@@ -67,7 +67,7 @@ export function createSdkConnector(
         closed,
         close: async () => {
           if (timer) clearInterval(timer);
-          await subscription.close().catch(() => {});
+          await settleWithin(subscription.close());
           await closeClient(client);
         },
       };

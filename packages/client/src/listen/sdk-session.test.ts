@@ -181,6 +181,28 @@ describe('listen over the 2.x SDK', () => {
   });
 });
 
+describe('closing over a silent network', () => {
+  it('does not let a swallowed cancel hold up the reconnection', async () => {
+    let blackhole = false;
+    const connect = createSdkConnector({
+      url: server.url,
+      credential: TOKEN,
+      probeTimeoutMs: 3000,
+      silenceTimeoutMs: 45_000,
+      fetch: (input, init) =>
+        blackhole ? new Promise<Response>(() => undefined) : fetch(input, init),
+    });
+    const connection = await connect(
+      { onEvent: () => undefined, onDiscard: () => undefined },
+      controller.signal,
+    );
+    blackhole = true;
+    const started = Date.now();
+    await connection.close();
+    expect(Date.now() - started).toBeLessThan(2500);
+  }, 15_000);
+});
+
 describe('checkUnread over the 2.x SDK', () => {
   const opts = () => ({ url: server.url, credential: TOKEN, probeTimeoutMs: 3000 });
 
