@@ -45,4 +45,3 @@ server:
   - server-stateless:sep-2575-http-server-no-independent-requests-on-stream
   - server-stateless:sep-2575-server-no-log-without-loglevel
   - caching:sep-2549-prompts-list-caching-hints
-  - caching:sep-2549-resources-templates-list-caching-hints

@@ -801,6 +801,39 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     });
   });
 
+  it('resources/templates/list serves the mailbox URI template, cacheable and identical to resources/list', async () => {
+    const templates = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'resources/templates/list',
+    });
+    expect(templates.body?.error).toBeUndefined();
+    const result = templates.body?.result as {
+      resourceTemplates: { uriTemplate: string; name: string; mimeType: string }[];
+      ttlMs: number;
+      cacheScope: string;
+      resultType: string;
+    };
+    expect(result.resourceTemplates).toHaveLength(1);
+    expect(result.resourceTemplates[0]).toMatchObject({
+      uriTemplate: 'hive://cells/{cellId}',
+      name: 'mailbox',
+      mimeType: 'application/json',
+    });
+    expect(result.cacheScope).toBe('public');
+    expect(result.ttlMs).toBe(60_000);
+    expect(result.resultType).toBe('complete');
+
+    const listed = await rpc(world.baseUrl, world.jwtA, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'resources/list',
+    });
+    const resource = (listed.body?.result as { resources: Record<string, string>[] }).resources[0]!;
+    expect(resource.name).toBe(result.resourceTemplates[0]!.name);
+    expect(resource.mimeType).toBe(result.resourceTemplates[0]!.mimeType);
+  });
+
   it('rejects a foreign or unknown mailbox URI in resources/read with -32602, uniformly', async () => {
     const listed = await rpc(world.baseUrl, world.jwtB, {
       jsonrpc: '2.0',

@@ -19,7 +19,7 @@ The script creates a throwaway SQLite Hive in a temp directory (`hivectl init`),
 
 ## Result
 
-104 checks pass and 68 are baselined failures (the totals count the not-scored extension scenarios too, which never decide the exit code). Passing, among others: `tools-list`, `resources-list`, `sep-2164-resource-not-found`, `server-sse-multiple-streams`, `dns-rebinding-protection`, `http-header-validation`, the 24 other `server-stateless` checks (`server/discover`, the `_meta` envelope, version and header rules) and the `caching` hints of `tools/list`.
+105 checks pass and 67 are baselined failures (the totals count the not-scored extension scenarios too, which never decide the exit code). Passing, among others: `tools-list`, `resources-list`, `sep-2164-resource-not-found`, `server-sse-multiple-streams`, `dns-rebinding-protection`, `http-header-validation`, the 24 other `server-stateless` checks (`server/discover`, the `_meta` envelope, version and header rules) and the `caching` hints of `tools/list`.
 
 ## Known deviations
 
@@ -29,12 +29,13 @@ All are listed in `deployment/conformance/baseline.yml`. The runner fails if a b
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `tools-call-*`, `input-required-result-*` (fixture ones), `server-stateless` diagnostic-tool checks, `resources-read-*`, `resources-templates-read`, `missing-input-response`, `ignore-extra-params` | Fixture scenarios: they call tools and resources that exist only in the suite's reference server (`test_simple_text`, `test://static-text`, ...). Hive exposes its 8 messaging tools and one mailbox resource. Not a protocol error. |
 | `prompts-*`, `caching:sep-2549-prompts-list-caching-hints`, `completion-complete`                                                                                                                    | Hive does not declare `prompts` or `completions` (see [MCP Server](mcp-server.md#protocol)); `Method not found` is the correct answer.                                                                                               |
-| `caching:sep-2549-resources-templates-list-caching-hints`, `input-required-result-non-tool-request`                                                                                                  | Debatable, not fixed: Hive declares `resources` but serves no resource templates and answers `resources/templates/list` with `-32601`. Serving an empty list would be a design decision for a later PRY.                             |
+| `input-required-result-non-tool-request`                                                                                                                                                             | Hive declares `resources` but serves no resource outside the caller mailbox: a non-tool request that needs input has nothing to run on. Not a protocol error.                                                                        |
 
 Not scored and not baselined (they never fail the run): the `tasks-*` extension scenarios, `json-schema-2020-12` and `http-custom-header-server-validation`. Hive implements no Tasks extension, ships no tool with `x-mcp-header` annotations and has no `json_schema_2020_12_tool` fixture.
 
 ## Fixed because of this suite
 
+- `resources/templates/list` now serves the mailbox template `hive://cells/{cellId}` (RFC 6570), with the same name, title, description and `mimeType` as `resources/list`, cacheable like `tools/list`. It was `-32601` before (PRY-085).
 - `resources/read` on a mailbox URI the caller does not own now echoes the URI in the error data (`data.uri`, SEP-2164). The code and message are unchanged and a foreign mailbox stays indistinguishable from a missing one.
 
 ## Upgrading the suite
