@@ -6,9 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **MCP conformance in CI** (PRY-085). A new `conformance` job in `pr.yml` runs the official `@modelcontextprotocol/conformance` suite (pinned to `0.2.0-alpha.12`, requirement set `2026-07-28`) against a throwaway server. Known failures live in `deployment/conformance/baseline.yml`; see [MCP conformance](./docs/mcp-conformance.md). Run it locally with `deployment/conformance/run.sh`.
+
 ### Fixed
 
 - GitHub release assets are now self-contained `hivectl-<platform>.tar.gz` archives (binary + bundled `better-sqlite3` + `native/`, same layout as the npm platform package) plus `SHA256SUMS`. The bare `hivectl-<platform>` binaries attached to v0.2.0 failed with `Cannot find module 'better-sqlite3'` when run standalone (PRY-085).
+- `resources/read` for a mailbox URI the caller does not own now echoes the requested URI in the error data (`{ "uri": ... }`, SEP-2164 SHOULD). The code (`-32602`) and message are unchanged, and a foreign mailbox is still indistinguishable from a missing one.
 
 ## [0.2.0] - 2026-11-03
 
