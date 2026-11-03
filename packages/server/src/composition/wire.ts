@@ -160,12 +160,7 @@ export function resolveWireConfigFromEnv(
     allowedHosts:
       overrides.allowedHosts ??
       parseCsvEnv(env['HIVE_MCP_ALLOWED_HOSTS']).map((host) => host.toLowerCase()),
-    listenKeepAliveIntervalMs:
-      overrides.listenKeepAliveIntervalMs ??
-      parseIntEnv(env['HIVE_LISTEN_KEEPALIVE_INTERVAL_MS'], 15_000, {
-        name: 'HIVE_LISTEN_KEEPALIVE_INTERVAL_MS',
-        min: 1,
-      }),
+    listenKeepAliveIntervalMs: resolveKeepAliveIntervalMs(env, overrides),
     listenStallTimeoutMs: resolveStallTimeoutMs(env, overrides),
     reverifyIntervalSeconds:
       overrides.reverifyIntervalSeconds ??
@@ -189,6 +184,21 @@ export function resolveWireConfigFromEnv(
 // `hivectl watch` gives up after 45 s without a byte. The server must notice a dead
 // stream first, or a reconnecting client would race its own zombie.
 const WATCH_SILENCE_MS = 45_000;
+
+function resolveKeepAliveIntervalMs(env: NodeJS.ProcessEnv, overrides: WireConfig): number {
+  const intervalMs =
+    overrides.listenKeepAliveIntervalMs ??
+    parseIntEnv(env['HIVE_LISTEN_KEEPALIVE_INTERVAL_MS'], 15_000, {
+      name: 'HIVE_LISTEN_KEEPALIVE_INTERVAL_MS',
+      min: 1,
+    });
+  if (intervalMs >= WATCH_SILENCE_MS) {
+    throw new Error(
+      `HIVE_LISTEN_KEEPALIVE_INTERVAL_MS must be below ${String(WATCH_SILENCE_MS)}, got ${String(intervalMs)}`,
+    );
+  }
+  return intervalMs;
+}
 
 function resolveStallTimeoutMs(env: NodeJS.ProcessEnv, overrides: WireConfig): number {
   const stallMs =

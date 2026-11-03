@@ -17,6 +17,7 @@ v0.2.0. Hive moves to MCP revision `2026-07-28` and gains stream-bound presence 
 - **Retired environment variables:** `HIVE_PRESENCE_IDLE_TIMEOUT_MS`, `HIVE_PRESENCE_SWEEP_INTERVAL_MS`, `HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS` and `HIVE_PRESENCE_HEARTBEAT_TIMEOUT_MS`. They are ignored without an error; remove them from your unit files and `.env`. `HIVE_PRESENCE_MAX_SESSIONS_PER_PARTICIPANT` remains as the cap of simultaneous listen streams; at the cap the oldest stream is closed (`evicted_lru`) and the new one registers, instead of the new one being refused.
 - **Claude Code Channels is removed.** The server no longer declares `experimental['claude/channel']`, no longer sends `notifications/claude/channel` (Envelope 2) and no longer declares `prompts`. Reactive agents use `hivectl watch` (below). `docs/channels.md` is deleted; see [Reactive agents](./docs/reactive-agents.md). The `hive://cells/<cellId>` push event (`notifications/resources/updated`) is unchanged except for the new `event_id`.
 - **Origin and Host are validated.** A request with an `Origin` not in `HIVE_MCP_ALLOWED_ORIGINS` (default empty: only clients that send no `Origin` pass) gets HTTP 403; when `HIVE_MCP_ALLOWED_HOSTS` is set, so does a request for another `Host`.
+- `read_mailbox.filter.from` with a sender that does not resolve now returns `-32602`; it used to return an empty page.
 
 ### Added
 
@@ -39,7 +40,6 @@ v0.2.0. Hive moves to MCP revision `2026-07-28` and gains stream-bound presence 
 - A silent network cut (a partition or a stopped client that leaves the socket open) is not detected by the server until the socket fails; the participant can stay `online` meanwhile. `hivectl watch` reconnects after 45 s without any byte. Accepted.
 - A revocation or suspension applied with `hivectl` closes an open stream within `HIVE_MCP_REVERIFY_INTERVAL_SECONDS` (60 s by default), not instantly. New requests are rejected at once.
 - `hivectl` has no `agent suspend` or `resume` command yet; the server-side suspension exists. Revoke an agent to cut it off.
-- A message whose `action` is nested deeper than 32 levels is accepted by `send_message` and then makes `read_mailbox` fail for the page that contains it; the depth is only checked on read.
 - A message that is not marked with `mark_read` wakes a reactive agent again on every reconnection (at-least-once). Do not run a reactive session with `bypassPermissions`: the body of a message is untrusted content from another participant.
 - The v0.2.0 defaults marked "provisional" (keep-alive, stall timeout, quota, throttle) may change after the real-client smoke.
 
@@ -48,6 +48,11 @@ v0.2.0. Hive moves to MCP revision `2026-07-28` and gains stream-bound presence 
 - **INC-2026-008: a revocation made with `hivectl` now reaches the running server.** Credential verification queries the revocation table by primary key on every request, so `credential revoke` and `credential rotate` apply on the next request without a restart. **v0.1.x does not apply revocations made from `hivectl` until the server restarts.** A two-process test (`hivectl` and `hivectl serve` as real child processes) pins the fix.
 - **INC-2026-007: a quiet worker no longer goes deaf.** See `subscriptions/listen` above.
 - On Postgres, the `FOR SHARE` cell guard of `send_message` never ran because the dialect was not passed to the sender; it does now.
+- `hivectl watch` no longer reports an HTTP 403 as a rejected credential: only the Origin/Host guard sends it, so it is retried as a transport failure with a message that names `HIVE_MCP_ALLOWED_ORIGINS` and `HIVE_MCP_ALLOWED_HOSTS`.
+- An event with more than 256 distinct senders is no longer dropped by `hivectl watch`: the list of senders is truncated and `count` stays exact.
+- The server refuses to start with `HIVE_LISTEN_KEEPALIVE_INTERVAL_MS` at or above `45000`, which would make `hivectl watch` reconnect in a loop.
+- `send_message` now rejects an `action` nested deeper than 32 levels with `-32602`. It used to accept it and then make `read_mailbox` fail for every page that contained the message.
+- The Claude Code plugin no longer retries `hivectl watch --once` forever: it stops on the same exits that keep `watch` from restarting (usage error, failed precondition, interrupted), warns once, and asks again at the next `turn.complete` or event.
 
 - The boot banner reported the wrong listening port when no override was set — `bind 127.0.0.1:7700` while the server was actually bound to `8443` (PRY-071, post-v0.1.9 polish). The CLI banner used a stale literal `'7700'` as the fallback for `HIVE_MCP_HTTP_PORT`, while the wire and the http-host both default to `8443`. The default port is now lifted to a single shared constant `HIVE_DEFAULT_HTTP_PORT` in `@hive/shared` (sibling pattern to `HIVE_VERSION`), so the banner and the server bind read the same value. Same class of bug previously fixed for the version literal in PRY-068. The fallback for `HIVE_MCP_HTTP_HOST` in the banner also lifts to `HIVE_DEFAULT_HTTP_HOST` for symmetry — kept distinct from the wire's `'0.0.0.0'` programmatic default by design (the CLI value is the operator-facing safe loopback default; bind-all still requires the explicit `hivectl config network bind-all` opt-in). No behavior change for operators who already set `HIVE_MCP_HTTP_PORT` or `--port`.
 

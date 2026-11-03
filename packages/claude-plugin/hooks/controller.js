@@ -12,6 +12,8 @@ import { buildPrompt, parseEventLine } from './event-line.js';
 const EXIT_USER_ERROR = 1;
 const EXIT_PRECONDITION = 4;
 const EXIT_INTERRUPTED = 130;
+/** Exit codes that retrying cannot fix: the same ones that do not restart watch. */
+const ONCE_TERMINAL_EXITS = new Set([EXIT_USER_ERROR, EXIT_PRECONDITION, EXIT_INTERRUPTED]);
 const BACKOFF_MIN_MS = 1000;
 const BACKOFF_MAX_MS = 60_000;
 /** A watch that stayed up this long counts as healthy and resets the backoff. */
@@ -19,7 +21,8 @@ const HEALTHY_MS = 60_000;
 /** Consecutive short-lived runs before the user is warned. */
 const CRASH_WARNING_AFTER = 5;
 const STDERR_TAIL_CHARS = 4000;
-/** Idle retry of `--once`: bounded exponential backoff, for as long as the flag is set. */
+const WATCH_ERROR_LINE = /^error: (WATCH_[A-Z_]+)(?::\s*(.*))?$/m;
+/** Idle retry of `--once`: bounded backoff, until the flag clears or a terminal exit. */
 const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 60_000;
 
@@ -54,6 +57,12 @@ export function createController({ options, host }) {
   /** Bumped to cancel the idle retry loop. */
   let retryGen = 0;
   let retrying = false;
+  /** Set by a terminal `--once` exit: the idle retry stays off until there is news. */
+  let onceHalted = false;
+  /** One warning per failure episode, however many turns hit the same exit. */
+  let onceWarned = false;
+  /** Watch stopped for good and said why: `--once` has nothing to add. A reload starts over. */
+  let watchReported = false;
   let flag = false;
   /** Bumped on every flag raise, so a raise during `--once` is never cleared by it. */
   let flagSeq = 0;
@@ -84,16 +93,16 @@ export function createController({ options, host }) {
    * when the flag clears, or on stop.
    */
   function ensureRetry() {
-    if (retrying || stopped || !flag || turnActive) return;
+    if (retrying || stopped || !flag || turnActive || onceHalted) return;
     retrying = true;
     const gen = ++retryGen;
     void (async () => {
       let attempt = 0;
       try {
-        while (gen === retryGen && flag && !stopped && !turnActive) {
+        while (gen === retryGen && flag && !stopped && !turnActive && !onceHalted) {
           await host.sleep(Math.min(RETRY_MIN_MS * 2 ** attempt, RETRY_MAX_MS));
           attempt += 1;
-          if (gen !== retryGen || !flag || stopped || turnActive) break;
+          if (gen !== retryGen || !flag || stopped || turnActive || onceHalted) break;
           if (submitting || onceRunning) continue;
           await runOnce();
         }
@@ -129,6 +138,8 @@ export function createController({ options, host }) {
   async function onWatchLine(/** @type {string} */ raw) {
     const event = parseEventLine(raw.trim());
     if (event === null) return;
+    // A live stream is news: whatever stopped `--once` may be gone.
+    onceHalted = false;
     if (busy()) {
       raiseFlag();
       return;
@@ -142,7 +153,14 @@ export function createController({ options, host }) {
     const seqAtStart = flagSeq;
     try {
       const result = await host.run(watchArgv(['--once']));
-      if (stopped || result.exitCode !== 0) return;
+      if (stopped) return;
+      if (ONCE_TERMINAL_EXITS.has(result.exitCode)) {
+        haltOnce(result);
+        return;
+      }
+      onceHalted = false;
+      if (result.exitCode !== 0) return;
+      onceWarned = false;
       const lines = result.stdout.split('\n').filter((l) => l.trim() !== '');
       const event = lines.length > 0 ? parseEventLine(/** @type {string} */ (lines[0])) : null;
       if (event !== null) {
@@ -155,6 +173,18 @@ export function createController({ options, host }) {
       onceRunning = false;
       if (flag) ensureRetry();
     }
+  }
+
+  /** Stops the idle retry. The flag stays, so the next turn.complete asks again. */
+  function haltOnce(/** @type {{ exitCode: number, stderr: string }} */ result) {
+    onceHalted = true;
+    if (result.exitCode === EXIT_INTERRUPTED || onceWarned || watchReported) return;
+    onceWarned = true;
+    const match = WATCH_ERROR_LINE.exec(result.stderr);
+    const cause = match?.[1] ?? `exit code ${String(result.exitCode)}`;
+    host.toast(
+      `hivectl watch --once failed with ${cause}. The mod will ask again at the next turn or event.`,
+    );
   }
 
   /** Reads one watch process to its end. Returns its exit info and stderr tail. */
@@ -177,7 +207,7 @@ export function createController({ options, host }) {
   }
 
   function describeFailure(/** @type {string} */ stderrTail, /** @type {number | null} */ code) {
-    const match = /^error: (WATCH_[A-Z_]+)(?::\s*(.*))?$/m.exec(stderrTail);
+    const match = WATCH_ERROR_LINE.exec(stderrTail);
     if (match)
       return `hivectl watch stopped with ${match[1]}${match[2] ? `: ${match[2]}` : ''}. It will not restart; fix the cause and reload the plugin.`;
     return `hivectl watch stopped with exit code ${String(code)} and will not restart; fix the cause and reload the plugin.`;
@@ -206,6 +236,7 @@ export function createController({ options, host }) {
       const { exit, stderrTail } = outcome;
       if (exit.code === EXIT_INTERRUPTED) return;
       if (exit.code === EXIT_PRECONDITION || exit.code === EXIT_USER_ERROR) {
+        watchReported = true;
         host.toast(describeFailure(stderrTail, exit.code));
         return;
       }

@@ -1,14 +1,14 @@
-// F-S3 hardening from PRY-003 security review (recogido en PRY-006 Notas):
-// Cell Store does NOT deserialise `action` (treats it as opaque, validates only
-// size). The MCP read_mailbox tool is the first point where the client receives
-// the action body. Deeply-nested but small JSON can stack-overflow naive
-// recursive parsers / consumers. We re-validate depth before exposing.
+// F-S3 hardening from the PRY-003 security review. Deeply nested but small JSON
+// can stack-overflow naive recursive parsers and consumers, so `action` is
+// bounded by depth as well as by size.
+//
+// The limit is enforced on write, so a message that can be stored can always be
+// read. The read path re-checks it for rows written before this validation.
 //
 // 32 levels is generous for legitimate `action` payloads (RFC 7807 Problem
-// Details, JSONPath expressions, etc. nest at most ~5-10 levels). Reject
-// beyond as defense-in-depth.
+// Details, JSONPath expressions, etc. nest at most ~5-10 levels).
 
-import { CellError } from '#domain/cells/index.js';
+import { CellError } from './errors.js';
 
 export const MAX_ACTION_DEPTH = 32;
 

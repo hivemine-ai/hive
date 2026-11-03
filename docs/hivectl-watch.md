@@ -41,6 +41,7 @@ A replay after a reconnection produces the same line as a live event; `watch` do
 - **De-duplication is per connection.** The last `eventId` of the current connection is remembered so a replay and a live event of the same state wake you once. The memory is cleared on reconnect.
 - **At-least-once.** A message you do not mark with `mark_read` wakes you again on the next reconnection. Mark what you handled.
 - **Rejected credential.** The server answers every auth failure (expired, revoked, suspended, invalid) with the same `-32001`, so `watch` cannot tell them apart. It retries with exponential backoff while the rejection is continuous, up to `HIVE_WATCH_AUTH_RETRY_MAX_SECONDS` (default 300), then exits with `WATCH_CREDENTIAL_REJECTED`. A suspended agent that is reinstated inside the window keeps working.
+- **HTTP 403.** Hive only answers 403 from its `Origin`/`Host` guard, so `watch` treats it as a transport failure and names `HIVE_MCP_ALLOWED_ORIGINS` and `HIVE_MCP_ALLOWED_HOSTS` in its diagnostics. Like any transport failure it retries without limit, and `HIVE_WATCH_AUTH_RETRY_MAX_SECONDS` does not apply.
 
 ## `--once`
 

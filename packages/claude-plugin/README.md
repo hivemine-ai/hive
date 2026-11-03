@@ -26,7 +26,24 @@ git clone https://github.com/hivemine-ai/hive.git
 claude --plugin-dir ./hive/packages/claude-plugin
 ```
 
-`--plugin-dir` applies to that session. Add the flag to the alias or script you start Claude Code with to make it permanent. Then set the plugin options (`/config`, or `claude plugin configure hive-wake`):
+`--plugin-dir` applies to that session. Add the flag to the alias or script you start Claude Code with to make it permanent.
+
+Then set the plugin options. A plugin loaded this way has the id `hive-wake@inline`, and `claude plugin configure` only finds it with `--plugin-dir` before the subcommand; `claude plugin configure hive-wake` answers that no installed plugin has that id:
+
+```bash
+echo '{"server_url":"https://hive.example.com/mcp","credential_file":"/path/to/credential"}' |
+  claude --plugin-dir ./hive/packages/claude-plugin plugin configure hive-wake@inline --values-stdin
+```
+
+That saves the values under `pluginConfigs` in your user settings. For one session only, pass the same object with `--settings`:
+
+```json
+{
+  "pluginConfigs": {
+    "hive-wake@inline": { "options": { "server_url": "https://hive.example.com/mcp" } }
+  }
+}
+```
 
 | Option            | Required | Meaning                                                                       |
 | ----------------- | -------- | ----------------------------------------------------------------------------- |
@@ -46,7 +63,7 @@ The credential itself is never an option and never reaches the plugin: it only p
   - on `EXIT_PRECONDITION` (4) or `EXIT_USER_ERROR` (1), including `WATCH_CREDENTIAL_REJECTED`, relaunching cannot fix it: the mod does not relaunch and shows a notice with the `WATCH_*` code taken from `watch`'s last stderr line;
   - on `EXIT_INTERRUPTED` (130) it does not relaunch;
   - if `hivectl` cannot be started at all, it shows a notice and does not relaunch.
-- **Idle retry.** If a prompt is rejected, or `--once` fails, while no turn is running, no `turn.complete` will come to recover the flag. The mod then retries `--once` with backoff (1 s doubling to 60 s) for as long as the flag is set. The retry is cancelled when a turn starts, when the flag clears, and when the session ends.
+- **Idle retry.** If a prompt is rejected, or `--once` fails, while no turn is running, no `turn.complete` will come to recover the flag. The mod then retries `--once` with backoff (1 s doubling to 60 s) for as long as the flag is set. The retry is cancelled when a turn starts, when the flag clears, and when the session ends. The retry stops on the exits that also keep `watch` from restarting (usage error, failed precondition such as a rejected credential, interrupted): the mod warns once, keeps the flag, and asks again at the next `turn.complete` or event.
 - **Session end.** At `session.end` the mod stops `watch` and drops its state; the next `session.start` begins from scratch.
 - Esc discards events that were waiting: Claude Code rejects `$.prompt.submit` after Esc until the next user input. The flag stays set and the next `turn.complete` or event recovers whatever is still unread.
 

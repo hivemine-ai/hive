@@ -9,6 +9,28 @@ import {
 
 const UUID_RE = /^check:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+describe('sender lists above the limit', () => {
+  const many = Array.from({ length: 300 }, (_, i) => `s${String(i)}`);
+
+  it('keeps the event and truncates the list, so nobody misses a wake-up', () => {
+    const event = parseWaggleMeta({ event_id: 'e', unread_count: 300, sender_ids: many });
+    expect(event?.count).toBe(300);
+    expect(event?.senders).toHaveLength(256);
+  });
+
+  it('keeps the summary of check_unread_messages', () => {
+    const summary = parseUnreadSummary({ unread_count: 300, sender_ids: many });
+    expect(summary?.count).toBe(300);
+    expect(summary?.senders).toHaveLength(256);
+  });
+
+  it('still rejects an invalid id past the limit', () => {
+    expect(
+      parseWaggleMeta({ event_id: 'e', unread_count: 1, sender_ids: [...many, 'bad\nid'] }),
+    ).toBeNull();
+  });
+});
+
 describe('parseWaggleMeta', () => {
   it('maps the Envelope 1 payload to the event schema', () => {
     const event = parseWaggleMeta({
