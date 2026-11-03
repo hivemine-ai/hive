@@ -20,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The server logs a one-time `allowed_hosts_empty` warning at startup when `HIVE_MCP_ALLOWED_HOSTS` is empty or unset, explaining that the `Host` header is not validated and how to set the variable (PRY-085). Behaviour is unchanged.
 - **Expired credential revocations are purged** (PRY-085). `credential_revocations` was read on every verification but never trimmed. The server now deletes, at start and then every `HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS` (default `3600`; `0` disables), the rows whose credential expired more than the clock tolerance ago, in batches of 1000, on SQLite and Postgres. Revocations of still-valid credentials are never touched. Each pass logs `auth_revocations_purged` with the row count. See [Authentication](./docs/auth.md).
 
+### CI
+
+- New `postgres` job in `pr.yml` runs `send.test.ts` (per-sender unread cap, including the concurrent-send race) against a Postgres 16 service container via `HIVE_TEST_PG_URL` (PRY-085).
+
 ## [0.2.0] - 2026-11-03
 
 v0.2.0. Hive moves to MCP revision `2026-07-28` and gains stream-bound presence and `hivectl watch`. **This release has breaking changes; read the first section before upgrading.** Operators of v0.1.x should also read [Upgrading from v0.1.x](./deployment/README.md#upgrading-from-v01x).
