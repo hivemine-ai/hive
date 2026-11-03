@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   resolveWireConfigFromEnv,
   stopWithDrainTimeout,
+  warnIfAllowedHostsEmpty,
   warnIfStdoutConsumerMissing,
 } from './wire.js';
 
@@ -187,5 +188,28 @@ describe('resolveWireConfigFromEnv — listen', () => {
       resolveWireConfigFromEnv({ HIVE_MCP_REVERIFY_INTERVAL_SECONDS: '0' }).reverifyIntervalSeconds,
     ).toBe(0);
     expect(() => resolveWireConfigFromEnv({ HIVE_CELL_MAX_UNREAD_PER_SENDER: '0' })).toThrow();
+  });
+});
+
+describe('warnIfAllowedHostsEmpty (PRY-085)', () => {
+  it('emits one structured warn when the allow-list is empty', () => {
+    const warn = vi.fn();
+    const logger = { warn } as unknown as Parameters<typeof warnIfAllowedHostsEmpty>[0];
+    warnIfAllowedHostsEmpty(logger, []);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [fields, message] = warn.mock.calls[0]! as [Record<string, unknown>, string];
+    expect(fields['event']).toBe('allowed_hosts_empty');
+    expect(fields['envVar']).toBe('HIVE_MCP_ALLOWED_HOSTS');
+    expect(message).toContain('HIVE_MCP_ALLOWED_HOSTS');
+    expect(message).toContain('Host header is not validated');
+  });
+
+  it('does not warn when the allow-list has entries', () => {
+    const warn = vi.fn();
+    const logger = { warn } as unknown as Parameters<typeof warnIfAllowedHostsEmpty>[0];
+    warnIfAllowedHostsEmpty(logger, ['hive.example.com']);
+
+    expect(warn).not.toHaveBeenCalled();
   });
 });

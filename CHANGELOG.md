@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - GitHub release assets are now self-contained `hivectl-<platform>.tar.gz` archives (binary + bundled `better-sqlite3` + `native/`, same layout as the npm platform package) plus `SHA256SUMS`. The bare `hivectl-<platform>` binaries attached to v0.2.0 failed with `Cannot find module 'better-sqlite3'` when run standalone (PRY-085).
 
+### Added
+
+- The server logs a one-time `allowed_hosts_empty` warning at startup when `HIVE_MCP_ALLOWED_HOSTS` is empty or unset, explaining that the `Host` header is not validated and how to set the variable (PRY-085). Behaviour is unchanged.
+
 ## [0.2.0] - 2026-11-03
 
 v0.2.0. Hive moves to MCP revision `2026-07-28` and gains stream-bound presence and `hivectl watch`. **This release has breaking changes; read the first section before upgrading.** Operators of v0.1.x should also read [Upgrading from v0.1.x](./deployment/README.md#upgrading-from-v01x).
