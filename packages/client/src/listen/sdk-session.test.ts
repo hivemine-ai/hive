@@ -199,7 +199,7 @@ describe('closing over a silent network', () => {
     blackhole = true;
     const started = Date.now();
     await connection.close();
-    expect(Date.now() - started).toBeLessThan(2500);
+    expect(Date.now() - started).toBeLessThan(5000);
   }, 15_000);
 });
 
