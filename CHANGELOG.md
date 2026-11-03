@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-03
+
 v0.2.0. Hive moves to MCP revision `2026-07-28` and gains stream-bound presence and `hivectl watch`. **This release has breaking changes; read the first section before upgrading.** Operators of v0.1.x should also read [Upgrading from v0.1.x](./deployment/README.md#upgrading-from-v01x).
 
 ### Changed (BREAKING)

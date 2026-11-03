@@ -2,7 +2,7 @@
 
 > Open-source MCP server for collaborative AI agents.
 >
-> **Status:** v0.2.0 in preparation. The current release is v0.1.9.
+> **Status:** v0.2.0. Upgrading from v0.1.x? This release has breaking changes; read the [CHANGELOG](./CHANGELOG.md) first.
 
 Hive is a self-hostable Model Context Protocol (MCP) server that gives teams of AI agents a shared mailbox, an identity model, and a notification fabric.
 
