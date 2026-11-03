@@ -74,7 +74,9 @@ function identity(credentialExpiresAt?: Date): IdentityContext {
   } as unknown as IdentityContext;
 }
 
-function build(options: { expiresAt?: Date; logger?: Logger; keepAliveMs?: number } = {}) {
+function build(
+  options: { expiresAt?: Date; logger?: Logger; keepAliveMs?: number; leaseMs?: number } = {},
+) {
   const sink = new FakeSink();
   const abort = vi.fn();
   const handle = createStreamHandle({
@@ -86,6 +88,7 @@ function build(options: { expiresAt?: Date; logger?: Logger; keepAliveMs?: numbe
     keepAliveIntervalMs: options.keepAliveMs ?? KEEPALIVE_MS,
     stallTimeoutMs: STALL_MS,
     logger: options.logger ?? createLogger({ level: 'silent' }),
+    ...(options.leaseMs !== undefined && { leaseMs: options.leaseMs }),
   });
   const closes: StreamCloseReason[] = [];
   handle.onClose((reason) => closes.push(reason));
@@ -237,28 +240,31 @@ describe('createStreamHandle', () => {
   });
 
   describe('close', () => {
-    it.each(['evicted_lru', 'shutdown'] as const)('%s ends with the complete result', (reason) => {
-      const { sink, handle, abort, closes } = build();
+    it.each(['evicted_lru', 'shutdown', 'lease_expired'] as const)(
+      '%s ends with the complete result',
+      (reason) => {
+        const { sink, handle, abort, closes } = build();
 
-      handle.close(reason);
+        handle.close(reason);
 
-      expect(sink.messages()).toEqual([
-        {
-          jsonrpc: '2.0',
-          id: 7,
-          result: {
-            resultType: 'complete',
-            _meta: {
-              [SUBSCRIPTION_META]: 7,
-              'io.modelcontextprotocol/serverInfo': { name: 'hive', version: '1' },
+        expect(sink.messages()).toEqual([
+          {
+            jsonrpc: '2.0',
+            id: 7,
+            result: {
+              resultType: 'complete',
+              _meta: {
+                [SUBSCRIPTION_META]: 7,
+                'io.modelcontextprotocol/serverInfo': { name: 'hive', version: '1' },
+              },
             },
           },
-        },
-      ]);
-      expect(abort).toHaveBeenCalledOnce();
-      expect(sink.destroyed).toBe(false);
-      expect(closes).toEqual([reason]);
-    });
+        ]);
+        expect(abort).toHaveBeenCalledOnce();
+        expect(sink.destroyed).toBe(false);
+        expect(closes).toEqual([reason]);
+      },
+    );
 
     it('a complete that cannot leave is torn down after the grace', async () => {
       const { sink, handle } = build();
@@ -328,6 +334,91 @@ describe('createStreamHandle', () => {
       handle.close('participant_revoked');
       await vi.advanceTimersByTimeAsync(KEEPALIVE_MS * 3);
       expect(sink.frames).toEqual([]);
+    });
+  });
+
+  describe('lease', () => {
+    const LEASE_MS = 600;
+
+    it('without a lease the stream never expires, however long it stays quiet', async () => {
+      const dayMs = 24 * 60 * 60 * 1000;
+      const { handle, closes } = build({ keepAliveMs: dayMs });
+      await vi.advanceTimersByTimeAsync(30 * dayMs);
+      expect(closes).toEqual([]);
+      expect(handle.renewLease()).toBe(false);
+      handle.close('client_closed');
+    });
+
+    it('expires after the lease with lease_expired, ending with complete', async () => {
+      const { sink, closes, abort } = build({ leaseMs: LEASE_MS });
+
+      await vi.advanceTimersByTimeAsync(LEASE_MS - 1);
+      expect(closes).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(closes).toEqual(['lease_expired']);
+      const [complete] = sink.messages() as Array<{ id?: unknown; result?: unknown }>;
+      expect(sink.messages()).toHaveLength(1);
+      expect(complete?.id).toBe(7);
+      expect(complete?.result).toMatchObject({ resultType: 'complete' });
+      expect(abort).toHaveBeenCalledOnce();
+    });
+
+    it('a complete that cannot leave a dead path is torn down after the grace', async () => {
+      const { sink } = build({ leaseMs: LEASE_MS });
+      await vi.advanceTimersByTimeAsync(LEASE_MS);
+      expect(sink.destroyed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sink.destroyed).toBe(true);
+    });
+
+    it('every renewal restarts the full lease', async () => {
+      const { handle, closes } = build({ leaseMs: LEASE_MS });
+      for (let beat = 0; beat < 10; beat += 1) {
+        await vi.advanceTimersByTimeAsync(LEASE_MS - 100);
+        expect(handle.renewLease()).toBe(true);
+      }
+      expect(closes).toEqual([]);
+      await vi.advanceTimersByTimeAsync(LEASE_MS);
+      expect(closes).toEqual(['lease_expired']);
+    });
+
+    it('keep-alives and deliveries do not renew it: only the client can', async () => {
+      const { handle, closes } = build({ leaseMs: LEASE_MS, keepAliveMs: 100 });
+      await vi.advanceTimersByTimeAsync(LEASE_MS / 2);
+      await handle.deliver(NOTIFICATION);
+      await vi.advanceTimersByTimeAsync(LEASE_MS / 2);
+      expect(closes).toEqual(['lease_expired']);
+    });
+
+    it('logs mcp_listen_lease_expired with the lease length', async () => {
+      const entries: Array<Record<string, unknown>> = [];
+      const push = (payload: Record<string, unknown>): void => {
+        entries.push(payload);
+      };
+      const logger = { info: push, warn: push, error: push, debug: push } as unknown as Logger;
+      build({ leaseMs: LEASE_MS, logger });
+
+      await vi.advanceTimersByTimeAsync(LEASE_MS);
+
+      expect(entries).toContainEqual(
+        expect.objectContaining({
+          event: 'mcp_listen_lease_expired',
+          participantId: NOTIFICATION.recipientId,
+          leaseMs: LEASE_MS,
+        }),
+      );
+      expect(
+        entries.find((e) => e['event'] === 'mcp_listen_lease_expired')?.['connectionId'],
+      ).toEqual(expect.any(String));
+    });
+
+    it('a closed handle cannot be renewed and its lease timer is gone', async () => {
+      const { handle, closes } = build({ leaseMs: LEASE_MS });
+      handle.close('client_closed');
+      expect(handle.renewLease()).toBe(false);
+      await vi.advanceTimersByTimeAsync(LEASE_MS * 2);
+      expect(closes).toEqual(['client_closed']);
     });
   });
 

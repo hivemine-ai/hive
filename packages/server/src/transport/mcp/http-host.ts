@@ -37,6 +37,8 @@ import type { McpTransport } from './server.js';
 import type { WireError } from './types.js';
 
 const LISTEN_METHOD = 'subscriptions/listen';
+const DISCOVER_METHOD = 'server/discover';
+const LEASE_REQUEST_HEADER = 'hive-listen-lease';
 
 /**
  * Plug-in point for the `subscriptions/listen` edge. The SDK router neither checks who
@@ -50,6 +52,11 @@ export interface ListenEdge {
   }): WireError | null | Promise<WireError | null>;
   /** Runs once the SDK answered, before any byte reaches the client. */
   onResponse(input: ListenResponseInput): ListenBinding | undefined;
+  /**
+   * A `server/discover` carrying a lease key. Renews the open stream of that caller
+   * leased under that key; true when one was renewed.
+   */
+  renewLease(input: { key: string; identity: IdentityContext }): boolean;
 }
 
 export interface ListenResponseInput {
@@ -58,6 +65,8 @@ export interface ListenResponseInput {
   requestId: UUIDv7;
   response: Response;
   raw: ServerResponse;
+  /** Raw `Hive-Listen-Lease` header of the request, unvalidated. */
+  leaseKey?: string;
   /** Ends the SDK side of the stream. */
   abort: () => void;
 }
@@ -201,7 +210,12 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
     }
 
     const body = req.body;
-    const isListen = rpcMethod(body) === LISTEN_METHOD;
+    const method = rpcMethod(body);
+    const isListen = method === LISTEN_METHOD;
+    const leaseKey = headerString(req.headers[LEASE_REQUEST_HEADER]);
+    if (method === DISCOVER_METHOD && leaseKey !== undefined) {
+      deps.listenEdge?.renewLease({ key: leaseKey, identity });
+    }
     const requestId = getRequestIdFromLogger(req.log as Logger) ?? uuidv7();
     const abort = new AbortController();
 
@@ -251,6 +265,7 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
           response,
           raw,
           abort: () => abort.abort(),
+          ...(leaseKey !== undefined && { leaseKey }),
         })
       : undefined;
 

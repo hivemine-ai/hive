@@ -161,7 +161,38 @@ describe('resolveWireConfigFromEnv — listen', () => {
       listenStallTimeoutMs: 30_000,
       reverifyIntervalSeconds: 60,
       maxUnreadPerSender: 500,
+      listenLeaseMs: 60_000,
     });
+  });
+
+  it('reads HIVE_LISTEN_LEASE_MS and accepts 0 to disable leases', () => {
+    expect(resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '45000' }).listenLeaseMs).toBe(45_000);
+    expect(resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '0' }).listenLeaseMs).toBe(0);
+  });
+
+  it('rejects a lease that a keep-alive interval would outlast, or a malformed one', () => {
+    expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '15000' })).toThrow(
+      /HIVE_LISTEN_LEASE_MS must be above HIVE_LISTEN_KEEPALIVE_INTERVAL_MS/,
+    );
+    expect(() =>
+      resolveWireConfigFromEnv({}, { listenKeepAliveIntervalMs: 100, listenLeaseMs: 100 }),
+    ).toThrow(/HIVE_LISTEN_LEASE_MS/);
+    expect(
+      resolveWireConfigFromEnv({}, { listenKeepAliveIntervalMs: 100, listenLeaseMs: 600 })
+        .listenLeaseMs,
+    ).toBe(600);
+    expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '-1' })).toThrow();
+    expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '60000.5' })).toThrow();
+    expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '86400001' })).toThrow();
+  });
+
+  it('a disabled lease skips the keep-alive check', () => {
+    expect(
+      resolveWireConfigFromEnv({
+        HIVE_LISTEN_LEASE_MS: '0',
+        HIVE_LISTEN_KEEPALIVE_INTERVAL_MS: '20000',
+      }).listenLeaseMs,
+    ).toBe(0);
   });
 
   it('rejects a keep-alive interval that hivectl watch would read as silence', () => {

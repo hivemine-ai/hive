@@ -318,6 +318,7 @@ describe('listen edge', () => {
       listenEdge: {
         authorize: () => ({ code: -32602, message: 'invalid input' }),
         onResponse,
+        renewLease: () => false,
       },
     });
 
@@ -329,7 +330,9 @@ describe('listen edge', () => {
 
   it('hands the SDK stream to the edge before any byte reaches the client', async () => {
     const onResponse = vi.fn();
-    const url = await startHost({ listenEdge: { authorize: () => null, onResponse } });
+    const url = await startHost({
+      listenEdge: { authorize: () => null, onResponse, renewLease: () => false },
+    });
 
     const abort = new AbortController();
     const res = await fetch(url, {
@@ -347,7 +350,11 @@ describe('listen edge', () => {
   it('tells the edge once the acknowledgment reached the response', async () => {
     const onAcknowledged = vi.fn();
     const url = await startHost({
-      listenEdge: { authorize: () => null, onResponse: () => ({ onAcknowledged }) },
+      listenEdge: {
+        authorize: () => null,
+        onResponse: () => ({ onAcknowledged }),
+        renewLease: () => false,
+      },
     });
 
     const res = await post(url, 'subscriptions/listen', {
@@ -366,6 +373,7 @@ describe('listen edge', () => {
       listenEdge: {
         authorize: () => Promise.reject(new Error('db down')),
         onResponse: () => undefined,
+        renewLease: () => false,
       },
     });
 
@@ -381,7 +389,9 @@ describe('listen edge', () => {
 
   it('a listen in a batch never reaches the SDK router unauthorized', async () => {
     const onResponse = vi.fn();
-    const url = await startHost({ listenEdge: { authorize: () => null, onResponse } });
+    const url = await startHost({
+      listenEdge: { authorize: () => null, onResponse, renewLease: () => false },
+    });
 
     const res = await fetch(url, {
       ...listenInit(),
@@ -394,10 +404,91 @@ describe('listen edge', () => {
 
   it('is not consulted for any other method', async () => {
     const authorize = vi.fn(() => null);
-    const url = await startHost({ listenEdge: { authorize, onResponse: () => undefined } });
+    const renewLease = vi.fn(() => false);
+    const url = await startHost({
+      listenEdge: { authorize, onResponse: () => undefined, renewLease },
+    });
 
-    await post(url, 'tools/list');
+    await post(url, 'tools/list', {}, { 'hive-listen-lease': 'k'.repeat(22) });
 
     expect(authorize).not.toHaveBeenCalled();
+    expect(renewLease).not.toHaveBeenCalled();
+  });
+
+  describe('lease', () => {
+    const KEY = 'k'.repeat(22);
+
+    it('passes the lease header of a listen to the edge, and the edge headers reach the client', async () => {
+      const onResponse = vi.fn((input: { raw: { setHeader(n: string, v: string): void } }) => {
+        input.raw.setHeader('hive-listen-lease-ms', '60000');
+        return undefined;
+      });
+      const url = await startHost({
+        listenEdge: { authorize: () => null, onResponse, renewLease: () => false },
+      });
+      const init = listenInit();
+      const abort = new AbortController();
+
+      const res = await fetch(url, {
+        ...init,
+        headers: { ...(init.headers as Record<string, string>), 'hive-listen-lease': KEY },
+        signal: abort.signal,
+      });
+
+      expect(onResponse.mock.calls[0]?.[0]).toMatchObject({ leaseKey: KEY });
+      expect(res.headers.get('hive-listen-lease-ms')).toBe('60000');
+      expect(res.headers.get('content-type')).toContain('text/event-stream');
+      abort.abort();
+    });
+
+    it('a listen without the header passes no lease key', async () => {
+      const onResponse = vi.fn((_input: unknown) => undefined);
+      const url = await startHost({
+        listenEdge: { authorize: () => null, onResponse, renewLease: () => false },
+      });
+      const abort = new AbortController();
+
+      await fetch(url, { ...listenInit(), signal: abort.signal });
+
+      expect(onResponse.mock.calls[0]?.[0]).not.toHaveProperty('leaseKey');
+      abort.abort();
+    });
+
+    it('server/discover with the header renews as the authenticated caller, and still answers', async () => {
+      const renewLease = vi.fn(() => true);
+      const url = await startHost({
+        listenEdge: { authorize: () => null, onResponse: () => undefined, renewLease },
+      });
+
+      const res = await post(url, 'server/discover', {}, { 'hive-listen-lease': KEY });
+
+      expect(renewLease).toHaveBeenCalledWith({ key: KEY, identity: IDENTITY });
+      expect(res.status).toBe(200);
+      expect(JSON.stringify(await res.json())).toContain('supportedVersions');
+    });
+
+    it('server/discover without the header renews nothing', async () => {
+      const renewLease = vi.fn(() => true);
+      const url = await startHost({
+        listenEdge: { authorize: () => null, onResponse: () => undefined, renewLease },
+      });
+
+      await post(url, 'server/discover');
+
+      expect(renewLease).not.toHaveBeenCalled();
+    });
+
+    it('an unauthenticated server/discover never reaches the edge', async () => {
+      const renewLease = vi.fn(() => true);
+      const url = await startHost({
+        verify: () => Promise.reject(new AuthError('CREDENTIAL_REVOKED')),
+        listenEdge: { authorize: () => null, onResponse: () => undefined, renewLease },
+      });
+
+      const res = await post(url, 'server/discover', {}, { 'hive-listen-lease': KEY });
+
+      expect(res.status).toBe(401);
+      expect(renewLease).not.toHaveBeenCalled();
+    });
   });
 });

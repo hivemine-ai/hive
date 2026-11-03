@@ -18,8 +18,9 @@
 //     listeners, and then fires `onClose` once with the same reason.
 //   - `onClose` callbacks fire EXACTLY ONCE when the stream ends for any cause.
 //     A callback registered on an already-closed handle fires immediately.
-//   - Detecting a dead network path (keep-alive writes, stalled-drain timer) is
-//     the handle's job. The registry never probes and never runs timers.
+//   - Detecting a dead network path (keep-alive writes, stalled-drain timer, the
+//     lease a client may ask for) is the handle's job. The registry never probes
+//     and never runs timers.
 
 import type { IdentityContext, UUIDv7 } from '#domain/auth/types.js';
 
@@ -34,7 +35,8 @@ export type StreamCloseReason =
   | 'participant_suspended'
   | 'evicted_lru'
   | 'shutdown'
-  | 'replay_failed';
+  | 'replay_failed'
+  | 'lease_expired';
 
 export interface SubscriberHandle {
   readonly connectionId: UUIDv7;
