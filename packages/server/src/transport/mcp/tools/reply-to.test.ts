@@ -42,7 +42,7 @@ function buildStubSender(): { sender: Sender; state: StubSenderState } {
       return Promise.resolve({
         messageId: NEW_MESSAGE_ID,
         sentAt: FIXED_SENT_AT,
-        deliveredAt: FIXED_DELIVERED_AT,
+        storedAt: FIXED_DELIVERED_AT,
         replayed: false,
       });
     },
@@ -106,9 +106,9 @@ function buildOriginalMessage(overrides: Partial<Message> = {}): Message {
     replyTo: null,
     ttl: null,
     sentAt: new Date('2026-04-30T12:00:00.000Z'),
-    deliveredAt: new Date('2026-04-30T12:00:00.500Z'),
+    storedAt: new Date('2026-04-30T12:00:00.500Z'),
     readAt: null,
-    state: 'delivered',
+    state: 'stored',
     expiredAt: null,
     ...overrides,
   };
@@ -212,7 +212,7 @@ describe('reply_to tool — handler', () => {
     expect(result).toEqual({
       message_id: NEW_MESSAGE_ID,
       sent_at: FIXED_SENT_AT.toISOString(),
-      delivered_at: FIXED_DELIVERED_AT.toISOString(),
+      stored_at: FIXED_DELIVERED_AT.toISOString(),
       replayed: false,
     });
   });

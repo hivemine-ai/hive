@@ -1,40 +1,61 @@
-// Unit tests for the Presence Registry. The SubscriberHandle is mocked inline
-// via `mockHandle()` (deliver captures into an array; onClose stores the
-// callback for explicit triggering).
+// Unit tests for the stream-bound Presence Registry. An entry lives exactly as
+// long as its stream: there is no sweep, no activity timestamp and no idle threshold.
+// The SubscriberHandle is mocked inline via `mockHandle()` (deliver captures
+// into an array; close() and onClose() are recorded so tests can drive both
+// directions of the lifecycle).
 
 import { v7 as uuidv7 } from 'uuid';
-import type { Logger } from 'pino';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { IdentityContext, UUIDv7 } from '#domain/auth/types.js';
-
-import type { SubscriberHandle } from './subscriber-handle.js';
 import type { WaggleNotification } from '#domain/notifications/waggle/types.js';
-import { createPresenceRegistry } from './registry.js';
-import type { PresenceRegistry } from './registry.js';
+import type { Logger } from '#observability/logger.js';
+
 import { isWaggleError } from '../errors.js';
+
+import { createPresenceRegistry } from './registry.js';
+import type { PresenceRegistry, PresenceRegistryConfig } from './registry.js';
+import type { StreamCloseReason, SubscriberHandle } from './subscriber-handle.js';
 
 interface MockHandle extends SubscriberHandle {
   captured: WaggleNotification[];
-  triggerClose: () => void;
+  closeCalls: StreamCloseReason[];
+  /** Simulates the transport detecting the stream end by itself. */
+  triggerClose: (reason?: StreamCloseReason) => void;
 }
 
-function mockHandle(callerContext: IdentityContext): MockHandle {
+function mockHandle(
+  callerContext: IdentityContext,
+  opts: { closeThrows?: boolean } = {},
+): MockHandle {
   const captured: WaggleNotification[] = [];
-  let onCloseCb: (() => void) | null = null;
+  const closeCalls: StreamCloseReason[] = [];
+  const listeners: Array<(reason: StreamCloseReason) => void> = [];
+  let closed = false;
+  const fire = (reason: StreamCloseReason): void => {
+    if (closed) return;
+    closed = true;
+    for (const cb of listeners.splice(0)) cb(reason);
+  };
   return {
     connectionId: uuidv7(),
     callerContext,
     captured,
+    closeCalls,
     deliver(notification: WaggleNotification) {
       captured.push(notification);
       return Promise.resolve();
     },
-    onClose(cb: () => void) {
-      onCloseCb = cb;
+    close(reason: StreamCloseReason) {
+      closeCalls.push(reason);
+      if (opts.closeThrows === true) throw new Error('close exploded');
+      fire(reason);
     },
-    triggerClose() {
-      onCloseCb?.();
+    onClose(cb: (reason: StreamCloseReason) => void) {
+      listeners.push(cb);
+    },
+    triggerClose(reason: StreamCloseReason = 'client_closed') {
+      fire(reason);
     },
   };
 }
@@ -58,747 +79,676 @@ function activeContext(participantId?: UUIDv7): IdentityContext {
 }
 
 function nonActiveContext(state: 'suspended' | 'revoked'): IdentityContext {
-  // Construct a context whose `current.state` is not 'active'. We cast through
-  // `unknown` because `CurrentParticipantState.state` is typed as the string
-  // literal 'active' by construction of the verifier; the registry MUST still
-  // refuse it as defense-in-depth.
+  // The verifier types `current.state` as 'active'; the registry must still
+  // refuse anything else as defense-in-depth.
   return {
     ...activeContext(),
     current: { state, type: 'worker' } as unknown as IdentityContext['current'],
   };
 }
 
-describe('createPresenceRegistry', () => {
-  it('subscribe → getPresence reports online with sessionCount 1', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    const handle = mockHandle(ctx);
+function makeLogger(): {
+  info: ReturnType<typeof vi.fn>;
+  warn: ReturnType<typeof vi.fn>;
+  error: ReturnType<typeof vi.fn>;
+  events: () => Array<Record<string, unknown>>;
+} {
+  const info = vi.fn();
+  const warn = vi.fn();
+  const error = vi.fn();
+  return {
+    info,
+    warn,
+    error,
+    events: () =>
+      [...info.mock.calls, ...warn.mock.calls, ...error.mock.calls].map(
+        (c) => c[0] as Record<string, unknown>,
+      ),
+  };
+}
 
-    const sub = await registry.subscribe({ callerContext: ctx, handle });
+let registry: PresenceRegistry | undefined;
+
+function build(config: PresenceRegistryConfig = {}): PresenceRegistry {
+  registry = createPresenceRegistry(config);
+  return registry;
+}
+
+afterEach(() => {
+  registry?.shutdown();
+  registry = undefined;
+  vi.useRealTimers();
+});
+
+describe('subscribe → ready() lifecycle', () => {
+  it('a fresh entry is pending: not online until ready()', async () => {
+    const reg = build();
+    const ctx = activeContext();
+
+    const sub = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
 
     expect(sub.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(sub.participantId).toBe(ctx.participantId);
-    const snapshot = registry.getPresence(ctx.participantId);
+    expect(reg.getPresence(ctx.participantId)).toEqual({
+      online: false,
+      streamCount: 0,
+      streamsSubscribedAt: [],
+    });
+    expect(reg.isOpen(sub.id, ctx.participantId)).toBe(false);
+  });
+
+  it('ready() flips pending → open: online, streamCount and streamsSubscribedAt', async () => {
+    const reg = build();
+    const ctx = activeContext();
+    const sub = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+
+    sub.ready();
+
+    const snapshot = reg.getPresence(ctx.participantId);
     expect(snapshot.online).toBe(true);
-    expect(snapshot.sessionCount).toBe(1);
-    expect(snapshot.sessionsSubscribedAt).toHaveLength(1);
+    expect(snapshot.streamCount).toBe(1);
+    expect(snapshot.streamsSubscribedAt).toEqual([sub.subscribedAt]);
+    expect(reg.isOpen(sub.id, ctx.participantId)).toBe(true);
   });
 
-  it('subscribe rejects when state !== active (defense-in-depth)', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = nonActiveContext('suspended');
+  it('ready() is idempotent and a no-op once the entry is gone', async () => {
+    const onReady = vi.fn();
+    const reg = build({ onReady });
+    const ctx = activeContext();
+    const sub = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
 
-    await expect(
-      registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) }),
-    ).rejects.toSatisfy((err) => {
-      if (!isWaggleError(err)) return false;
-      return err.code === 'PARTICIPANT_NOT_ACTIVE_FOR_SUBSCRIBE' && err.subCode === 'suspended';
+    sub.ready();
+    sub.ready();
+    expect(onReady).toHaveBeenCalledTimes(1);
+
+    const sub2 = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    sub2.close();
+    sub2.ready();
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(reg.getPresence(ctx.participantId).streamCount).toBe(1);
+  });
+
+  it('ready() fires the onReady hook with participant, subscription and handle; subscribe does not', async () => {
+    const onReady = vi.fn();
+    const reg = build({ onReady });
+    const ctx = activeContext();
+    const handle = mockHandle(ctx);
+
+    const sub = await reg.subscribe({ callerContext: ctx, handle });
+    expect(onReady).not.toHaveBeenCalled();
+
+    sub.ready();
+    expect(onReady).toHaveBeenCalledWith({
+      participantId: ctx.participantId,
+      subscriptionId: sub.id,
+      handle,
     });
   });
 
-  it('subscribe rejects when revoked', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = nonActiveContext('revoked');
-
-    await expect(
-      registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) }),
-    ).rejects.toSatisfy((err) => isWaggleError(err) && err.subCode === 'revoked');
-  });
-
-  it('cap is enforced — exceeding maxSessionsPerParticipant rejects with INVALID_INPUT/too_many_sessions', async () => {
-    const registry = createPresenceRegistry({ maxSessionsPerParticipant: 2 });
-    const ctx = activeContext();
-
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    await expect(
-      registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) }),
-    ).rejects.toSatisfy(
-      (err) =>
-        isWaggleError(err) && err.code === 'INVALID_INPUT' && err.subCode === 'too_many_sessions',
-    );
-  });
-
-  it('subscription.close() removes the entry; getPresence flips to offline', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    const handle = mockHandle(ctx);
-    const sub = await registry.subscribe({ callerContext: ctx, handle });
-
-    sub.close();
-
-    expect(registry.getPresence(ctx.participantId).online).toBe(false);
-    expect(registry.getPresence(ctx.participantId).sessionCount).toBe(0);
-  });
-
-  it('subscription.close() is idempotent', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    const sub = await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    sub.close();
-    expect(() => sub.close()).not.toThrow();
-  });
-
-  it('handle.onClose() trigger removes the entry', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    const handle = mockHandle(ctx);
-    await registry.subscribe({ callerContext: ctx, handle });
-
-    handle.triggerClose();
-
-    expect(registry.getPresence(ctx.participantId).online).toBe(false);
-  });
-
-  it('two simultaneous sessions: getPresence reports sessionCount 2; closing one keeps online', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    const h1 = mockHandle(ctx);
-    const h2 = mockHandle(ctx);
-
-    const sub1 = await registry.subscribe({ callerContext: ctx, handle: h1 });
-    await registry.subscribe({ callerContext: ctx, handle: h2 });
-
-    expect(registry.getPresence(ctx.participantId).sessionCount).toBe(2);
-
-    sub1.close();
-
-    expect(registry.getPresence(ctx.participantId).online).toBe(true);
-    expect(registry.getPresence(ctx.participantId).sessionCount).toBe(1);
-  });
-
-  it('forEachSubscriber fans out to all handles; a thrower does not abort the others', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    const goodA = mockHandle(ctx);
-    const bad: MockHandle = { ...mockHandle(ctx) };
-    bad.deliver = () => Promise.reject(new Error('socket dead'));
-    const goodB = mockHandle(ctx);
-
-    await registry.subscribe({ callerContext: ctx, handle: goodA });
-    await registry.subscribe({ callerContext: ctx, handle: bad });
-    await registry.subscribe({ callerContext: ctx, handle: goodB });
-
-    const errors: Array<{ handle: SubscriberHandle; err: unknown }> = [];
-    const notif: WaggleNotification = {
-      kind: 'online',
-      cellId: uuidv7(),
-      recipientId: ctx.participantId,
-      unreadCount: 1,
-      senderIds: [uuidv7()],
-      emittedAt: new Date(),
-      waggleId: uuidv7(),
-    };
-
-    await registry.forEachSubscriber(
-      ctx.participantId,
-      async (h) => {
-        await h.deliver(notif);
-      },
-      (h, err) => {
-        errors.push({ handle: h, err });
-      },
-    );
-
-    expect(goodA.captured).toHaveLength(1);
-    expect(goodB.captured).toHaveLength(1);
-    expect(errors).toHaveLength(1);
-    expect(errors[0]?.handle).toBe(bad);
-  });
-
-  it('forEachSubscriber on absent participant returns immediately (no error)', async () => {
-    const registry = createPresenceRegistry();
-    await expect(
-      registry.forEachSubscriber(uuidv7(), () => Promise.resolve()),
-    ).resolves.toBeUndefined();
-  });
-
-  it('unsubscribe with unknown subscriptionId is a no-op (idempotent)', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    expect(() => registry.unsubscribe(uuidv7(), ctx.participantId)).not.toThrow();
-    expect(registry.getPresence(ctx.participantId).online).toBe(true);
-  });
-
-  it('unsubscribe removes the entry from the participant Map and prunes the participant when empty', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    const sub = await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    registry.unsubscribe(sub.id, ctx.participantId);
-
-    expect(registry.__sessionCount(ctx.participantId)).toBe(0);
-    expect(registry.getPresence(ctx.participantId).online).toBe(false);
-  });
-
-  it('handle reuse (same connectionId across subscribes) overwrites the prior entry', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    const sharedConnectionId = uuidv7();
-
-    const handleA: MockHandle = mockHandle(ctx);
-    Object.assign(handleA, { connectionId: sharedConnectionId });
-    const handleB: MockHandle = mockHandle(ctx);
-    Object.assign(handleB, { connectionId: sharedConnectionId });
-
-    await registry.subscribe({ callerContext: ctx, handle: handleA });
-    await registry.subscribe({ callerContext: ctx, handle: handleB });
-
-    expect(registry.__sessionCount(ctx.participantId)).toBe(1);
-  });
-
-  it('onSubscribed hook fires AFTER the registry mutation with the right inputs', async () => {
-    const calls: Array<{
-      participantId: UUIDv7;
-      subscriptionId: UUIDv7;
-      handle: SubscriberHandle;
-    }> = [];
-    const registry = createPresenceRegistry({
-      onSubscribed: (input) => {
-        calls.push(input);
-      },
-    });
-    const ctx = activeContext();
-    const handle = mockHandle(ctx);
-
-    const sub = await registry.subscribe({ callerContext: ctx, handle });
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.participantId).toBe(ctx.participantId);
-    expect(calls[0]?.subscriptionId).toBe(sub.id);
-    expect(calls[0]?.handle).toBe(handle);
-  });
-
-  it('onSubscribed hook that throws does not break subscribe', async () => {
-    const registry = createPresenceRegistry({
-      onSubscribed: () => {
+  it('a throwing onReady hook does not break ready()', async () => {
+    const reg = build({
+      onReady: () => {
         throw new Error('hook bug');
       },
     });
     const ctx = activeContext();
+    const sub = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
 
-    await expect(
-      registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) }),
-    ).resolves.toBeDefined();
-    expect(registry.getPresence(ctx.participantId).online).toBe(true);
+    expect(() => {
+      sub.ready();
+    }).not.toThrow();
+    expect(reg.getPresence(ctx.participantId).online).toBe(true);
   });
 
-  it('touch is a no-op when heartbeat is disabled (default)', async () => {
-    const registry = createPresenceRegistry();
+  it('only open streams count: a pending sibling is not counted', async () => {
+    const reg = build();
     const ctx = activeContext();
-    const sub = await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    const a = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
 
-    expect(() => registry.touch(sub.id, ctx.participantId)).not.toThrow();
+    a.ready();
+
+    expect(reg.getPresence(ctx.participantId).streamCount).toBe(1);
   });
 
-  it('touch updates lastSeenAt when heartbeat is enabled (smoke check via no-throw)', async () => {
-    const registry = createPresenceRegistry({ heartbeatTimeoutMs: 5_000 });
-    const ctx = activeContext();
-    const sub = await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    // We cannot inspect lastSeenAt directly, but the call must not throw nor
-    // mutate visible state.
-    expect(() => registry.touch(sub.id, ctx.participantId)).not.toThrow();
-    expect(registry.getPresence(ctx.participantId).online).toBe(true);
-  });
-
-  it('subscription.subscribedAt is set to a fresh Date', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    const before = Date.now();
-    const sub = await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-    const after = Date.now();
-
-    expect(sub.subscribedAt.getTime()).toBeGreaterThanOrEqual(before);
-    expect(sub.subscribedAt.getTime()).toBeLessThanOrEqual(after);
-  });
-
-  it('verifies onClose wired by the registry triggers unsubscribe', async () => {
-    const registry = createPresenceRegistry();
-    const ctx = activeContext();
-    const handle = mockHandle(ctx);
-    const onCloseSpy = vi.fn();
-    handle.onClose = (cb: () => void) => {
-      // Capture the callback the registry installs and re-emit on a manual trigger.
-      onCloseSpy.mockImplementation(cb);
-    };
-    await registry.subscribe({ callerContext: ctx, handle });
-
-    onCloseSpy(); // simulate transport close
-
-    expect(registry.getPresence(ctx.participantId).online).toBe(false);
+  it('a participant that never subscribed is offline (tool-only agents are not online)', () => {
+    const reg = build();
+    expect(reg.getPresence(uuidv7())).toEqual({
+      online: false,
+      streamCount: 0,
+      streamsSubscribedAt: [],
+    });
   });
 });
 
-// ---------- Slice 2: TTL passive sweep + LRU eviction at cap-hit ----------
-// Per ADR-012 and PRY-017. Driven by INC-2026-003 (sev-2 — persistent session
-// leak / cap=16 without auto-eviction). Tests use an injected `now` clock so
-// the sweep + LRU thresholds are deterministic without real timers.
+describe('subscribe preconditions', () => {
+  it('rejects when the snapshot state is suspended', async () => {
+    const reg = build();
+    const ctx = nonActiveContext('suspended');
 
-describe('createPresenceRegistry — Slice 2 (TTL passive + LRU eviction)', () => {
-  let nowMs: number;
-  const clock = (): Date => new Date(nowMs);
-  const advance = (ms: number): void => {
-    nowMs += ms;
-  };
-
-  // Pino-shaped silent logger for assertions. We assert via `vi.fn()` spies.
-  const silentLogger = (): {
-    logger: Logger;
-    info: ReturnType<typeof vi.fn>;
-    warn: ReturnType<typeof vi.fn>;
-    error: ReturnType<typeof vi.fn>;
-  } => {
-    const info = vi.fn();
-    const warn = vi.fn();
-    const error = vi.fn();
-    return {
-      logger: { info, warn, error } as unknown as Logger,
-      info,
-      warn,
-      error,
-    };
-  };
-
-  let registry: PresenceRegistry | null = null;
-
-  beforeEach(() => {
-    nowMs = new Date('2026-04-28T10:00:00Z').getTime();
-  });
-
-  afterEach(() => {
-    registry?.shutdown();
-    registry = null;
-  });
-
-  it('idleTimeoutMs=null disables the sweep — entries persist past any timeout', async () => {
-    const { logger, info } = silentLogger();
-    registry = createPresenceRegistry({
-      idleTimeoutMs: null,
-      sweepIntervalMs: 1_000,
-      now: clock,
-      logger,
-    });
-    const ctx = activeContext();
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    advance(60 * 60 * 1000); // 1 hour
-    registry.__sweepStale(clock());
-
-    expect(registry.__sessionCount(ctx.participantId)).toBe(1);
-    expect(info).not.toHaveBeenCalledWith(
-      expect.objectContaining({ event: 'presence_session_evicted_idle' }),
-      expect.any(String),
-    );
-  });
-
-  it('sweep evicts stale entries when lastSeenAt > idleTimeoutMs', async () => {
-    const { logger, info } = silentLogger();
-    registry = createPresenceRegistry({
-      idleTimeoutMs: 10 * 60 * 1000, // 10 min
-      sweepIntervalMs: 60 * 1000, // 1 min
-      now: clock,
-      logger,
-    });
-    const ctx = activeContext();
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    expect(registry.__sessionCount(ctx.participantId)).toBe(1);
-
-    advance(11 * 60 * 1000); // 11 min — past idleTimeout
-    registry.__sweepStale(clock());
-
-    expect(registry.__sessionCount(ctx.participantId)).toBe(0);
-    expect(info).toHaveBeenCalledWith(
-      expect.objectContaining({
-        event: 'presence_session_evicted_idle',
-        participantId: ctx.participantId,
-      }),
-      expect.any(String),
-    );
-  });
-
-  it('sweep does not touch active entries (lastSeenAt within window)', async () => {
-    registry = createPresenceRegistry({
-      idleTimeoutMs: 10 * 60 * 1000,
-      sweepIntervalMs: 60 * 1000,
-      now: clock,
-    });
-    const ctx = activeContext();
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    advance(5 * 60 * 1000); // 5 min — within window
-    registry.__sweepStale(clock());
-
-    expect(registry.__sessionCount(ctx.participantId)).toBe(1);
-  });
-
-  it('shutdown() stops the periodic sweep — no further evictions', async () => {
-    vi.useFakeTimers();
-    try {
-      const { logger, info } = silentLogger();
-      registry = createPresenceRegistry({
-        idleTimeoutMs: 1_000,
-        sweepIntervalMs: 100,
-        // Use Date.now-based clock so vitest fake timers advance it together.
-        logger,
-      });
-      const ctx = activeContext();
-      await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-      registry.shutdown();
-      // Advance past several sweep intervals + the idle timeout. Even though
-      // the entry is now stale, the shutdown timer is gone — no eviction.
-      vi.advanceTimersByTime(5_000);
-
-      expect(registry.__sessionCount(ctx.participantId)).toBe(1);
-      expect(info).not.toHaveBeenCalledWith(
-        expect.objectContaining({ event: 'presence_session_evicted_idle' }),
-        expect.any(String),
-      );
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('LRU evicts oldest at cap-hit when threshold met — new subscribe succeeds', async () => {
-    const { logger, info } = silentLogger();
-    registry = createPresenceRegistry({
-      maxSessionsPerParticipant: 2,
-      idleTimeoutMs: 30 * 60 * 1000,
-      sweepIntervalMs: 5 * 60 * 1000,
-      lruEvictThresholdMs: 15 * 60 * 1000,
-      now: clock,
-      logger,
-    });
-    const ctx = activeContext();
-
-    // First subscribe at t=0
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-    advance(20 * 60 * 1000); // 20 min later — first entry is now 20 min idle
-    // Second subscribe at t=20min
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-    expect(registry.__sessionCount(ctx.participantId)).toBe(2);
-
-    // Third subscribe — cap hit. Oldest is 20 min idle, threshold is 15 min,
-    // so LRU evicts oldest and the new entry takes its slot.
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    expect(registry.__sessionCount(ctx.participantId)).toBe(2);
-    expect(info).toHaveBeenCalledWith(
-      expect.objectContaining({
-        event: 'presence_session_evicted_lru',
-        participantId: ctx.participantId,
-      }),
-      expect.any(String),
-    );
-  });
-
-  it('LRU does NOT evict when oldest entry is below threshold — rejects with too_many_sessions', async () => {
-    registry = createPresenceRegistry({
-      maxSessionsPerParticipant: 2,
-      idleTimeoutMs: 30 * 60 * 1000,
-      sweepIntervalMs: 5 * 60 * 1000,
-      lruEvictThresholdMs: 15 * 60 * 1000,
-      now: clock,
-    });
-    const ctx = activeContext();
-
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-    advance(5 * 60 * 1000);
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-    advance(5 * 60 * 1000); // oldest is now 10 min idle, below 15 min threshold
-
-    await expect(
-      registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) }),
-    ).rejects.toSatisfy(
+    await expect(reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) })).rejects.toSatisfy(
       (err) =>
-        isWaggleError(err) && err.code === 'INVALID_INPUT' && err.subCode === 'too_many_sessions',
-    );
-    expect(registry.__sessionCount(ctx.participantId)).toBe(2);
-  });
-
-  it('forEachSubscriber post-success refreshes lastSeenAt — active receiver is not evicted', async () => {
-    registry = createPresenceRegistry({
-      idleTimeoutMs: 10 * 60 * 1000,
-      sweepIntervalMs: 60 * 1000,
-      now: clock,
-    });
-    const ctx = activeContext();
-    const handle = mockHandle(ctx);
-    await registry.subscribe({ callerContext: ctx, handle });
-
-    advance(8 * 60 * 1000); // 8 min — within window
-    const fakeNotification: WaggleNotification = {
-      kind: 'online',
-      cellId: uuidv7(),
-      recipientId: ctx.participantId,
-      unreadCount: 1,
-      senderIds: [],
-      waggleId: uuidv7(),
-      emittedAt: clock(),
-    };
-    await registry.forEachSubscriber(ctx.participantId, (h) => h.deliver(fakeNotification));
-
-    advance(8 * 60 * 1000); // another 8 min — total 16 min since subscribe.
-    // Without the post-success touch this would be evicted; with it the
-    // lastSeenAt is fresh as of t=8min, so 8 min into the second window the
-    // entry is still alive (16 - 8 = 8 min idle, within 10 min threshold).
-    registry.__sweepStale(clock());
-
-    expect(registry.__sessionCount(ctx.participantId)).toBe(1);
-  });
-
-  it('heartbeatTimeoutMs is honored as a deprecated alias for idleTimeoutMs (with warning)', async () => {
-    const { logger, warn } = silentLogger();
-    registry = createPresenceRegistry({
-      heartbeatTimeoutMs: 10 * 60 * 1000,
-      sweepIntervalMs: 60 * 1000,
-      now: clock,
-      logger,
-    });
-    const ctx = activeContext();
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    advance(11 * 60 * 1000);
-    registry.__sweepStale(clock());
-
-    expect(registry.__sessionCount(ctx.participantId)).toBe(0);
-    expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ event: 'presence_heartbeat_timeout_ms_deprecated' }),
-      expect.any(String),
+        isWaggleError(err) &&
+        err.code === 'PARTICIPANT_NOT_ACTIVE_FOR_SUBSCRIBE' &&
+        err.subCode === 'suspended',
     );
   });
 
-  it('regression INC-2026-003 — 16 stale subs + 17th succeeds via LRU evict', async () => {
-    registry = createPresenceRegistry({
-      maxSessionsPerParticipant: 16,
-      idleTimeoutMs: 30 * 60 * 1000,
-      sweepIntervalMs: 5 * 60 * 1000,
-      lruEvictThresholdMs: 15 * 60 * 1000,
-      now: clock,
-    });
+  it('rejects when the snapshot state is revoked', async () => {
+    const reg = build();
+    const ctx = nonActiveContext('revoked');
+
+    await expect(reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) })).rejects.toSatisfy(
+      (err) => isWaggleError(err) && err.subCode === 'revoked',
+    );
+  });
+
+  it('re-reads the live state from the repo and rejects a suspension the snapshot missed', async () => {
+    const getParticipantState = vi.fn().mockResolvedValue({ state: 'suspended' });
+    const reg = build({ participantsRepo: { getParticipantState } });
     const ctx = activeContext();
 
-    // 16 subscribes that never DELETE /mcp and never trigger socket close —
-    // simulates the production leak scenario (clients that crash or
-    // disconnect without closing the SSE stream).
-    for (let i = 0; i < 16; i++) {
-      await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-      advance(1_000); // each sub a second apart so lastSeenAt orders LRU
-    }
-    expect(registry.__sessionCount(ctx.participantId)).toBe(16);
-
-    // The 17th subscribe pre-fix would reject with `too_many_sessions`. With
-    // the fix, the LRU threshold (15 min) is met by the oldest (~16 sec
-    // away) only after enough time passes — first verify rejection while all
-    // are recent, then advance and verify success.
-    await expect(
-      registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) }),
-    ).rejects.toSatisfy(
+    await expect(reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) })).rejects.toSatisfy(
       (err) =>
-        isWaggleError(err) && err.code === 'INVALID_INPUT' && err.subCode === 'too_many_sessions',
+        isWaggleError(err) &&
+        err.code === 'PARTICIPANT_NOT_ACTIVE_FOR_SUBSCRIBE' &&
+        err.subCode === 'suspended',
     );
-
-    // Advance 16 minutes — oldest is now ~16 min idle, threshold met.
-    advance(16 * 60 * 1000);
-    await expect(
-      registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) }),
-    ).resolves.toBeDefined();
-    expect(registry.__sessionCount(ctx.participantId)).toBe(16);
+    expect(getParticipantState).toHaveBeenCalledWith(ctx.participantId);
+    expect(reg.getPresence(ctx.participantId).online).toBe(false);
   });
 
-  it('race: sweep and explicit unsubscribe interleave without throwing', async () => {
-    registry = createPresenceRegistry({
-      idleTimeoutMs: 10 * 60 * 1000,
-      sweepIntervalMs: 60 * 1000,
-      now: clock,
+  it('accepts when the live state is active', async () => {
+    const getParticipantState = vi.fn().mockResolvedValue({ state: 'active' });
+    const reg = build({ participantsRepo: { getParticipantState } });
+    const ctx = activeContext();
+
+    const sub = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    sub.ready();
+
+    expect(reg.getPresence(ctx.participantId).online).toBe(true);
+  });
+
+  it('subscribe does not write last_connected_at (auth-binding owns it)', async () => {
+    const updateAgentLastConnectedAt = vi.fn();
+    const reg = build({
+      participantsRepo: {
+        getParticipantState: vi.fn().mockResolvedValue({ state: 'active' }),
+        updateAgentLastConnectedAt,
+      } as unknown as NonNullable<PresenceRegistryConfig['participantsRepo']>,
     });
     const ctx = activeContext();
-    const sub = await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
 
-    advance(11 * 60 * 1000);
-    // Both sweep and explicit unsubscribe target the same entry. The second
-    // call MUST be idempotent (no throw, no negative count).
-    const reg = registry;
-    reg.__sweepStale(clock());
-    expect(() => reg.unsubscribe(sub.id, ctx.participantId)).not.toThrow();
-
-    expect(reg.__sessionCount(ctx.participantId)).toBe(0);
-  });
-
-  it('sweep without idleTimeoutMs configured is a no-op via __sweepStale', () => {
-    const reg = createPresenceRegistry({
-      idleTimeoutMs: null,
-      now: clock,
-    });
-    registry = reg;
-    // Even calling sweep manually with stale snapshot does nothing.
-    expect(() => reg.__sweepStale(new Date(nowMs + 1_000_000))).not.toThrow();
-  });
-
-  it('emits config_sweep_misconfigured warn when idleTimeoutMs > 0 but sweepIntervalMs <= 0 (closes PRY-017 N2)', () => {
-    const { logger, warn } = silentLogger();
-    registry = createPresenceRegistry({
-      idleTimeoutMs: 30 * 60 * 1000,
-      sweepIntervalMs: 0,
-      now: clock,
-      logger,
-    });
-
-    expect(warn).toHaveBeenCalledTimes(1);
-    const call = warn.mock.calls[0]!;
-    const fields = call[0] as Record<string, unknown>;
-    expect(fields['event']).toBe('config_sweep_misconfigured');
-    expect(fields['component']).toBe('PresenceRegistry');
-    expect(fields['enabledMs']).toBe(30 * 60 * 1000);
-    expect(fields['intervalMs']).toBe(0);
-  });
-
-  it('does NOT emit config_sweep_misconfigured warn when both idleTimeoutMs and sweepIntervalMs are positive', () => {
-    const { logger, warn } = silentLogger();
-    registry = createPresenceRegistry({
-      idleTimeoutMs: 30 * 60 * 1000,
-      sweepIntervalMs: 5 * 60 * 1000,
-      now: clock,
-      logger,
-    });
-
-    const misconfigCalls = warn.mock.calls.filter((c) => {
-      const f = c[0] as Record<string, unknown> | undefined;
-      return f?.['event'] === 'config_sweep_misconfigured';
-    });
-    expect(misconfigCalls.length).toBe(0);
-  });
-
-  it('does NOT emit config_sweep_misconfigured warn when idleTimeoutMs is null (sweep disabled)', () => {
-    const { logger, warn } = silentLogger();
-    registry = createPresenceRegistry({
-      idleTimeoutMs: null,
-      sweepIntervalMs: 0,
-      now: clock,
-      logger,
-    });
-
-    const misconfigCalls = warn.mock.calls.filter((c) => {
-      const f = c[0] as Record<string, unknown> | undefined;
-      return f?.['event'] === 'config_sweep_misconfigured';
-    });
-    expect(misconfigCalls.length).toBe(0);
-  });
-});
-
-// PRY-030 — `last_connected_at` persistence side-effect of `subscribe`.
-describe('createPresenceRegistry — last_connected_at side-effect (PRY-030)', () => {
-  let registry: PresenceRegistry;
-
-  afterEach(() => {
-    registry.shutdown();
-  });
-
-  function hivekeeperContext(): IdentityContext {
-    const id = uuidv7();
-    return {
-      participantId: id,
-      kind: 'hivekeeper',
-      hiveId: uuidv7(),
-      hiveName: 'test-hive',
-      colonyId: uuidv7(),
-      snapshot: {
-        issuedAt: new Date(),
-        credentialJti: uuidv7(),
-        credentialKid: 'kid-1',
-      },
-      current: { state: 'active' },
-    };
-  }
-
-  it('worker subscribe → updateAgentLastConnectedAt called once with the subscribe timestamp', async () => {
-    const updateAgentLastConnectedAt = vi.fn().mockResolvedValue(undefined);
-    const fixedNow = new Date('2026-05-01T12:34:56.789Z');
-    registry = createPresenceRegistry({
-      participantsRepo: { updateAgentLastConnectedAt },
-      now: () => fixedNow,
-    });
-    const ctx = activeContext();
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-
-    // The side effect is fire-and-forget (`Promise.resolve().then(...)`) so we
-    // need a microtask flush before asserting.
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(updateAgentLastConnectedAt).toHaveBeenCalledTimes(1);
-    expect(updateAgentLastConnectedAt).toHaveBeenCalledWith(ctx.participantId, fixedNow);
-  });
-
-  it('scout subscribe → updateAgentLastConnectedAt called', async () => {
-    const updateAgentLastConnectedAt = vi.fn().mockResolvedValue(undefined);
-    registry = createPresenceRegistry({
-      participantsRepo: { updateAgentLastConnectedAt },
-    });
-    const ctx: IdentityContext = {
-      ...activeContext(),
-      kind: 'scout',
-      current: { state: 'active', type: 'scout' },
-    };
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(updateAgentLastConnectedAt).toHaveBeenCalledTimes(1);
-  });
-
-  it('hivekeeper subscribe → updateAgentLastConnectedAt is NOT called', async () => {
-    const updateAgentLastConnectedAt = vi.fn().mockResolvedValue(undefined);
-    registry = createPresenceRegistry({
-      participantsRepo: { updateAgentLastConnectedAt },
-    });
-    const ctx = hivekeeperContext();
-    await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
-    await Promise.resolve();
+    const sub = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    sub.ready();
     await Promise.resolve();
 
     expect(updateAgentLastConnectedAt).not.toHaveBeenCalled();
   });
+});
 
-  it('side-effect failure does NOT abort the subscribe and is logged at warn', async () => {
-    const updateAgentLastConnectedAt = vi.fn().mockRejectedValue(new Error('db unreachable'));
-    const warn = vi.fn();
-    const logger = { warn, info: vi.fn(), error: vi.fn(), debug: vi.fn() } as unknown as Logger;
-    registry = createPresenceRegistry({
-      participantsRepo: { updateAgentLastConnectedAt },
-      logger,
-    });
+describe('entries live exactly as long as their stream', () => {
+  it('an idle entry stays registered for any amount of time (fake clock)', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-02T00:00:00Z'));
+    const reg = build();
     const ctx = activeContext();
-    const sub = await registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    const sub = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    sub.ready();
 
-    // Subscription resolves normally despite the rejected side-effect.
-    expect(sub.id).toBeDefined();
-    expect(sub.participantId).toBe(ctx.participantId);
+    await vi.advanceTimersByTimeAsync(7 * 24 * 60 * 60 * 1000);
 
-    // Drain microtasks so `.catch(...)` runs.
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(updateAgentLastConnectedAt).toHaveBeenCalledTimes(1);
-    const warnEvents = warn.mock.calls
-      .map((c) => (c[0] as Record<string, unknown> | undefined)?.['event'])
-      .filter((e): e is string => typeof e === 'string');
-    expect(warnEvents).toContain('presence_last_connected_at_update_failed');
+    expect(reg.getPresence(ctx.participantId).online).toBe(true);
+    expect(reg.getPresence(ctx.participantId).streamCount).toBe(1);
   });
 
-  it('without participantsRepo configured → no side-effect attempted (Slice 0 backwards-compat)', async () => {
-    registry = createPresenceRegistry();
+  it('the registry mounts no timers', async () => {
+    vi.useFakeTimers();
+    const reg = build();
     const ctx = activeContext();
-    // No throw, no log spam — the registry simply never tries to persist.
-    await expect(
-      registry.subscribe({ callerContext: ctx, handle: mockHandle(ctx) }),
-    ).resolves.toBeDefined();
+    const sub = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    sub.ready();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('the entry disappears when its handle closes (onClose)', async () => {
+    const reg = build();
+    const ctx = activeContext();
+    const handle = mockHandle(ctx);
+    const sub = await reg.subscribe({ callerContext: ctx, handle });
+    sub.ready();
+
+    handle.triggerClose('stalled');
+
+    expect(reg.getPresence(ctx.participantId).online).toBe(false);
+    expect(reg.isOpen(sub.id, ctx.participantId)).toBe(false);
+  });
+
+  it('two streams: closing one keeps the participant online', async () => {
+    const reg = build();
+    const ctx = activeContext();
+    const h1 = mockHandle(ctx);
+    const h2 = mockHandle(ctx);
+    const s1 = await reg.subscribe({ callerContext: ctx, handle: h1 });
+    const s2 = await reg.subscribe({ callerContext: ctx, handle: h2 });
+    s1.ready();
+    s2.ready();
+    expect(reg.getPresence(ctx.participantId).streamCount).toBe(2);
+
+    h1.triggerClose();
+
+    const snapshot = reg.getPresence(ctx.participantId);
+    expect(snapshot.online).toBe(true);
+    expect(snapshot.streamCount).toBe(1);
+  });
+
+  it('subscription.close() removes the entry without closing the physical stream', async () => {
+    const reg = build();
+    const ctx = activeContext();
+    const handle = mockHandle(ctx);
+    const sub = await reg.subscribe({ callerContext: ctx, handle });
+    sub.ready();
+
+    sub.close();
+
+    expect(reg.getPresence(ctx.participantId).online).toBe(false);
+    expect(handle.closeCalls).toEqual([]);
+  });
+
+  it('subscription.close() is idempotent', async () => {
+    const reg = build();
+    const ctx = activeContext();
+    const sub = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    sub.ready();
+
+    sub.close();
+    expect(() => {
+      sub.close();
+    }).not.toThrow();
+  });
+
+  it('unsubscribe with an unknown subscriptionId is a no-op', () => {
+    const reg = build();
+    expect(() => {
+      reg.unsubscribe(uuidv7(), uuidv7(), 'client_closed');
+    }).not.toThrow();
+  });
+
+  it('unsubscribe never calls handle.close() (the stream is already gone)', async () => {
+    const reg = build();
+    const ctx = activeContext();
+    const handle = mockHandle(ctx);
+    const sub = await reg.subscribe({ callerContext: ctx, handle });
+    sub.ready();
+
+    reg.unsubscribe(sub.id, ctx.participantId, 'write_failed');
+
+    expect(handle.closeCalls).toEqual([]);
+    expect(reg.getPresence(ctx.participantId).online).toBe(false);
+  });
+
+  it('a second subscribe with the same connectionId replaces the first entry', async () => {
+    const reg = build();
+    const ctx = activeContext();
+    const h1 = mockHandle(ctx);
+    const h2: MockHandle = { ...mockHandle(ctx), connectionId: h1.connectionId };
+    const s1 = await reg.subscribe({ callerContext: ctx, handle: h1 });
+    s1.ready();
+    const s2 = await reg.subscribe({ callerContext: ctx, handle: h2 });
+    s2.ready();
+
+    expect(reg.getPresence(ctx.participantId).streamCount).toBe(1);
+    expect(reg.isOpen(s1.id, ctx.participantId)).toBe(false);
+    expect(reg.isOpen(s2.id, ctx.participantId)).toBe(true);
+  });
+});
+
+describe('cap and LRU eviction (no inactivity threshold)', () => {
+  it('at the cap, the oldest stream receives close("evicted_lru") and the new one registers', async () => {
+    let t = 1_000;
+    const reg = build({ maxSessionsPerParticipant: 2, now: () => new Date(t) });
+    const ctx = activeContext();
+    const h1 = mockHandle(ctx);
+    const h2 = mockHandle(ctx);
+    const h3 = mockHandle(ctx);
+    const s1 = await reg.subscribe({ callerContext: ctx, handle: h1 });
+    s1.ready();
+    t += 10;
+    const s2 = await reg.subscribe({ callerContext: ctx, handle: h2 });
+    s2.ready();
+    t += 10;
+
+    const s3 = await reg.subscribe({ callerContext: ctx, handle: h3 });
+    s3.ready();
+
+    expect(h1.closeCalls).toEqual(['evicted_lru']);
+    expect(h2.closeCalls).toEqual([]);
+    expect(reg.isOpen(s1.id, ctx.participantId)).toBe(false);
+    expect(reg.isOpen(s2.id, ctx.participantId)).toBe(true);
+    expect(reg.isOpen(s3.id, ctx.participantId)).toBe(true);
+    expect(reg.getPresence(ctx.participantId).streamCount).toBe(2);
+  });
+
+  it('subscribe never rejects for the cap', async () => {
+    const reg = build({ maxSessionsPerParticipant: 1 });
+    const ctx = activeContext();
+    for (let i = 0; i < 5; i++) {
+      await expect(
+        reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) }),
+      ).resolves.toBeDefined();
+    }
+  });
+
+  it('eviction ignores inactivity: traffic does not protect a stream from being the oldest', async () => {
+    let t = 1_000;
+    const reg = build({ maxSessionsPerParticipant: 2, now: () => new Date(t) });
+    const ctx = activeContext();
+    const h1 = mockHandle(ctx);
+    const s1 = await reg.subscribe({ callerContext: ctx, handle: h1 });
+    s1.ready();
+    t += 10;
+    const s2 = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    s2.ready();
+    await reg.forEachSubscriber(ctx.participantId, async (h) => {
+      await h.deliver({} as WaggleNotification);
+    });
+
+    await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+
+    expect(h1.closeCalls).toEqual(['evicted_lru']);
+  });
+
+  it('a pending entry counts toward the cap and can be the victim', async () => {
+    let t = 1_000;
+    const reg = build({ maxSessionsPerParticipant: 1, now: () => new Date(t) });
+    const ctx = activeContext();
+    const h1 = mockHandle(ctx);
+    const s1 = await reg.subscribe({ callerContext: ctx, handle: h1 });
+    t += 10;
+
+    await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+
+    expect(h1.closeCalls).toEqual(['evicted_lru']);
+    s1.ready();
+    expect(reg.getPresence(ctx.participantId).streamCount).toBe(0);
+  });
+
+  it('a victim whose close() throws is logged and does not abort the subscribe', async () => {
+    const logger = makeLogger();
+    const reg = build({
+      maxSessionsPerParticipant: 1,
+      logger: logger as unknown as Logger,
+    });
+    const ctx = activeContext();
+    await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx, { closeThrows: true }) });
+
+    const sub = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    sub.ready();
+
+    expect(reg.getPresence(ctx.participantId).streamCount).toBe(1);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('the cap is per participant', async () => {
+    const reg = build({ maxSessionsPerParticipant: 1 });
+    const a = activeContext();
+    const b = activeContext();
+    const ha = mockHandle(a);
+    const sa = await reg.subscribe({ callerContext: a, handle: ha });
+    sa.ready();
+
+    const sb = await reg.subscribe({ callerContext: b, handle: mockHandle(b) });
+    sb.ready();
+
+    expect(ha.closeCalls).toEqual([]);
+    expect(reg.getPresence(a.participantId).online).toBe(true);
+    expect(reg.getPresence(b.participantId).online).toBe(true);
+  });
+});
+
+describe('listOpenStreams', () => {
+  it('lists only open entries, each with its subscription', async () => {
+    const registry = build();
+    const context = activeContext();
+    const opened = await registry.subscribe({
+      callerContext: context,
+      handle: mockHandle(context),
+    });
+    opened.ready();
+    await registry.subscribe({ callerContext: context, handle: mockHandle(context) });
+
+    const streams = registry.listOpenStreams(context.participantId);
+    expect(streams.map((s) => s.subscriptionId)).toEqual([opened.id]);
+    expect(registry.listOpenStreams(uuidv7())).toEqual([]);
+  });
+});
+
+describe('closeParticipantStreams', () => {
+  it('closes every stream of the participant with the reason and removes the entries', async () => {
+    const reg = build();
+    const ctx = activeContext();
+    const other = activeContext();
+    const h1 = mockHandle(ctx);
+    const h2 = mockHandle(ctx);
+    const ho = mockHandle(other);
+    (await reg.subscribe({ callerContext: ctx, handle: h1 })).ready();
+    (await reg.subscribe({ callerContext: ctx, handle: h2 })).ready();
+    (await reg.subscribe({ callerContext: other, handle: ho })).ready();
+
+    reg.closeParticipantStreams(ctx.participantId, 'participant_revoked');
+
+    expect(h1.closeCalls).toEqual(['participant_revoked']);
+    expect(h2.closeCalls).toEqual(['participant_revoked']);
+    expect(ho.closeCalls).toEqual([]);
+    expect(reg.getPresence(ctx.participantId).online).toBe(false);
+    expect(reg.getPresence(other.participantId).online).toBe(true);
+  });
+
+  it('a throwing handle does not stop the others; unknown participants are a no-op', async () => {
+    const logger = makeLogger();
+    const reg = build({ logger: logger as unknown as Logger });
+    const ctx = activeContext();
+    const bad = mockHandle(ctx, { closeThrows: true });
+    const good = mockHandle(ctx);
+    (await reg.subscribe({ callerContext: ctx, handle: bad })).ready();
+    (await reg.subscribe({ callerContext: ctx, handle: good })).ready();
+
+    reg.closeParticipantStreams(ctx.participantId, 'participant_suspended');
+    reg.closeParticipantStreams(uuidv7(), 'participant_suspended');
+
+    expect(good.closeCalls).toEqual(['participant_suspended']);
+    expect(reg.getPresence(ctx.participantId).online).toBe(false);
+  });
+});
+
+describe('shutdown', () => {
+  it('closes all streams with "shutdown", empties the registry and is idempotent', async () => {
+    const reg = build();
+    const a = activeContext();
+    const b = activeContext();
+    const ha = mockHandle(a);
+    const hb = mockHandle(b);
+    (await reg.subscribe({ callerContext: a, handle: ha })).ready();
+    (await reg.subscribe({ callerContext: b, handle: hb })).ready();
+
+    reg.shutdown();
+    reg.shutdown();
+
+    expect(ha.closeCalls).toEqual(['shutdown']);
+    expect(hb.closeCalls).toEqual(['shutdown']);
+    expect(reg.getPresence(a.participantId).online).toBe(false);
+  });
+
+  it('rejects subscribes after shutdown with INVALID_INPUT/registry_shut_down', async () => {
+    const reg = build();
+    reg.shutdown();
+    const ctx = activeContext();
+
+    await expect(reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) })).rejects.toSatisfy(
+      (err) =>
+        isWaggleError(err) && err.code === 'INVALID_INPUT' && err.subCode === 'registry_shut_down',
+    );
+  });
+});
+
+describe('forEachSubscriber', () => {
+  it('fans out only to open entries and isolates errors per handle', async () => {
+    const reg = build();
+    const ctx = activeContext();
+    const openA = mockHandle(ctx);
+    const openB = mockHandle(ctx);
+    const pending = mockHandle(ctx);
+    (await reg.subscribe({ callerContext: ctx, handle: openA })).ready();
+    (await reg.subscribe({ callerContext: ctx, handle: openB })).ready();
+    await reg.subscribe({ callerContext: ctx, handle: pending });
+
+    const seen: SubscriberHandle[] = [];
+    const errors: unknown[] = [];
+    await reg.forEachSubscriber(
+      ctx.participantId,
+      async (h) => {
+        seen.push(h);
+        if (h === openA) throw new Error('zombie');
+        await h.deliver({} as WaggleNotification);
+      },
+      (_h, err) => errors.push(err),
+    );
+
+    expect(seen).toEqual([openA, openB]);
+    expect(errors).toHaveLength(1);
+    expect(openB.captured).toHaveLength(1);
+    expect(pending.captured).toHaveLength(0);
+  });
+
+  it('survives a handle that unsubscribes itself mid-iteration', async () => {
+    const reg = build();
+    const ctx = activeContext();
+    const h1 = mockHandle(ctx);
+    const h2 = mockHandle(ctx);
+    (await reg.subscribe({ callerContext: ctx, handle: h1 })).ready();
+    (await reg.subscribe({ callerContext: ctx, handle: h2 })).ready();
+
+    const seen: SubscriberHandle[] = [];
+    await reg.forEachSubscriber(ctx.participantId, (h) => {
+      seen.push(h);
+      h1.triggerClose();
+      return Promise.resolve();
+    });
+
+    expect(seen).toHaveLength(2);
+  });
+
+  it('absent participant returns immediately', async () => {
+    const reg = build();
+    await expect(reg.forEachSubscriber(uuidv7(), () => Promise.resolve())).resolves.toBeUndefined();
+  });
+});
+
+describe('presence events', () => {
+  function eventsNamed(
+    logger: ReturnType<typeof makeLogger>,
+    name: string,
+  ): Array<Record<string, unknown>> {
+    return logger.events().filter((e) => e['event'] === name);
+  }
+
+  it('emits presence_stream_online on 0 → 1 open streams only', async () => {
+    const logger = makeLogger();
+    const reg = build({ logger: logger as unknown as Logger });
+    const ctx = activeContext();
+    const s1 = await reg.subscribe({
+      callerContext: ctx,
+      handle: mockHandle(ctx),
+      requestId: 'req-1',
+    });
+    expect(eventsNamed(logger, 'presence_stream_online')).toHaveLength(0);
+
+    s1.ready();
+    (await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) })).ready();
+
+    const online = eventsNamed(logger, 'presence_stream_online');
+    expect(online).toHaveLength(1);
+    expect(online[0]).toMatchObject({
+      participantId: ctx.participantId,
+      streamCount: 1,
+      requestId: 'req-1',
+    });
+  });
+
+  it('emits presence_stream_offline with closeReason when the last open stream goes', async () => {
+    let t = 1_000;
+    const logger = makeLogger();
+    const reg = build({
+      logger: logger as unknown as Logger,
+      now: () => new Date(t),
+    });
+    const ctx = activeContext();
+    const h1 = mockHandle(ctx);
+    const h2 = mockHandle(ctx);
+    (await reg.subscribe({ callerContext: ctx, handle: h1, requestId: 'req-a' })).ready();
+    (await reg.subscribe({ callerContext: ctx, handle: h2 })).ready();
+
+    h1.triggerClose('client_closed');
+    expect(eventsNamed(logger, 'presence_stream_offline')).toHaveLength(0);
+
+    t += 250;
+    h2.triggerClose('stalled');
+
+    const offline = eventsNamed(logger, 'presence_stream_offline');
+    expect(offline).toHaveLength(1);
+    expect(offline[0]).toMatchObject({
+      participantId: ctx.participantId,
+      closeReason: 'stalled',
+      streamDurationMs: 250,
+    });
+  });
+
+  it('a pending entry that drops emits no offline event', async () => {
+    const logger = makeLogger();
+    const reg = build({ logger: logger as unknown as Logger });
+    const ctx = activeContext();
+    const handle = mockHandle(ctx);
+    await reg.subscribe({ callerContext: ctx, handle });
+
+    handle.triggerClose();
+
+    expect(eventsNamed(logger, 'presence_stream_offline')).toHaveLength(0);
+  });
+
+  it('LRU emits presence_stream_evicted_lru and offline with closeReason evicted_lru', async () => {
+    const logger = makeLogger();
+    const reg = build({
+      maxSessionsPerParticipant: 1,
+      logger: logger as unknown as Logger,
+    });
+    const ctx = activeContext();
+    const first = await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+    first.ready();
+
+    await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+
+    expect(eventsNamed(logger, 'presence_stream_evicted_lru')[0]).toMatchObject({
+      participantId: ctx.participantId,
+      victimSubscriptionId: first.id,
+    });
+    expect(eventsNamed(logger, 'presence_stream_offline')[0]).toMatchObject({
+      closeReason: 'evicted_lru',
+    });
+  });
+
+  it('never emits the retired idle-sweep events', async () => {
+    const logger = makeLogger();
+    const reg = build({
+      maxSessionsPerParticipant: 1,
+      logger: logger as unknown as Logger,
+    });
+    const ctx = activeContext();
+    (await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) })).ready();
+    await reg.subscribe({ callerContext: ctx, handle: mockHandle(ctx) });
+
+    const names = logger.events().map((e) => e['event']);
+    expect(names.filter((n) => String(n).startsWith('presence_session_'))).toEqual([]);
+    expect(names).not.toContain('presence_subscribe_success');
   });
 });

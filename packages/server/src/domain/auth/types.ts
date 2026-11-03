@@ -24,6 +24,8 @@ export interface CredentialSnapshot {
   issuedAt: Date;
   credentialJti: UUIDv7;
   credentialKid: string;
+  /** From `exp`. A long stream closes here; every credential Hive issues carries it. */
+  credentialExpiresAt?: Date;
 }
 
 /**

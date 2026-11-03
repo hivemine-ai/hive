@@ -5,7 +5,7 @@
 import type { UUIDv7, Duration, IdentityContext } from '#domain/auth/types.js';
 
 export type MessageType = 'request' | 'response' | 'notification';
-export type MessageState = 'sent' | 'delivered' | 'read' | 'expired';
+export type MessageState = 'sent' | 'stored' | 'read' | 'expired';
 export type CellState = 'active' | 'closed';
 
 export type ActionDescriptor = { [key: string]: unknown };
@@ -25,7 +25,7 @@ export interface MessageView {
   replyTo: UUIDv7 | null;
   ttl: Duration | null;
   sentAt: Date;
-  deliveredAt: Date;
+  storedAt: Date;
   readAt: Date | null;
   state: MessageState;
 }
@@ -60,14 +60,14 @@ export interface Message {
   replyTo: UUIDv7 | null;
   ttl: Duration | null;
   sentAt: Date;
-  deliveredAt: Date;
+  storedAt: Date;
   readAt: Date | null;
   state: MessageState;
   expiredAt: Date | null;
 }
 
 export interface Pagination {
-  cursor: { deliveredAt: Date; messageId: UUIDv7 } | null;
+  cursor: { storedAt: Date; messageId: UUIDv7 } | null;
   limit: number;
 }
 
@@ -120,7 +120,7 @@ export interface SendMessageInput {
 export interface SendResult {
   messageId: UUIDv7;
   sentAt: Date;
-  deliveredAt: Date;
+  storedAt: Date;
   replayed: boolean;
 }
 

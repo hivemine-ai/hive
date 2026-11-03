@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
-import { CellError } from '#domain/cells/index.js';
-
 import { ensureSafeAction, MAX_ACTION_DEPTH } from './action-safety.js';
+import { CellError } from './errors.js';
 
 describe('ensureSafeAction', () => {
   it('passes through primitives unchanged', () => {

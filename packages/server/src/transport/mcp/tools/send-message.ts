@@ -10,7 +10,7 @@ export const SendMessageInputSchema = z
     recipient: z.string().min(1),
     type: z.enum(['request', 'response', 'notification']),
     body: z.string().min(1),
-    action: z.record(z.unknown()).nullish(),
+    action: z.record(z.string(), z.unknown()).nullish(),
     reply_to: z.string().optional(),
     ttl_ms: z.number().int().positive().optional(),
     idempotency_key: z.string().optional(),
@@ -22,7 +22,7 @@ export type SendMessageInput = z.infer<typeof SendMessageInputSchema>;
 export interface SendMessageOutput {
   message_id: string;
   sent_at: string;
-  delivered_at: string;
+  stored_at: string;
   replayed: boolean;
 }
 
@@ -58,7 +58,7 @@ export function createSendMessageHandler(deps: SendMessageDeps) {
     return {
       message_id: result.messageId,
       sent_at: result.sentAt.toISOString(),
-      delivered_at: result.deliveredAt.toISOString(),
+      stored_at: result.storedAt.toISOString(),
       replayed: result.replayed,
     };
   };

@@ -9,8 +9,6 @@ import { dateToIso } from '#persistence/type-mappers.js';
 import { AuthError } from '../errors.js';
 import type { UUIDv7 } from '../types.js';
 
-import type { Blocklist } from './blocklist.js';
-
 export interface RevokeCredentialInput {
   jti: UUIDv7;
   revokedBy?: UUIDv7;
@@ -18,7 +16,6 @@ export interface RevokeCredentialInput {
 }
 
 export interface RevokerDeps {
-  blocklist: Blocklist;
   db: Kysely<Database>;
   now?: () => Date;
   logger?: Logger;
@@ -46,10 +43,7 @@ export function createRevoker(deps: RevokerDeps): Revoker {
         });
       }
       // Already revoked: idempotent no-op.
-      if (credRow.revoked_at !== null) {
-        deps.blocklist.recordAdded(input.jti);
-        return;
-      }
+      if (credRow.revoked_at !== null) return;
 
       await deps.db.transaction().execute(async (tx) => {
         await tx
@@ -69,8 +63,6 @@ export function createRevoker(deps: RevokerDeps): Revoker {
           .where('jti', '=', input.jti)
           .execute();
       });
-
-      deps.blocklist.recordAdded(input.jti);
 
       if (deps.logger) {
         deps.logger.info(

@@ -58,7 +58,7 @@ function buildStubReader(knownReadable: string[] = []): {
 function buildContext(): RequestContext {
   // Minimal stub — the tool layer only forwards `ctx.identity` to the reader,
   // and the stub reader ignores it. Type-casting via unknown avoids building
-  // out the full IdentityContext / SessionState surface for these unit tests.
+  // out the full IdentityContext surface for these unit tests.
   return {} as unknown as RequestContext;
 }
 

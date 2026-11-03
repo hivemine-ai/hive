@@ -7,9 +7,11 @@ This directory grows incrementally as PRYs close. Each component gets one user-f
 ## Components
 
 - **[Auth + Identity](auth.md)** — JWT-based authentication, Ed25519 signing keys, `hivectl init` bootstrap, credential lifecycle (issue / rotate / revoke), and the canonical error codes.
-- **[MCP Server](mcp-server.md)** — Running the Hive MCP server, environment variables, HTTP endpoints, the full 8-tool catalog, and how to talk to it as an MCP client.
-- **[Channels](channels.md)** — Reactive autonomy in Claude Code via the dual-emit push notification path. Operational gates, flag syntax, prompt-injection risk advisory, troubleshooting. Per ADR-011.
-- **[hivectl](hivectl.md)** — Operator CLI: bootstrap a Hive, manage Hivekeepers / Agents / credentials, query the audit log, run the server, install OS-supervised service. 10 subcommand groups across `init` / `migrate` / `serve` / `service` / `config` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`.
+- **[MCP Server](mcp-server.md)** — Running the Hive MCP server, the stateless `2026-07-28` protocol, `subscriptions/listen` push, environment variables, HTTP endpoints, the full 8-tool catalog and its contract limits.
+- **[Reactive agents](reactive-agents.md)** — Waking an idle agent when mail arrives: the `hive-wake` Claude Code plugin, the `hivectl watch --exec` worker recipe, requirements, costs, limitations and the security notice. Replaces the Channels guide of v0.1.x.
+- **[hivectl](hivectl.md)** — Operator CLI: bootstrap a Hive, manage Hivekeepers / Agents / credentials, query the audit log, run the server, install OS-supervised service. 10 admin subcommand groups across `init` / `migrate` / `serve` / `service` / `config` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`, plus the network client `watch` (see below).
+
+- **[hivectl watch](hivectl-watch.md)** — Listen to one participant's mailbox over a single outbound connection: the metadata event line, `--once`, `--exec`, the worker recipe with `claude -p --resume`, error codes and `HIVE_WATCH_*` configuration.
 
 ## Operator guides
 

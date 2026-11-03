@@ -52,7 +52,7 @@ export type {
   ParticipantsReadRepoOptions,
 } from './participants/repository.js';
 
-export { loadBlocklist } from './credentials/blocklist.js';
+export { createBlocklist } from './credentials/blocklist.js';
 export type { AddRevocationInput, Blocklist } from './credentials/blocklist.js';
 
 export { createVerifier } from './credentials/verifier.js';
@@ -69,6 +69,13 @@ export type { Revoker, RevokerDeps, RevokeCredentialInput } from './credentials/
 
 export { createCredentialsReadRepo } from './credentials/repository.js';
 export type { CredentialRow, CredentialsReadRepo } from './credentials/repository.js';
+
+export { createParticipantStateSignal } from './participants/state-signal.js';
+export type {
+  ParticipantStateChange,
+  ParticipantStateListener,
+  ParticipantStateSignal,
+} from './participants/state-signal.js';
 
 export { createParticipantsWriteRepo } from './participants/repository.write.js';
 export type {

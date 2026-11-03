@@ -2,7 +2,7 @@
 
 > Bootstrap and administer a Hive from the same host as the server. The operator with shell access is the trust anchor — there is no JWT for `hivectl` itself.
 
-`hivectl` is the OSS admin surface of Hive v0.1. It wraps the same domain layer the MCP server consumes (via `wire.startCli()`), so every CLI command exercises the production code paths. A future admin web UI will reuse those same domain functions.
+`hivectl` is the OSS admin surface of Hive v0.2. It wraps the same domain layer the MCP server consumes (via `wire.startCli()`), so every CLI command exercises the production code paths. A future admin web UI will reuse those same domain functions.
 
 ## Installation
 
@@ -112,7 +112,7 @@ Running `hivectl` with no arguments renders a local snapshot view in three frame
 ```
 $ hivectl
 
-    ⬢ ⬢ ⬢    hivectl  ·  v0.1.0  ·  apache-2.0
+    ⬢ ⬢ ⬢    hivectl  ·  v0.2.0  ·  apache-2.0
   ⬢ ⬢ ⬢ ⬢ ⬢  open-source MCP server for collaborative AI agents
     ⬢ ⬢ ⬢    snapshot 12s ago · ~/.local/state/hive/status.json
 
@@ -160,7 +160,7 @@ In pretty mode (`--output table`, the default for an interactive TTY) `init` ren
 
 ```
        ⬢ ⬢ ⬢ ⬢
-     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      hivectl   ·   v0.1.0
+     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      hivectl   ·   v0.2.0
    ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢
      ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      bootstrapping a fresh Hive
        ⬢ ⬢ ⬢ ⬢        apache-2.0  ·  hivemine-ai/hive
@@ -304,7 +304,7 @@ Bind-address precedence (highest wins): `--host` flag → `HIVE_MCP_HTTP_HOST` e
 
 By default `serve` boots in **3 phases** for human operators sitting at a terminal:
 
-1. **Boot banner + sub-block** — the compact identity banner (`⬢ ⬢ ⬢ hivectl · v0.1.0 · apache-2.0` + tagline + `starting hive · <hive-name>`) followed by 3 metadata rows (`bind`, `database`, `log level`). The hive name comes from the on-disk status snapshot (per [ADR-022](https://github.com/hivemine-ai/hive-vault)) — fresh installs without an `init` yet show `starting hive` (no suffix). The `database` row strips Postgres credentials (`postgres://hive:***@db.example.com:5432/hivedb` is rendered as `postgres · hive@db.example.com:5432/hivedb`).
+1. **Boot banner + sub-block** — the compact identity banner (`⬢ ⬢ ⬢ hivectl · v0.2.0 · apache-2.0` + tagline + `starting hive · <hive-name>`) followed by 3 metadata rows (`bind`, `database`, `log level`). The hive name comes from the on-disk status snapshot (per [ADR-022](https://github.com/hivemine-ai/hive-vault)) — fresh installs without an `init` yet show `starting hive` (no suffix). The `database` row strips Postgres credentials (`postgres://hive:***@db.example.com:5432/hivedb` is rendered as `postgres · hive@db.example.com:5432/hivedb`).
 2. **Live log stream** — every pino log line is reformatted to the canonical shape `hh:mm:ss.mmm␣␣LEVEL␣␣module.path␣␣message␣␣k=v…`. Level chips (`INFO ` / `DEBUG` / `WARN ` / `ERROR`) are 5 chars wide, padded right; the module column is padded to a width determined at boot (default 20 chars when no namespaces are known); separators are 2 spaces between segments. The log emitter on the server side is unchanged — pino still emits raw JSON internally, the formatter is read-only of that JSON line.
 3. **Readiness line** — once the HTTP listener is bound and answering health probes, a single line `⬡ ready · http://<host>:<port>` prints in the OK colour. After this, the live log stream continues showing actual traffic.
 
@@ -365,6 +365,10 @@ WARNING: bind-all exposes the MCP server on all network interfaces.
 ```
 
 The setting takes effect on the next `hivectl serve` boot — restart the service after toggling.
+
+### `watch`
+
+Listens to one participant's mailbox and prints a metadata line per event. Unlike the rest of the catalog it is a network client of the MCP server: it needs no database and authenticates with the participant's own credential file, not the operator's shell trust. Full reference in [`hivectl-watch.md`](./hivectl-watch.md).
 
 ## Error codes
 

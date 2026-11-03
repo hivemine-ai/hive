@@ -10,7 +10,7 @@ export const ReplyToInputSchema = z
     message_id: z.string().uuid(),
     type: z.enum(['request', 'response', 'notification']),
     body: z.string().min(1),
-    action: z.record(z.unknown()).nullish(),
+    action: z.record(z.string(), z.unknown()).nullish(),
     ttl_ms: z.number().int().positive().optional(),
     idempotency_key: z.string().optional(),
   })
@@ -21,7 +21,7 @@ export type ReplyToInput = z.infer<typeof ReplyToInputSchema>;
 export interface ReplyToOutput {
   message_id: string;
   sent_at: string;
-  delivered_at: string;
+  stored_at: string;
   replayed: boolean;
 }
 
@@ -66,7 +66,7 @@ export function createReplyToHandler(deps: ReplyToDeps) {
     return {
       message_id: result.messageId,
       sent_at: result.sentAt.toISOString(),
-      delivered_at: result.deliveredAt.toISOString(),
+      stored_at: result.storedAt.toISOString(),
       replayed: result.replayed,
     };
   };

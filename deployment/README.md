@@ -1,6 +1,6 @@
 # Hive — Deployment (Docker)
 
-Reference deployment artifacts for running Hive v0.1 OSS in containers.
+Reference deployment artifacts for running Hive OSS in containers. This directory documents v0.2.0, which serves MCP revision `2026-07-28` only (see [Upgrading from v0.1.x](#upgrading-from-v01x)).
 
 > **Looking for the no-Docker path?** If you don't need Postgres or container
 > isolation, you can run Hive directly with the CLI + SQLite. See
@@ -277,8 +277,8 @@ server {
         proxy_pass http://127.0.0.1:8443;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
-        proxy_buffering off;       # critical for SSE (MCP notifications)
-        proxy_read_timeout 1h;
+        proxy_buffering off;       # critical: subscriptions/listen is a long-lived streamed POST
+        proxy_read_timeout 1h;     # must be well above the 15 s keep-alive and the 45 s client silence limit
     }
 }
 ```
@@ -292,6 +292,8 @@ hive.example.com {
     }
 }
 ```
+
+Agents hold one long-lived `POST /mcp` open for `subscriptions/listen`, so the proxy must not buffer responses and must not time out an idle connection (the server writes a keep-alive frame every 15 s by default). Behind a proxy, also set `HIVE_MCP_ALLOWED_HOSTS` to the public host name (for example `hive.example.com`); `HIVE_MCP_ALLOWED_ORIGINS` stays empty unless a browser client must reach the server. See [`docs/mcp-server.md`](../docs/mcp-server.md#origin-and-host).
 
 **Traefik (compose label)** — out of scope of this repo; standard
 `traefik.http.routers.*` labels apply.
@@ -321,17 +323,41 @@ driver grows unbounded. Configure in `/etc/docker/daemon.json`:
 JWKS for external auditing is exposed at `/.well-known/jwks.json` (public —
 verify-only; no secret material).
 
-Metrics (Prometheus) and distributed tracing are **not yet** in v0.1.
+Metrics (Prometheus) and distributed tracing are **not yet** available.
 
 ## Troubleshooting
 
-| Symptom                                                                                                                                  | Cause                                                  | Fix                                                                                       |
-| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
-| `docker compose --profile postgres up` exits with `Database is uninitialized and superuser password is not specified` on `hive-postgres` | `POSTGRES_PASSWORD` is empty                           | Set it in `.env`                                                                          |
-| `/readyz` returns 503 with `{"event":"keypair_store_no_active_key", ...}`                                                                | Server is up but `hivectl init` was never run          | Run `hivectl init`, then `docker compose restart hive-server`                             |
-| `/readyz` returns 503 with `{"event":"db_check_failed", ...}`                                                                            | DB connection failing                                  | Check `docker compose logs hive-postgres` (PG mode) or that the SQLite volume is writable |
-| MCP client gets `-32001 Unauthorized` after a restore                                                                                    | JWT references a `kid` no longer in `hive-keys` volume | Rotate signing key and re-issue credentials, OR restore the matching keys snapshot        |
-| `docker compose run hive-server hivectl ...` fails with `command not found`                                                              | Image was not rebuilt after recent changes             | `docker compose build`                                                                    |
+| Symptom                                                                                                                                  | Cause                                                  | Fix                                                                                                                              |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `docker compose --profile postgres up` exits with `Database is uninitialized and superuser password is not specified` on `hive-postgres` | `POSTGRES_PASSWORD` is empty                           | Set it in `.env`                                                                                                                 |
+| `/readyz` returns 503 with `{"event":"keypair_store_no_active_key", ...}`                                                                | Server is up but `hivectl init` was never run          | Run `hivectl init`, then `docker compose restart hive-server`                                                                    |
+| `/readyz` returns 503 with `{"event":"db_check_failed", ...}`                                                                            | DB connection failing                                  | Check `docker compose logs hive-postgres` (PG mode) or that the SQLite volume is writable                                        |
+| MCP client gets `-32001 Unauthorized` after a restore                                                                                    | JWT references a `kid` no longer in `hive-keys` volume | Rotate signing key and re-issue credentials, OR restore the matching keys snapshot                                               |
+| MCP client gets HTTP 400 with `-32022` (`data.supported`)                                                                                | The client speaks `initialize` or an older protocol    | Update the client. Hive v0.2.0 serves only `2026-07-28`; do not set `MCP_SDK_GENERATION=v1` or `MCP_PROTOCOL_NEGOTIATION=legacy` |
+| Requests get HTTP 403 with no body, log `mcp_origin_rejected`                                                                            | `Origin` or `Host` not on the allow-list               | Add it to `HIVE_MCP_ALLOWED_ORIGINS` / `HIVE_MCP_ALLOWED_HOSTS`, or fix the proxy `Host` header                                  |
+| An agent reports `offline` although its tools work                                                                                       | It holds no `subscriptions/listen` stream              | Run `hivectl watch` for it ([`docs/reactive-agents.md`](../docs/reactive-agents.md))                                             |
+| `docker compose run hive-server hivectl ...` fails with `command not found`                                                              | Image was not rebuilt after recent changes             | `docker compose build`                                                                                                           |
+
+## Upgrading from v0.1.x
+
+v0.2.0 is a breaking release. Read the `[0.2.0]` section of [`CHANGELOG.md`](../CHANGELOG.md) before upgrading.
+
+1. **Clients must support MCP `2026-07-28`.** The server rejects `initialize` (HTTP 400, `-32022`) and issues no `Mcp-Session-Id`; `GET /mcp` and `DELETE /mcp` answer 405. Upgrade Claude Code and any custom client first.
+2. **Rename in the API.** `delivered_at` is now `stored_at` and the state `delivered` is now `stored` in `send_message`, `read_mailbox`, filters and cursors; there are no aliases. A table-rebuild migration runs on start.
+3. **Clean up `.env`.** Remove `HIVE_PRESENCE_IDLE_TIMEOUT_MS`, `HIVE_PRESENCE_SWEEP_INTERVAL_MS`, `HIVE_PRESENCE_LRU_EVICT_THRESHOLD_MS` and `HIVE_PRESENCE_HEARTBEAT_TIMEOUT_MS`; the idle sweep no longer exists. Review the new variables in `.env.example` (`HIVE_LISTEN_*`, `HIVE_WAGGLE_SENDER_*`, `HIVE_CELL_MAX_UNREAD_PER_SENDER`, `HIVE_MCP_REVERIFY_INTERVAL_SECONDS`, `HIVE_MCP_ALLOWED_ORIGINS`, `HIVE_MCP_ALLOWED_HOSTS`).
+4. **Reactive agents use `hivectl watch`.** The Claude Code Channels path is gone. See [`docs/reactive-agents.md`](../docs/reactive-agents.md).
+5. **v0.1.x never applied a revocation made with `hivectl` until the server restarted** (INC-2026-008). If a credential was revoked on a v0.1.x deployment and the server was not restarted since, restart it now; v0.2.0 checks the revocation on every request.
+
+## Deployment smoke
+
+CI runs two scripts against a built server, and you can run them against yours with an agent credential:
+
+```bash
+node deployment/smoke-mcp-client.mjs <baseUrl> <jwt> <expectedParticipantId> <deniedRecipientId>
+node deployment/smoke-contract.mjs <baseUrl> <jwt>
+```
+
+The first calls `server/discover`, `get_agent_config` and `send_message` over raw HTTP. The second pins the protocol contract: `initialize` is rejected, `GET` and `DELETE` answer 405, no session id is ever issued, the capabilities are exactly `tools` and `resources.subscribe`, and `prompts/list` is not served. Both exit non-zero on failure.
 
 ## Public release path
 

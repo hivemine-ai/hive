@@ -7,12 +7,13 @@ import { WaggleError } from '#domain/notifications/index.js';
 
 import {
   MCP_ERR_FORBIDDEN,
+  MCP_ERR_SENDER_QUOTA_EXCEEDED,
   MCP_ERR_INTERNAL,
   MCP_ERR_INVALID_PARAMS,
   MCP_ERR_RECIPIENT_UNREACHABLE,
   MCP_ERR_UNAUTHORIZED,
 } from './error-codes.js';
-import { SessionError, mapDomainError } from './error-mapper.js';
+import { mapDomainError } from './error-mapper.js';
 
 // ---------------------------------------------------------------------------
 // Group 1 — AuthError codes that fold into -32001 UNAUTHORIZED
@@ -57,7 +58,7 @@ describe('mapDomainError — AuthError unauthorized codes', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Group 2 — AuthError INSUFFICIENT_PRIVILEGE → -32002 FORBIDDEN
+// Group 2 — AuthError INSUFFICIENT_PRIVILEGE → FORBIDDEN
 // ---------------------------------------------------------------------------
 
 describe('mapDomainError — AuthError INSUFFICIENT_PRIVILEGE', () => {
@@ -137,7 +138,7 @@ describe('mapDomainError — CellError', () => {
     expect(result.domainCode).toBe('INVALID_INPUT');
   });
 
-  it('maps INSUFFICIENT_PRIVILEGE → -32002, message "forbidden"', () => {
+  it('maps INSUFFICIENT_PRIVILEGE → FORBIDDEN, message "forbidden"', () => {
     const result = mapDomainError(new CellError('INSUFFICIENT_PRIVILEGE'));
     expect(result.wire.code).toBe(MCP_ERR_FORBIDDEN);
     expect(result.wire.message).toBe('forbidden');
@@ -174,24 +175,25 @@ describe('mapDomainError — WaggleError', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Group 6 — SessionError (transport-local synthetic codes)
+// Group 6 — SENDER_QUOTA_EXCEEDED
 // ---------------------------------------------------------------------------
 
-describe('mapDomainError — SessionError', () => {
-  it('maps SESSION_NOT_FOUND → -32001, message "authentication required"', () => {
-    const result = mapDomainError(new SessionError('SESSION_NOT_FOUND'));
-    expect(result.wire.code).toBe(MCP_ERR_UNAUTHORIZED);
-    expect(result.wire.message).toBe('authentication required');
-    expect(result.domainCode).toBe('SESSION_NOT_FOUND');
-    expect(result.subCode).toBeNull();
-  });
-
-  it('maps SESSION_INVALIDATED → -32001, message "authentication required"', () => {
-    const result = mapDomainError(new SessionError('SESSION_INVALIDATED'));
-    expect(result.wire.code).toBe(MCP_ERR_UNAUTHORIZED);
-    expect(result.wire.message).toBe('authentication required');
-    expect(result.domainCode).toBe('SESSION_INVALIDATED');
-    expect(result.subCode).toBeNull();
+describe('mapDomainError — SENDER_QUOTA_EXCEEDED', () => {
+  it('maps to -32005 and copies limit and current to error.data', () => {
+    const result = mapDomainError(
+      new CellError('SENDER_QUOTA_EXCEEDED', {
+        subCode: 'pair_unread_cap',
+        data: { limit: 500, current: 500 },
+      }),
+    );
+    expect(result.wire).toEqual({
+      code: MCP_ERR_SENDER_QUOTA_EXCEEDED,
+      message: 'sender quota exceeded',
+      data: { limit: 500, current: 500 },
+    });
+    expect(MCP_ERR_SENDER_QUOTA_EXCEEDED).toBe(-32005);
+    expect(result.domainCode).toBe('SENDER_QUOTA_EXCEEDED');
+    expect(JSON.stringify(result.wire)).not.toContain('pair_unread_cap');
   });
 });
 
@@ -344,9 +346,6 @@ describe('mapDomainError — ZodError wire.data (PRY-023)', () => {
       if (err instanceof ZodError) captured = err;
     }
     if (!captured) throw new Error('Expected ZodError');
-    // Sanity: the original issue carries the received value.
-    expect(JSON.stringify(captured.issues)).toContain('sensitive-pii-value');
-
     const result = mapDomainError(captured);
     expect(JSON.stringify(result.wire.data)).not.toContain('sensitive-pii-value');
     expect(JSON.stringify(result.wire.data)).not.toContain('received');

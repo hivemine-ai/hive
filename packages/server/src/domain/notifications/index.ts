@@ -1,20 +1,28 @@
 // Public barrel for the notifications domain (Waggle Pipeline + Presence Registry).
 
-export type { SubscriberHandle } from './presence/subscriber-handle.js';
+export type { SubscriberHandle, StreamCloseReason } from './presence/subscriber-handle.js';
 export type { SubscribeInput, Subscription, PresenceSnapshot } from './presence/types.js';
 export { createPresenceRegistry } from './presence/registry.js';
 export type {
   PresenceRegistry,
   PresenceRegistryConfig,
-  SubscribedHookInput,
+  ReadyHookInput,
 } from './presence/registry.js';
 
-export type { WaggleNotification, WaggleKind } from './waggle/types.js';
+export type { WaggleNotification, WaggleKind, DeferredWakeEvent } from './waggle/types.js';
 
 export { createConsolidator } from './waggle/consolidator.js';
 export type { Consolidator, ConsolidatorConfig, FlushCallback } from './waggle/consolidator.js';
 
-export { createBuilder } from './waggle/builder.js';
+export { createSenderThrottle } from './waggle/sender-throttle.js';
+export type {
+  AdmitResult,
+  DeferredWake,
+  SenderThrottle,
+  SenderThrottleConfig,
+} from './waggle/sender-throttle.js';
+
+export { createBuilder, deriveEventId } from './waggle/builder.js';
 export type { Builder, BuilderDeps } from './waggle/builder.js';
 
 export { createReplay } from './waggle/replay.js';

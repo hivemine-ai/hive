@@ -1,5 +1,6 @@
 // Public barrel for the Cell Store domain.
 
+export { ensureSafeAction, MAX_ACTION_DEPTH } from './action-safety.js';
 export { CellError, isCellError } from './errors.js';
 export type { CellErrorCode, CellErrorOptions } from './errors.js';
 
@@ -46,7 +47,7 @@ export type {
   CellEventMap,
   CellEventName,
   CellEvents,
-  MessageDeliveredEvent,
+  MessageStoredEvent,
 } from './events.js';
 
 export { createSender, DEFAULT_SENDER_CONFIG } from './send.js';

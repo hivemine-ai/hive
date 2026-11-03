@@ -4,10 +4,10 @@
 //   1. Validate input shape (body size, ttl, replyTo, idempotencyKey, action).
 //   2. Idempotency lookup — replay-safe within the configured TTL.
 //   3. Atomic TX: recipient cell guard (with FOR SHARE on PG) + visibility check
-//      + INSERT messages + ON CONFLICT-protected idempotency_keys insert. The
+//      + per-sender quota + INSERT messages + ON CONFLICT-protected idempotency_keys insert. The
 //      cell guard runs INSIDE the TX (PRY-010 fix for the TOCTOU window between
 //      the previous out-of-TX guard and the cascade closeCellsByOwner UPDATE).
-//   4. Post-commit emit `messageDelivered` (best-effort — emit failure does NOT
+//   4. Post-commit emit `messageStored` (best-effort — emit failure does NOT
 //      rollback per tech spec line 408-409; per-listener errors funnel to
 //      onEmitError, including async rejections from PRY-010 events refactor).
 //
@@ -15,6 +15,7 @@
 // same wire error `RECIPIENT_UNREACHABLE`. The `subCode` is informative only
 // (logged) and never reaches the wire — that's the API layer's responsibility.
 
+import { sql } from 'kysely';
 import type { Kysely, Transaction } from 'kysely';
 import { v7 as uuidv7, validate as uuidValidate, version as uuidVersion } from 'uuid';
 
@@ -23,6 +24,7 @@ import type { Logger } from '#observability/logger.js';
 import type { DbDialect } from '#persistence/db.js';
 import type { Database } from '#persistence/schema.js';
 
+import { ensureSafeAction, MAX_ACTION_DEPTH } from './action-safety.js';
 import { CellError } from './errors.js';
 import type { CellEvents } from './events.js';
 import type { CellsRepo } from './repository.js';
@@ -44,6 +46,8 @@ export interface SenderConfig {
   maxActionBytes: number;
   /** Default 256 chars. */
   idempotencyKeyMaxLength: number;
+  /** Unread messages one sender may keep in one mailbox. Default 500 (provisional). */
+  maxUnreadPerSender: number;
   /**
    * DB dialect — controls whether the in-TX cell-guard SELECT emits `FOR SHARE`.
    *   - 'postgres': emits FOR SHARE so a concurrent `closeCellsByOwner` (which
@@ -62,6 +66,7 @@ export const DEFAULT_SENDER_CONFIG: SenderConfig = {
   maxBodyBytes: 65536,
   maxActionBytes: 16384,
   idempotencyKeyMaxLength: 256,
+  maxUnreadPerSender: 500,
   dialect: 'sqlite',
 };
 
@@ -96,7 +101,7 @@ class IdempotencyConflictSentinel extends Error {
 interface IdempotencyHit {
   messageId: UUIDv7;
   sentAt: Date;
-  deliveredAt: Date;
+  storedAt: Date;
 }
 
 const VALID_TYPES: ReadonlyArray<MessageType> = ['request', 'response', 'notification'];
@@ -121,11 +126,7 @@ export function createSender(deps: SenderDeps): Sender {
     const row = await executor
       .selectFrom('idempotency_keys as ik')
       .innerJoin('messages as m', 'm.id', 'ik.message_id')
-      .select([
-        'ik.message_id as messageId',
-        'm.sent_at as sentAt',
-        'm.delivered_at as deliveredAt',
-      ])
+      .select(['ik.message_id as messageId', 'm.sent_at as sentAt', 'm.stored_at as storedAt'])
       .where('ik.sender_id', '=', senderId)
       .where('ik.recipient_id', '=', recipientId)
       .where('ik.key', '=', key)
@@ -134,7 +135,7 @@ export function createSender(deps: SenderDeps): Sender {
     return {
       messageId: row.messageId,
       sentAt: new Date(row.sentAt),
-      deliveredAt: new Date(row.deliveredAt),
+      storedAt: new Date(row.storedAt),
     };
   }
 
@@ -156,6 +157,39 @@ export function createSender(deps: SenderDeps): Sender {
       .onConflict((oc) => oc.columns(['sender_id', 'recipient_id', 'key']).doNothing())
       .executeTakeFirst();
     return (result.numInsertedOrUpdatedRows ?? 0n) > 0n;
+  }
+
+  // Count and INSERT share the transaction, so they must exclude concurrent sends of
+  // the same pair. better-sqlite3 runs one transaction at a time; Postgres needs the
+  // advisory lock, which `FOR SHARE` on the Cell does not replace.
+  async function enforceSenderQuota(
+    tx: Transaction<Database>,
+    cellId: UUIDv7,
+    senderId: UUIDv7,
+    recipientId: UUIDv7,
+  ): Promise<void> {
+    if (config.dialect === 'postgres') {
+      await sql`select pg_advisory_xact_lock(hashtextextended(${`${senderId}:${cellId}`}, 0))`.execute(
+        tx,
+      );
+    }
+    const limit = config.maxUnreadPerSender;
+    const current = await deps.cellsRepo.countUnreadFromSender(cellId, senderId, tx);
+    if (current < limit) return;
+    deps.logger?.warn(
+      {
+        event: 'cell_sender_quota_exceeded',
+        participantId: senderId,
+        recipientId,
+        limit,
+        currentUnread: current,
+      },
+      'sender quota exceeded',
+    );
+    throw new CellError('SENDER_QUOTA_EXCEEDED', {
+      subCode: 'pair_unread_cap',
+      data: { limit, current },
+    });
   }
 
   async function sendMessage(input: SendMessageInput): Promise<SendResult> {
@@ -190,7 +224,7 @@ export function createSender(deps: SenderDeps): Sender {
         return {
           messageId: existing.messageId,
           sentAt: existing.sentAt,
-          deliveredAt: existing.deliveredAt,
+          storedAt: existing.storedAt,
           replayed: true,
         };
       }
@@ -231,6 +265,8 @@ export function createSender(deps: SenderDeps): Sender {
           throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'visibility_denied' });
         }
 
+        await enforceSenderQuota(tx, recipientCellRow.id, senderId, input.recipientId);
+
         const message: Message = {
           id: messageId,
           cellId: recipientCellRow.id,
@@ -242,9 +278,9 @@ export function createSender(deps: SenderDeps): Sender {
           replyTo: input.replyTo ?? null,
           ttl: input.ttl ?? null,
           sentAt,
-          deliveredAt: sentAt,
+          storedAt: sentAt,
           readAt: null,
-          state: 'delivered',
+          state: 'stored',
           expiredAt: null,
         };
 
@@ -269,7 +305,7 @@ export function createSender(deps: SenderDeps): Sender {
         return {
           messageId,
           sentAt,
-          deliveredAt: sentAt,
+          storedAt: sentAt,
           replayed: false,
         };
       });
@@ -289,9 +325,26 @@ export function createSender(deps: SenderDeps): Sender {
         return {
           messageId: winning.messageId,
           sentAt: winning.sentAt,
-          deliveredAt: winning.deliveredAt,
+          storedAt: winning.storedAt,
           replayed: true,
         };
+      }
+      // The loser of an idempotency race can reach the quota check: the key it lost to
+      // is the answer, not the quota.
+      if (
+        err instanceof CellError &&
+        err.code === 'SENDER_QUOTA_EXCEEDED' &&
+        input.idempotencyKey !== undefined
+      ) {
+        const winning = await idempotencyLookup(senderId, input.recipientId, input.idempotencyKey);
+        if (winning) {
+          return {
+            messageId: winning.messageId,
+            sentAt: winning.sentAt,
+            storedAt: winning.storedAt,
+            replayed: true,
+          };
+        }
       }
       throw err;
     }
@@ -303,14 +356,14 @@ export function createSender(deps: SenderDeps): Sender {
       throw new CellError('INTERNAL_INCONSISTENCY', { subCode: 'cell_id_unresolved' });
     }
     deps.events.emit(
-      'messageDelivered',
+      'messageStored',
       {
         messageId: result.messageId,
         cellId: resolvedCellId,
         recipientId: input.recipientId,
         fromParticipantId: senderId,
         type: input.type,
-        deliveredAt: result.deliveredAt,
+        storedAt: result.storedAt,
       },
       deps.onEmitError,
     );
@@ -403,6 +456,8 @@ function validateIdempotencyKey(key: string | undefined, maxLength: number): voi
 
 function validateAction(action: ActionDescriptor | undefined, maxBytes: number): void {
   if (action === undefined) return;
+  // Depth first: JSON.stringify is recursive and would overflow on a deep value.
+  ensureSafeAction(action, MAX_ACTION_DEPTH);
   const serialized = JSON.stringify(action);
   const byteLength = Buffer.byteLength(serialized, 'utf8');
   if (byteLength > maxBytes) {

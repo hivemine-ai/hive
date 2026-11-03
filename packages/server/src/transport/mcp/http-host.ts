@@ -1,52 +1,80 @@
-// fastify HTTP host for the MCP transport. Wires:
-//   - POST /mcp        → per-session StreamableHTTPServerTransport (SDK)
-//   - GET  /mcp        → SSE stream for server-initiated notifications (SDK)
-//   - DELETE /mcp      → session termination (SDK)
+// fastify HTTP host for the MCP transport, on revision 2026-07-28 only:
+//   - POST /mcp        → the only MCP method. Edge in front of the SDK handler
+//   - GET, DELETE /mcp → 405, the revision removed both
 //   - GET  /healthz    → 200 always (liveness)
 //   - GET  /readyz     → 200 if DB ping succeeds within timeout, else 503
 //   - GET  /.well-known/jwks.json → public JWKS from KeypairStore
 //
-// Per the SDK 1.29.0 design, `StreamableHTTPServerTransport` is single-session
-// — one transport instance == one initialized session. To support multiple
-// concurrent agents on the same fastify host, the http-host maintains a
-// `Map<sessionId, { transport, mcpServer }>` and creates a fresh pair on
-// every initialize request. The `mcp-session-id` header threads sessionId
-// across subsequent requests.
-//
-// Auth flow: an `onRequest` hook on /mcp extracts the Bearer token, invokes
-// the Auth Verifier, and on success attaches the IdentityContext to
-// `req.raw.hiveAuth`. After the SDK transport completes the request, we read
-// `transport.sessionId` and call `mcpTransport.ensureSessionFor` to bind the
-// SessionStore + Presence subscription.
+// `createMcpHandler` builds one server instance per request, so this file holds no
+// per-client state. For each POST the edge validates Origin and Host, verifies the
+// Bearer, and passes the identity to the SDK as authInfo along with the body fastify
+// already parsed. `legacy: 'reject'` matters: the SDK default keeps serving 2025-era
+// traffic, and Hive keeps no legacy support.
 
-import { randomUUID } from 'node:crypto';
-import type { IncomingMessage } from 'node:http';
+import type { ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createMcpHandler } from '@modelcontextprotocol/server';
 import { HIVE_DEFAULT_HTTP_PORT } from '@hive/shared';
 import Fastify from 'fastify';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
+import { v7 as uuidv7 } from 'uuid';
 
-import type { Verifier, IdentityContext } from '#domain/auth/index.js';
-import { buildJwkSet } from '#domain/auth/index.js';
+import { buildJwkSet, isAuthError } from '#domain/auth/index.js';
+import type { IdentityContext, UUIDv7, Verifier } from '#domain/auth/index.js';
 import type { SigningKey } from '#domain/auth/keys/keypair-store.js';
-import type { Logger } from '#observability/logger.js';
+import { getRequestIdFromLogger, type Logger } from '#observability/logger.js';
 import { attachRequestIdHook } from '#observability/request-id.js';
 import type { Database } from '#persistence/schema.js';
 
-import { verifyBearerHeader } from './auth-binding.js';
+import { toAuthInfo, verifyBearerHeader, type LastConnectedRefresher } from './auth-binding.js';
+import { MCP_ERR_INTERNAL } from './error-codes.js';
 import { mapDomainError } from './error-mapper.js';
+import { isAllowedByOriginGuard } from './origin-guard.js';
 import type { McpTransport } from './server.js';
+import type { WireError } from './types.js';
+
+const LISTEN_METHOD = 'subscriptions/listen';
+
+/**
+ * Plug-in point for the `subscriptions/listen` edge. The SDK router neither checks who
+ * owns a URI nor exposes stream open and close, so the edge wraps the handler instead.
+ */
+export interface ListenEdge {
+  /** Runs before the SDK. A returned error refuses the stream. */
+  authorize(input: {
+    body: unknown;
+    identity: IdentityContext;
+  }): WireError | null | Promise<WireError | null>;
+  /** Runs once the SDK answered, before any byte reaches the client. */
+  onResponse(input: ListenResponseInput): ListenBinding | undefined;
+}
+
+export interface ListenResponseInput {
+  body: unknown;
+  identity: IdentityContext;
+  requestId: UUIDv7;
+  response: Response;
+  raw: ServerResponse;
+  /** Ends the SDK side of the stream. */
+  abort: () => void;
+}
+
+export interface ListenBinding {
+  /** Fires once, after the first chunk of the SDK (the acknowledgment) reached the response. */
+  onAcknowledged(): void;
+}
 
 export interface HttpHostDeps {
   mcpTransport: McpTransport;
-  verifier: Verifier;
+  verifier: Pick<Verifier, 'verify'>;
+  lastConnected: LastConnectedRefresher;
   db: Kysely<Database>;
   signingKeysProvider: () => Iterable<SigningKey>;
   logger: Logger;
+  listenEdge?: ListenEdge;
 }
 
 export interface HttpHostOptions {
@@ -58,6 +86,10 @@ export interface HttpHostOptions {
   port?: number;
   /** Default 500ms — readyz DB ping timeout. */
   readyzDbTimeoutMs?: number;
+  /** Default empty: a request carrying `Origin` is rejected. */
+  allowedOrigins?: readonly string[];
+  /** Default empty: `Host` is not validated. */
+  allowedHosts?: readonly string[];
 }
 
 export interface HttpHost {
@@ -67,20 +99,24 @@ export interface HttpHost {
   port(): number | null;
 }
 
-interface SessionEntry {
-  transport: StreamableHTTPServerTransport;
-  mcpServer: McpServer;
-}
-
-interface HiveAuth {
-  identity: IdentityContext;
-}
-
 export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}): HttpHost {
   const mcpPath = options.mcpPath ?? '/mcp';
   const host = options.host ?? '0.0.0.0';
   const port = options.port ?? HIVE_DEFAULT_HTTP_PORT;
   const readyzTimeout = options.readyzDbTimeoutMs ?? 500;
+  const originGuard = {
+    allowedOrigins: options.allowedOrigins ?? [],
+    allowedHosts: options.allowedHosts ?? [],
+  };
+
+  const mcpHandler = createMcpHandler(() => deps.mcpTransport.buildServer(), {
+    legacy: 'reject',
+    // The stream handle writes the keep-alive itself: it is the probe of its detector.
+    keepAliveMs: 0,
+    onerror: (err) => {
+      deps.logger.debug({ event: 'mcp_sdk_error', err: err.message }, 'mcp sdk error');
+    },
+  });
 
   const app = Fastify({
     logger: false,
@@ -94,7 +130,7 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
   // logger context to populate `audit_log.request_id`.
   attachRequestIdHook(app, deps.logger);
 
-  const sessions = new Map<string, SessionEntry>();
+  const identities = new WeakMap<FastifyRequest, IdentityContext>();
 
   app.get('/healthz', async (_req, reply) => {
     return reply.code(200).type('application/json').send({ status: 'ok' });
@@ -117,16 +153,23 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
       .send(set);
   });
 
-  // Auth hook for any /mcp request. Verifies the Bearer and attaches HiveAuth.
+  // Edge for POST to the MCP path, in spec order: Origin and Host, then the Bearer.
   app.addHook('onRequest', async (req, reply) => {
-    if (req.url !== mcpPath) return;
+    if (req.method !== 'POST' || req.routeOptions.url !== mcpPath) return;
 
-    const authHeader = req.headers['authorization'] as string | string[] | undefined;
-    const headerStr = headerString(authHeader);
+    const allowed = isAllowedByOriginGuard(originGuard, {
+      origin: headerString(req.headers.origin),
+      host: headerString(req.headers.host),
+    });
+    if (!allowed) {
+      deps.logger.warn({ event: 'mcp_origin_rejected' }, 'origin or host not allowed');
+      return reply.code(403).send();
+    }
 
     try {
-      const auth = await verifyBearerHeader(deps.verifier, headerStr);
-      (req.raw as IncomingMessage & { hiveAuth?: HiveAuth }).hiveAuth = auth;
+      const auth = await verifyBearerHeader(deps.verifier, headerString(req.headers.authorization));
+      identities.set(req, auth.identity);
+      deps.lastConnected.refresh(auth.identity);
     } catch (err) {
       const mapped = mapDomainError(err);
       deps.logger.warn(
@@ -137,25 +180,18 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
         },
         mapped.wire.message,
       );
+      // Only a real auth verdict is a 401. An infrastructure failure must not tell
+      // a client with a valid credential that its credential is bad.
       return reply
-        .code(401)
+        .code(isAuthError(err) ? 401 : 500)
         .type('application/json')
-        .send({
-          jsonrpc: '2.0',
-          error: {
-            code: mapped.wire.code,
-            message: mapped.wire.message,
-            ...(mapped.wire.data !== undefined && { data: mapped.wire.data }),
-          },
-          id: null,
-        });
+        .send({ jsonrpc: '2.0', error: mapped.wire, id: null });
     }
   });
 
   app.post(mcpPath, async (req, reply) => {
-    const sessionIdHeader = headerString(req.headers['mcp-session-id']);
-    const auth = (req.raw as IncomingMessage & { hiveAuth?: HiveAuth }).hiveAuth;
-    if (!auth) {
+    const identity = identities.get(req);
+    if (!identity) {
       // The onRequest hook should have rejected this, but defense-in-depth.
       return reply.code(401).send({
         jsonrpc: '2.0',
@@ -164,135 +200,78 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
       });
     }
 
-    // Defense against cross-session identity hijack: a Bearer that proves
-    // identity X cannot reuse a session id originally bound to identity Y.
-    // Without this check, a low-privileged participant could acquire (via
-    // log leak / network sniff if TLS is misconfigured / client mishandling)
-    // a higher-privileged session id and act as that identity by sending
-    // their own valid Bearer plus the captured `Mcp-Session-Id` header —
-    // the SDK transport routes by session id alone and our tool dispatch
-    // reads the original identity from the session store. Reject 403 here.
-    if (sessionIdHeader !== undefined) {
-      const existingState = deps.mcpTransport.sessionStore.peek(sessionIdHeader);
-      if (existingState && existingState.identity.participantId !== auth.identity.participantId) {
-        deps.logger.warn(
-          {
-            event: 'mcp_session_identity_mismatch',
-            sessionId: sessionIdHeader,
-          },
-          'session id reused by a different identity',
-        );
-        return reply
-          .code(403)
-          .type('application/json')
-          .send({
-            jsonrpc: '2.0',
-            error: { code: -32002, message: 'forbidden' },
-            id: null,
-          });
-      }
-    }
+    const body = req.body;
+    const isListen = rpcMethod(body) === LISTEN_METHOD;
+    const requestId = getRequestIdFromLogger(req.log as Logger) ?? uuidv7();
+    const abort = new AbortController();
 
-    // The SDK's StreamableHTTPServerTransport writes directly to res.raw
-    // (status, headers, body). fastify must not interfere with the response —
-    // hijack tells fastify the handler owns the raw response from here on.
-    reply.hijack();
-
-    let entry: SessionEntry;
-    let isNewSession = false;
-
-    if (sessionIdHeader !== undefined && sessions.has(sessionIdHeader)) {
-      // Existing session — route to its transport.
-      entry = sessions.get(sessionIdHeader) as SessionEntry;
-    } else {
-      // Brand new session: build transport + McpServer + connect.
-      const mcpServer = deps.mcpTransport.buildMcpServerForSession();
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (sid) => {
-          sessions.set(sid, { transport, mcpServer });
-          deps.mcpTransport.bindSessionServer(sid, mcpServer);
-        },
-      });
-      transport.onclose = () => {
-        const sid = transport.sessionId;
-        if (sid !== undefined) {
-          sessions.delete(sid);
-          deps.mcpTransport.unbindSessionServer(sid);
-          deps.mcpTransport.sessionStore.close(sid);
+    let response: Response;
+    try {
+      if (isListen && deps.listenEdge) {
+        const refusal = await deps.listenEdge.authorize({ body, identity });
+        if (refusal) {
+          return await reply
+            .code(200)
+            .type('application/json')
+            .send({ jsonrpc: '2.0', error: refusal, id: rpcId(body) });
         }
-      };
-      // The SDK shape declares `onclose: () => void` but accepts undefined at
-      // runtime; the strict-optional cast is upstream noise.
-      await mcpServer.connect(transport as unknown as Parameters<typeof mcpServer.connect>[0]);
-      entry = { transport, mcpServer };
-      isNewSession = true;
-    }
-
-    await entry.transport.handleRequest(req.raw, reply.raw, req.body);
-
-    // After handleRequest, the transport has either:
-    //   (a) on initialize: assigned a sessionId via sessionIdGenerator and
-    //       invoked onsessioninitialized (the entry is already in the map).
-    //   (b) on subsequent requests: routed against the existing session.
-    const sessionId = entry.transport.sessionId;
-    if (sessionId !== undefined) {
-      try {
-        await deps.mcpTransport.ensureSessionFor(sessionId, auth.identity);
-      } catch (err) {
-        deps.logger.warn(
-          {
-            event: 'mcp_ensure_session_failed',
-            sessionId,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          'ensureSessionFor failed',
-        );
       }
-    } else if (isNewSession) {
-      // SDK rejected the initialize (e.g., bad protocolVersion); session was never registered.
-      // The transport already wrote the error response to reply.raw.
-      deps.logger.debug(
-        { event: 'mcp_initialize_rejected_no_session' },
-        'initialize completed without session id',
+      response = await mcpHandler.fetch(toWebRequest(req, mcpPath, abort.signal), {
+        authInfo: toAuthInfo({ identity, requestId }),
+        parsedBody: body,
+      });
+    } catch (err) {
+      deps.logger.error(
+        {
+          event: 'mcp_handler_failed',
+          requestId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'mcp request failed before a response',
       );
-    }
-  });
-
-  // GET /mcp — server-initiated SSE stream.
-  app.get(mcpPath, async (req, reply) => {
-    const sessionIdHeader = headerString(req.headers['mcp-session-id']);
-    if (sessionIdHeader === undefined || !sessions.has(sessionIdHeader)) {
       return reply
-        .code(400)
+        .code(500)
         .type('application/json')
         .send({
           jsonrpc: '2.0',
-          error: { code: -32000, message: 'Bad Request: Mcp-Session-Id header is required' },
-          id: null,
+          error: { code: MCP_ERR_INTERNAL, message: 'internal error' },
+          id: rpcId(body),
         });
     }
-    const entry = sessions.get(sessionIdHeader) as SessionEntry;
+
+    // The body may be a long stream, so the handler owns the raw response from here on.
     reply.hijack();
-    await entry.transport.handleRequest(req.raw, reply.raw);
+    const raw = reply.raw;
+    raw.on('close', () => abort.abort());
+    const binding = isListen
+      ? deps.listenEdge?.onResponse({
+          body,
+          identity,
+          requestId,
+          response,
+          raw,
+          abort: () => abort.abort(),
+        })
+      : undefined;
+
+    raw.writeHead(response.status, Object.fromEntries(response.headers));
+    if (!response.body) {
+      raw.end();
+      return;
+    }
+    const source = Readable.fromWeb(response.body);
+    source.on('error', () => raw.destroy()).pipe(raw);
+    // After `pipe`: its listener runs first, so the chunk is already in the response.
+    if (binding) source.once('data', () => binding.onAcknowledged());
   });
 
-  // DELETE /mcp — session termination.
-  app.delete(mcpPath, async (req, reply) => {
-    const sessionIdHeader = headerString(req.headers['mcp-session-id']);
-    if (sessionIdHeader === undefined || !sessions.has(sessionIdHeader)) {
-      return reply
-        .code(400)
-        .type('application/json')
-        .send({
-          jsonrpc: '2.0',
-          error: { code: -32000, message: 'Bad Request: Mcp-Session-Id header is required' },
-          id: null,
-        });
-    }
-    const entry = sessions.get(sessionIdHeader) as SessionEntry;
-    reply.hijack();
-    await entry.transport.handleRequest(req.raw, reply.raw);
+  // The revision removed the GET stream and session termination.
+  app.route({
+    method: ['GET', 'DELETE'],
+    url: mcpPath,
+    handler: async (_req, reply) => {
+      return reply.code(405).header('allow', 'POST').send();
+    },
   });
 
   return {
@@ -303,28 +282,7 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
     },
 
     async stop() {
-      try {
-        deps.mcpTransport.sessionStore.closeAll();
-      } catch (err) {
-        deps.logger.warn(
-          {
-            event: 'http_host_close_sessions_failed',
-            err: err instanceof Error ? err.message : String(err),
-          },
-          'closeAll sessions failed',
-        );
-      }
-      // Close all per-session transports.
-      const snapshot = Array.from(sessions.values());
-      for (const entry of snapshot) {
-        try {
-          await entry.transport.close();
-        } catch {
-          /* swallow per-session shutdown errors */
-        }
-      }
-      sessions.clear();
-
+      await mcpHandler.close();
       await app.close();
     },
 
@@ -337,6 +295,30 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
 }
 
 // ---------- helpers ----------
+
+function toWebRequest(req: FastifyRequest, mcpPath: string, signal: AbortSignal): Request {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) {
+    if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(', ') : value);
+  }
+  // Fixed origin: the client-controlled Host header must not reach URL parsing. The SDK
+  // routes on the body and the headers, never on this URL.
+  return new Request(`http://hive.invalid${mcpPath}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(req.body),
+    signal,
+  });
+}
+
+function rpcMethod(body: unknown): unknown {
+  return (body as { method?: unknown } | null | undefined)?.method;
+}
+
+function rpcId(body: unknown): string | number | null {
+  const id = (body as { id?: unknown } | null | undefined)?.id;
+  return typeof id === 'string' || typeof id === 'number' ? id : null;
+}
 
 function headerString(value: string | string[] | undefined): string | undefined {
   if (value === undefined) return undefined;

@@ -18,6 +18,7 @@ What `hivectl` covers (Slice 0):
 - `agent create | list | revoke` — full agent lifecycle (cascade-closes its Cell on revoke).
 - `credential issue | rotate | revoke | list` — credential lifecycle.
 - `audit query` — read the audit log.
+- `watch` — listen to one participant's mailbox and print a metadata line per event (`--once`, `--exec`). A network client of the MCP server, not an admin command: it authenticates with the participant's own credential file. See [`docs/hivectl-watch.md`](../../docs/hivectl-watch.md).
 
 What `hivectl` does **not** cover (deferred to Slice 1+):
 

@@ -27,12 +27,13 @@ import type { Kysely } from 'kysely';
 import {
   createCredentialsReadRepo,
   createIssuer,
+  createParticipantStateSignal,
   createParticipantsReadRepo,
   createParticipantsWriteRepo,
   createRevoker,
   createRotator,
   loadAllKeypairs,
-  loadBlocklist,
+  createBlocklist,
   createVerifier,
 } from '#domain/auth/index.js';
 import type {
@@ -53,6 +54,7 @@ import {
   createCellEvents,
   createSender,
   createReader,
+  DEFAULT_SENDER_CONFIG,
 } from '#domain/cells/index.js';
 import type { CellsRepo } from '#domain/cells/index.js';
 import { parseIntEnv } from '#observability/env.js';
@@ -68,6 +70,8 @@ import {
   type SnapshotWriter,
 } from './snapshot-writer.js';
 import { createVisibilityEngineForProduction } from './visibility-engine-factory.js';
+import { createLastConnectedRefresher } from '#transport/mcp/auth-binding.js';
+import { createListenStreams } from '#transport/mcp/listen-stream.js';
 import { createMcpTransport } from '#transport/mcp/server.js';
 import { createHttpHost } from '#transport/mcp/http-host.js';
 import type { HttpHost } from '#transport/mcp/http-host.js';
@@ -87,6 +91,18 @@ export interface WireConfig {
   keysDir?: string;
   /** Default 100. Hard cap server-side for `list_agents.pagination.limit` (PRY-029). */
   listAgentsMaxPageSize?: number;
+  /** From HIVE_MCP_ALLOWED_ORIGINS. Default empty: only clients without Origin pass. */
+  allowedOrigins?: string[];
+  /** From HIVE_MCP_ALLOWED_HOSTS. Default empty: Host is not validated. */
+  allowedHosts?: string[];
+  /** From HIVE_LISTEN_KEEPALIVE_INTERVAL_MS. Default 15 s (provisional). */
+  listenKeepAliveIntervalMs?: number;
+  /** From HIVE_LISTEN_STALL_TIMEOUT_MS. Default 30 s (provisional). */
+  listenStallTimeoutMs?: number;
+  /** From HIVE_MCP_REVERIFY_INTERVAL_SECONDS. Default 60 (provisional). 0 disables it. */
+  reverifyIntervalSeconds?: number;
+  /** From HIVE_CELL_MAX_UNREAD_PER_SENDER. Default 500 (provisional). */
+  maxUnreadPerSender?: number;
 }
 
 export interface WireDeps {
@@ -100,6 +116,8 @@ export interface Wire {
   port(): number | null;
   /** Test/diagnostic — exposes the underlying HttpHost (do NOT use in production code). */
   _httpHost(): HttpHost;
+  /** Test/diagnostic — a write repo whose state changes reach the state signal. */
+  _participantsWriteRepo(): ParticipantsWriteRepo;
   /** Test/diagnostic — exposes the cell events (asserts wiring). */
   _cellEvents(): ReturnType<typeof createCellEvents>;
 }
@@ -138,7 +156,71 @@ export function resolveWireConfigFromEnv(
         min: 1,
         max: 1000,
       }),
+    allowedOrigins: overrides.allowedOrigins ?? parseCsvEnv(env['HIVE_MCP_ALLOWED_ORIGINS']),
+    allowedHosts:
+      overrides.allowedHosts ??
+      parseCsvEnv(env['HIVE_MCP_ALLOWED_HOSTS']).map((host) => host.toLowerCase()),
+    listenKeepAliveIntervalMs: resolveKeepAliveIntervalMs(env, overrides),
+    listenStallTimeoutMs: resolveStallTimeoutMs(env, overrides),
+    reverifyIntervalSeconds:
+      overrides.reverifyIntervalSeconds ??
+      parseIntEnv(env['HIVE_MCP_REVERIFY_INTERVAL_SECONDS'], 60, {
+        name: 'HIVE_MCP_REVERIFY_INTERVAL_SECONDS',
+        min: 0,
+      }),
+    maxUnreadPerSender:
+      overrides.maxUnreadPerSender ??
+      parseIntEnv(
+        env['HIVE_CELL_MAX_UNREAD_PER_SENDER'],
+        DEFAULT_SENDER_CONFIG.maxUnreadPerSender,
+        {
+          name: 'HIVE_CELL_MAX_UNREAD_PER_SENDER',
+          min: 1,
+        },
+      ),
   };
+}
+
+// `hivectl watch` gives up after 45 s without a byte. The server must notice a dead
+// stream first, or a reconnecting client would race its own zombie.
+const WATCH_SILENCE_MS = 45_000;
+
+function resolveKeepAliveIntervalMs(env: NodeJS.ProcessEnv, overrides: WireConfig): number {
+  const intervalMs =
+    overrides.listenKeepAliveIntervalMs ??
+    parseIntEnv(env['HIVE_LISTEN_KEEPALIVE_INTERVAL_MS'], 15_000, {
+      name: 'HIVE_LISTEN_KEEPALIVE_INTERVAL_MS',
+      min: 1,
+    });
+  if (intervalMs >= WATCH_SILENCE_MS) {
+    throw new Error(
+      `HIVE_LISTEN_KEEPALIVE_INTERVAL_MS must be below ${String(WATCH_SILENCE_MS)}, got ${String(intervalMs)}`,
+    );
+  }
+  return intervalMs;
+}
+
+function resolveStallTimeoutMs(env: NodeJS.ProcessEnv, overrides: WireConfig): number {
+  const stallMs =
+    overrides.listenStallTimeoutMs ??
+    parseIntEnv(env['HIVE_LISTEN_STALL_TIMEOUT_MS'], 30_000, {
+      name: 'HIVE_LISTEN_STALL_TIMEOUT_MS',
+      min: 1,
+    });
+  if (stallMs >= WATCH_SILENCE_MS) {
+    throw new Error(
+      `HIVE_LISTEN_STALL_TIMEOUT_MS must be below ${String(WATCH_SILENCE_MS)}, got ${String(stallMs)}`,
+    );
+  }
+  return stallMs;
+}
+
+function parseCsvEnv(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 /**
@@ -161,7 +243,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       `No signing keypairs found in ${cfg.keysDir}. Run 'hivectl init' first to bootstrap the Hive.`,
     );
   }
-  const blocklist = await loadBlocklist(db);
+  const blocklist = createBlocklist(db);
 
   const participantsRepo = createParticipantsReadRepo(db, dbConfig.dialect);
   // Resolve hiveId — the verifier needs the canonical hive identifier.
@@ -206,6 +288,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     visibilityEngine,
     events: cellEvents,
     db,
+    config: { dialect: dbConfig.dialect, maxUnreadPerSender: cfg.maxUnreadPerSender },
     onEmitError: (err) =>
       logger.warn(
         { event: 'cell_event_emit_failed', err: err instanceof Error ? err.message : String(err) },
@@ -217,8 +300,8 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
   // 6. Notifications (Waggle pipeline + Presence Registry) — wires synchronously
   //    to cellEvents BEFORE the HTTP listener accepts requests. The factory
-  //    reads HIVE_WAGGLE_QUIET_WINDOW_MS / HIVE_WAGGLE_REPLAY_DELAY_MS /
-  //    HIVE_PRESENCE_* env vars per the spec defaults.
+  //    reads the HIVE_WAGGLE_* and HIVE_PRESENCE_MAX_SESSIONS_PER_PARTICIPANT env vars
+  //    per the spec defaults.
   const notifications = createNotificationsForProduction({
     cellEvents,
     cellsRepo,
@@ -226,9 +309,19 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     logger,
   });
 
+  // State changes made in this process close or replay streams right away. Changes made
+  // by `hivectl`, another process, reach the streams through the re-verification pass.
+  const participantStateSignal = createParticipantStateSignal({ logger });
+  participantStateSignal.onParticipantStateChanged((change) => {
+    notifications.handleParticipantStateChanged(change);
+  });
+  const participantsWriteRepo = createParticipantsWriteRepo(db, {
+    cellsHook: createCellsHookAdapter(cellsRepo),
+    stateSignal: participantStateSignal,
+  });
+
   // 7. MCP transport.
   const mcpTransport = createMcpTransport({
-    verifier,
     participantsRepo,
     cellsRepo,
     sender,
@@ -239,11 +332,24 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     listAgentsMaxPageSize: cfg.listAgentsMaxPageSize,
   });
 
+  const listenStreams = createListenStreams({
+    cellsRepo,
+    presenceRegistry: notifications.presenceRegistry,
+    verifier,
+    serverInfo: mcpTransport.serverInfo,
+    logger,
+    keepAliveIntervalMs: cfg.listenKeepAliveIntervalMs,
+    stallTimeoutMs: cfg.listenStallTimeoutMs,
+    reverifyIntervalSeconds: cfg.reverifyIntervalSeconds,
+  });
+
   // 8. HTTP host.
   const httpHost = createHttpHost(
     {
       mcpTransport,
       verifier,
+      listenEdge: listenStreams,
+      lastConnected: createLastConnectedRefresher({ participantsRepo, logger }),
       db,
       signingKeysProvider: () => signingKeys.values() as Iterable<SigningKey>,
       logger,
@@ -253,11 +359,14 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       host: cfg.httpHost,
       port: cfg.httpPort,
       readyzDbTimeoutMs: cfg.readyzDbTimeoutMs,
+      allowedOrigins: cfg.allowedOrigins,
+      allowedHosts: cfg.allowedHosts,
     },
   );
 
   return {
     async start() {
+      listenStreams.start();
       await httpHost.start();
       logger.info(
         { event: 'wire_started', host: cfg.httpHost, port: httpHost.port(), mcpPath: cfg.mcpPath },
@@ -287,6 +396,20 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
     async stop() {
       logger.info({ event: 'wire_stopping' }, 'hive server shutting down');
+      // Streams first: a stream is a long POST that would otherwise exhaust the drain.
+      try {
+        notifications.presenceRegistry.shutdown();
+      } catch (err) {
+        logger.warn(
+          {
+            event: 'wire_presence_shutdown_failed',
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'presence registry shutdown failed',
+        );
+      }
+      listenStreams.stop();
+      notifications.stop();
       const drainMs = Math.max(1, cfg.shutdownDrainTimeoutSeconds) * 1000;
       await stopWithDrainTimeout(httpHost.stop(), drainMs, (err) => {
         logger.error(
@@ -309,19 +432,6 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
           'snapshot writeWithoutServer failed during shutdown',
         );
       }
-      // Stop the presence sweep timer BEFORE closing the DB — keeps the event
-      // loop free of pending intervals during db teardown. Idempotent.
-      try {
-        notifications.presenceRegistry.shutdown();
-      } catch (err) {
-        logger.warn(
-          {
-            event: 'wire_presence_shutdown_failed',
-            err: err instanceof Error ? err.message : String(err),
-          },
-          'presence registry shutdown failed',
-        );
-      }
       try {
         await closeKyselyDb(db);
       } catch (err) {
@@ -339,6 +449,10 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
     _httpHost() {
       return httpHost;
+    },
+
+    _participantsWriteRepo() {
+      return participantsWriteRepo;
     },
 
     _cellEvents() {
@@ -509,7 +623,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   // lands (Slice 1+), the active selection happens here.
   const activeSigningKey = signingKeys.values().next().value as SigningKey;
 
-  const blocklist = await loadBlocklist(db);
+  const blocklist = createBlocklist(db);
 
   const hiveRow = await db.selectFrom('hives').select(['id', 'name']).executeTakeFirst();
   if (!hiveRow) {
@@ -548,7 +662,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     db,
     logger,
   });
-  const revoker = createRevoker({ blocklist, db, logger });
+  const revoker = createRevoker({ db, logger });
 
   const snapshotWriter = createSnapshotWriter({
     db,

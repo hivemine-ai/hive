@@ -9,9 +9,10 @@ import { createDb } from '#persistence/db.js';
 import { migrateToLatest } from '#persistence/migrate.js';
 import type { Database } from '#persistence/schema.js';
 
+import { MAX_ACTION_DEPTH } from './action-safety.js';
 import { CellError, isCellError } from './errors.js';
 import { createCellEvents } from './events.js';
-import type { CellEvents, MessageDeliveredEvent } from './events.js';
+import type { CellEvents, MessageStoredEvent } from './events.js';
 import { createCellsRepo } from './repository.js';
 import type { CellsRepo } from './repository.js';
 import { createSender } from './send.js';
@@ -183,12 +184,165 @@ describe('createSender / sendMessage', () => {
     await world.db.destroy();
   });
 
+  describe('per-sender quota', () => {
+    const fill = async (sender: Sender, count: number, start = 0): Promise<void> => {
+      for (let i = start; i < start + count; i += 1) {
+        await sender.sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'notification',
+          body: 'x',
+          idempotencyKey: `k-${String(i)}`,
+        });
+      }
+    };
+    const countStored = async (): Promise<number> =>
+      world.cellsRepo.countUnreadFromSender(world.cellB, world.workerA);
+
+    it('rejects at the cap with {limit, current}, stores nothing and emits nothing', async () => {
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 2 } });
+      await fill(sender, 2);
+      const events: MessageStoredEvent[] = [];
+      world.events.on('messageStored', (e) => events.push(e));
+
+      const err = await sender
+        .sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'notification',
+          body: 'over',
+        })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(CellError);
+      expect(err).toMatchObject({
+        code: 'SENDER_QUOTA_EXCEEDED',
+        subCode: 'pair_unread_cap',
+        data: { limit: 2, current: 2 },
+      });
+      expect(events).toHaveLength(0);
+      expect(await countStored()).toBe(2);
+    });
+
+    it('logs cell_sender_quota_exceeded with the rejected pair', async () => {
+      const warn = vi.fn();
+      const logger = { warn, info: vi.fn() } as unknown as Logger;
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 1 }, logger });
+      await fill(sender, 1);
+      await sender
+        .sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'notification',
+          body: 'over',
+        })
+        .catch(() => undefined);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'cell_sender_quota_exceeded',
+          participantId: world.workerA,
+          recipientId: world.workerB,
+          limit: 1,
+          currentUnread: 1,
+        }),
+        expect.any(String),
+      );
+    });
+
+    it('an idempotent replay at the cap returns the original result and emits nothing', async () => {
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 1 } });
+      await fill(sender, 1);
+      const events: MessageStoredEvent[] = [];
+      world.events.on('messageStored', (e) => events.push(e));
+
+      const replay = await sender.sendMessage({
+        callerContext: buildContext(world, world.workerA),
+        recipientId: world.workerB,
+        type: 'notification',
+        body: 'x',
+        idempotencyKey: 'k-0',
+      });
+
+      expect(replay.replayed).toBe(true);
+      expect(events).toHaveLength(0);
+    });
+
+    it('never deletes messages when the cap goes below what is stored', async () => {
+      const big = buildSender(world, { config: { maxUnreadPerSender: 5 } });
+      await fill(big.sender, 4);
+      const small = buildSender(world, { config: { maxUnreadPerSender: 2 } });
+
+      await expect(
+        small.sender.sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'notification',
+          body: 'over',
+        }),
+      ).rejects.toMatchObject({ code: 'SENDER_QUOTA_EXCEEDED', data: { limit: 2, current: 4 } });
+      expect(await countStored()).toBe(4);
+    });
+
+    it('reading frees quota; a rejected key is not burned', async () => {
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 1 } });
+      await fill(sender, 1);
+      const send = () =>
+        sender.sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'notification',
+          body: 'second',
+          idempotencyKey: 'retry-me',
+        });
+
+      await expect(send()).rejects.toMatchObject({ code: 'SENDER_QUOTA_EXCEEDED' });
+
+      await world.db
+        .updateTable('messages')
+        .set({ state: 'read' })
+        .where('cell_id', '=', world.cellB)
+        .execute();
+
+      const accepted = await send();
+      expect(accepted.replayed).toBe(false);
+    });
+
+    it('another sender to the same mailbox is unaffected', async () => {
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 1 } });
+      await fill(sender, 1);
+      const accepted = await sender.sendMessage({
+        callerContext: buildContext(world, world.hkA),
+        recipientId: world.workerB,
+        type: 'notification',
+        body: 'from someone else',
+      });
+      expect(accepted.replayed).toBe(false);
+    });
+
+    it('concurrent sends at cap-1 store exactly one', async () => {
+      const { sender } = buildSender(world, { config: { maxUnreadPerSender: 3 } });
+      await fill(sender, 2);
+      const results = await Promise.allSettled(
+        [0, 1, 2, 3].map((i) =>
+          sender.sendMessage({
+            callerContext: buildContext(world, world.workerA),
+            recipientId: world.workerB,
+            type: 'notification',
+            body: `race-${String(i)}`,
+          }),
+        ),
+      );
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      expect(await countStored()).toBe(3);
+    });
+  });
+
   describe('happy path', () => {
-    it('persists the message and emits messageDelivered post-commit', async () => {
+    it('persists the message and emits messageStored post-commit', async () => {
       const at = new Date('2026-04-26T10:00:00.000Z');
       const { sender } = buildSender(world, { now: () => at });
-      const events: MessageDeliveredEvent[] = [];
-      world.events.on('messageDelivered', (e) => events.push(e));
+      const events: MessageStoredEvent[] = [];
+      world.events.on('messageStored', (e) => events.push(e));
 
       const result = await sender.sendMessage({
         callerContext: buildContext(world, world.workerA),
@@ -200,7 +354,7 @@ describe('createSender / sendMessage', () => {
       expect(result.replayed).toBe(false);
       expect(result.messageId).toMatch(/^[0-9a-f-]{36}$/i);
       expect(result.sentAt.getTime()).toBe(at.getTime());
-      expect(result.deliveredAt.getTime()).toBe(at.getTime());
+      expect(result.storedAt.getTime()).toBe(at.getTime());
 
       const persisted = await world.db
         .selectFrom('messages')
@@ -211,7 +365,7 @@ describe('createSender / sendMessage', () => {
       expect(persisted?.cell_id).toBe(world.cellB);
       expect(persisted?.from_participant_id).toBe(world.workerA);
       expect(persisted?.to_participant_id).toBe(world.workerB);
-      expect(persisted?.state).toBe('delivered');
+      expect(persisted?.state).toBe('stored');
       expect(persisted?.body).toBe('hello');
       expect(persisted?.action).toBeNull();
 
@@ -223,7 +377,7 @@ describe('createSender / sendMessage', () => {
         fromParticipantId: world.workerA,
         type: 'request',
       });
-      expect(events[0]?.deliveredAt.getTime()).toBe(at.getTime());
+      expect(events[0]?.storedAt.getTime()).toBe(at.getTime());
     });
 
     it('serializes the action descriptor as JSON', async () => {
@@ -376,6 +530,52 @@ describe('createSender / sendMessage', () => {
       ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'action_too_large' });
     });
 
+    describe('action depth', () => {
+      const nestedAction = (depth: number): Record<string, unknown> => {
+        let action: Record<string, unknown> = { leaf: true };
+        for (let i = 1; i < depth; i += 1) action = { next: action };
+        return action;
+      };
+
+      it('action_too_deep: an action nested one level past the limit throws', async () => {
+        const { sender } = buildSender(world);
+        await expect(
+          sender.sendMessage({
+            callerContext: buildContext(world, world.workerA),
+            recipientId: world.workerB,
+            type: 'request',
+            body: 'x',
+            action: nestedAction(MAX_ACTION_DEPTH + 1),
+          }),
+        ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'action_too_deep' });
+      });
+
+      it('accepts an action exactly at the limit', async () => {
+        const { sender } = buildSender(world);
+        const sent = await sender.sendMessage({
+          callerContext: buildContext(world, world.workerA),
+          recipientId: world.workerB,
+          type: 'request',
+          body: 'x',
+          action: nestedAction(MAX_ACTION_DEPTH),
+        });
+        expect(sent.messageId).toBeTruthy();
+      });
+
+      it('rejects a depth far beyond what JSON.stringify can walk without a stack overflow', async () => {
+        const { sender } = buildSender(world);
+        await expect(
+          sender.sendMessage({
+            callerContext: buildContext(world, world.workerA),
+            recipientId: world.workerB,
+            type: 'request',
+            body: 'x',
+            action: nestedAction(200_000),
+          }),
+        ).rejects.toMatchObject({ code: 'INVALID_INPUT', subCode: 'action_too_deep' });
+      });
+    });
+
     it('type_unknown: defensive runtime guard for callers that erase types', async () => {
       const { sender } = buildSender(world);
       await expect(
@@ -482,7 +682,7 @@ describe('createSender / sendMessage', () => {
       expect(second.replayed).toBe(true);
       expect(second.messageId).toBe(first.messageId);
       expect(second.sentAt.getTime()).toBe(first.sentAt.getTime());
-      expect(second.deliveredAt.getTime()).toBe(first.deliveredAt.getTime());
+      expect(second.storedAt.getTime()).toBe(first.storedAt.getTime());
 
       const count = await world.db
         .selectFrom('messages')
@@ -554,9 +754,9 @@ describe('createSender / sendMessage', () => {
         replyTo: null,
         ttl: null,
         sentAt: winningSentAt,
-        deliveredAt: winningSentAt,
+        storedAt: winningSentAt,
         readAt: null,
-        state: 'delivered',
+        state: 'stored',
         expiredAt: null,
       });
       await world.db
@@ -590,7 +790,7 @@ describe('createSender / sendMessage', () => {
     it('emits AFTER the row is visible to a reader', async () => {
       const { sender } = buildSender(world);
       const observedRowAtEmit: Array<unknown> = [];
-      world.events.on('messageDelivered', (e) => {
+      world.events.on('messageStored', (e) => {
         // Synchronous read inside the listener — the only reason this is safe
         // here is that better-sqlite3 is synchronous under Kysely's facade.
         // The point of the test is the *ordering* contract: the listener fires
@@ -618,7 +818,7 @@ describe('createSender / sendMessage', () => {
     it('does NOT rollback the INSERT when a listener throws (best-effort emit)', async () => {
       const onEmitError = vi.fn();
       const { sender } = buildSender(world, { onEmitError });
-      world.events.on('messageDelivered', () => {
+      world.events.on('messageStored', () => {
         throw new Error('boom — subscriber blew up');
       });
 

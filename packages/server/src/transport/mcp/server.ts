@@ -1,42 +1,31 @@
-// Composition entry-point for the MCP transport: builds a per-session MCP
-// server factory and wires the shared session-store + tool catalog.
+// Builds the SDK server instance for one request. `createMcpHandler` calls the factory
+// once per request and the instance dies with it, so nothing here keeps per-caller
+// state: the identity of every handler comes from the authInfo of the request in
+// progress.
 //
-// Per the SDK 1.29.0 design, `StreamableHTTPServerTransport` is single-session
-// — a transport instance is "initialized" exactly once. To support multiple
-// concurrent agents on the same fastify host, the http-host maintains a
-// `Map<sessionId, { transport, mcpServer }>` and creates a fresh pair via
-// the factory exposed by this module on every initialize request.
-//
-// The session-store is process-wide: it caches IdentityContext + Subscription
-// keyed by the SDK's session-id. Tool handlers do `sessionStore.peek(sessionId)`
-// to recover the identity for each call.
+// Tools use the low-level request handlers: Hive owns input validation so a bad input
+// stays the JSON-RPC -32602 of the error table, instead of the tool-result error the
+// high-level registerTool would produce.
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
+import { McpServer, ProtocolError } from '@modelcontextprotocol/server';
 import { HIVE_VERSION } from '@hive/shared';
-import { v7 as uuidv7, validate as uuidValidate, version as uuidVersion } from 'uuid';
-import { zodToJsonSchema } from 'zod-to-json-schema';
+import { z } from 'zod';
 
-import { AuthError, isAuthError } from '#domain/auth/index.js';
-import type { ParticipantsReadRepo, Verifier, IdentityContext } from '#domain/auth/index.js';
+import { AuthError } from '#domain/auth/index.js';
+import type { ParticipantsReadRepo } from '#domain/auth/index.js';
 import type { CellsRepo, Reader, Sender } from '#domain/cells/index.js';
 import type { PresenceRegistry } from '#domain/notifications/index.js';
 import type { VisibilityEngine } from '#domain/visibility/index.js';
 import type { Logger } from '#observability/logger.js';
 
-import { mapDomainError, SessionError } from './error-mapper.js';
+import { requestContextFrom } from './auth-binding.js';
+import { MCP_ERR_INVALID_PARAMS } from './error-codes.js';
+import { toProtocolError } from './error-mapper.js';
 import { createReferenceResolver } from './reference-resolver.js';
-import { createSessionStore, type SessionStore } from './session-store.js';
-import { createMcpSubscriberHandle, type McpServerNotifier } from './subscriber-handle.js';
+import { registerMailboxResources } from './resources.js';
 import { createToolCatalog, type ToolDefinition } from './tools/catalog.js';
-import type { RequestContext, SessionState } from './types.js';
 
 export interface McpTransportDeps {
-  verifier: Verifier;
   participantsRepo: ParticipantsReadRepo;
   cellsRepo: CellsRepo;
   sender: Sender;
@@ -51,42 +40,29 @@ export interface McpTransportDeps {
 }
 
 export interface McpTransport {
-  /** Process-wide session store shared across all per-session McpServer instances. */
-  sessionStore: SessionStore;
-  /** Tool catalog (8 tools: 5 from Slice 0 + reply_to/list_agents/get_agent_status from Slice 2 / PRY-028+PRY-029+PRY-030). */
+  /** Tool catalog (the 8 tools of the product spec, in a deterministic order). */
   toolCatalog: ToolDefinition[];
-  /** Build a new `McpServer` for a brand-new initialize request. */
-  buildMcpServerForSession(): McpServer;
-  /**
-   * Bind the per-session McpServer so `ensureSessionFor` can build a
-   * SubscriberHandle that uses it as the notifier. Called by the http-host
-   * after `transport.handleRequest` completes the initialize handshake.
-   */
-  bindSessionServer(sessionId: string, mcpServer: McpServer): void;
-  /** Inverse of `bindSessionServer`; called on session close. */
-  unbindSessionServer(sessionId: string): void;
-  /**
-   * Lazy-create the session-store entry + Presence subscription for the given
-   * sessionId. Idempotent — second call with the same sessionId is a no-op.
-   * Calls `presenceRegistry.subscribe` and binds the resulting handle.
-   */
-  ensureSessionFor(sessionId: string, identity: IdentityContext): Promise<SessionState>;
+  /** Factory for `createMcpHandler`: one fresh server instance per request. */
+  buildServer(): McpServer;
+  /** Identity stamped on the frames the listen edge writes. */
+  serverInfo: { name: string; version: string };
 }
 
 const DEFAULT_SERVER_INFO = { name: 'hive', version: HIVE_VERSION };
 const DEFAULT_INSTRUCTIONS =
-  'Hive v0.1 — agent messaging. Use get_agent_config to learn your identity, list_agents to discover others, get_agent_status to check who is online, send_message or reply_to to talk, check_unread_messages and read_mailbox to receive, mark_read to acknowledge.';
+  'Hive — agent messaging. Use get_agent_config to learn your identity, list_agents to discover others, get_agent_status to check who is reachable by push, send_message or reply_to to talk, check_unread_messages and read_mailbox to receive, mark_read to acknowledge.';
+
+// Provisional values from the tech spec. The catalog is identical for every caller;
+// the mailbox depends on the caller, so it must not be cached across participants.
+const CACHE_HINTS = {
+  'tools/list': { ttlMs: 60_000, cacheScope: 'public' },
+  'resources/list': { ttlMs: 0, cacheScope: 'private' },
+  'resources/read': { ttlMs: 0, cacheScope: 'private' },
+} as const;
 
 export function createMcpTransport(deps: McpTransportDeps): McpTransport {
-  const sessionStore = createSessionStore();
+  const serverInfo = deps.serverInfo ?? DEFAULT_SERVER_INFO;
   const resolver = createReferenceResolver({ participantsRepo: deps.participantsRepo });
-  // Capture the request-id header name once at construction, mirroring the
-  // attachRequestIdHook closure pattern. Reading process.env on every tool
-  // dispatch was both wasteful and a source of test/prod inconsistency
-  // (different evaluation timing vs the hook).
-  const requestIdHeaderName = (
-    process.env['HIVE_OBSERVABILITY_REQUEST_ID_HEADER'] ?? 'x-request-id'
-  ).toLowerCase();
 
   const toolCatalog = createToolCatalog({
     participantsRepo: deps.participantsRepo,
@@ -99,263 +75,67 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
     maxPageSize: deps.listAgentsMaxPageSize,
   });
 
-  // The notifier per session is created lazily inside ensureSessionFor; the
-  // McpServer itself is created via buildMcpServerForSession below. We need a
-  // reference to the per-session McpServer to wire `sendResourceUpdated`.
-  // The fastify host stores this mapping (sessionId → { transport, mcpServer })
-  // and provides it via ensureSessionFor's caller.
-  //
-  // We solve the wiring with a Map<sessionId, McpServer> that the http-host
-  // populates on session creation and reads when ensureSessionFor fires.
-  const serversBySession = new Map<string, McpServer>();
+  const toolList = toolCatalog.map((t) => ({
+    name: t.name,
+    title: t.title,
+    description: t.description,
+    inputSchema: z.toJSONSchema(t.inputSchema, { io: 'input' }) as {
+      type: 'object';
+      [key: string]: unknown;
+    },
+  }));
 
-  function buildMcpServerForSession(): McpServer {
-    const mcpServer = new McpServer(deps.serverInfo ?? DEFAULT_SERVER_INFO, {
-      capabilities: {
-        tools: {},
-        resources: { subscribe: true, listChanged: false },
-        prompts: {},
-        // Claude Code Channels — server emits `notifications/claude/channel`
-        // on each Waggle delivery. Claude Code injects the content into the
-        // model context as `<channel source="hive" ...>...</channel>`,
-        // enabling reactive agents without polling. Per ADR-011 (dual emit).
-        // Marked `experimental` because Anthropic ships this as research
-        // preview — the API may change. Trigger of revision: monitor Claude
-        // Code changelog on every SDK MCP bump.
-        experimental: { 'claude/channel': {} },
-      },
+  function buildServer(): McpServer {
+    const mcpServer = new McpServer(serverInfo, {
       instructions: deps.instructions ?? DEFAULT_INSTRUCTIONS,
+      cacheHints: CACHE_HINTS,
     });
-
-    // Use the low-level Server API directly. The high-level `registerTool`
-    // wraps this with parsed-args + zod-shape inference; for our 8 tools the
-    // shape inference is brittle (empty `z.object({})` schemas don't round-trip
-    // cleanly), so we own the dispatch and validation.
     const lowLevelServer = mcpServer.server;
 
-    lowLevelServer.setRequestHandler(ListToolsRequestSchema, () => {
-      return {
-        tools: toolCatalog.map((t) => ({
-          name: t.name,
-          title: t.title,
-          description: t.description,
-          // zod-to-json-schema accepts any ZodTypeAny; cast through to satisfy
-          // the lib's stricter inferred parameter type.
-          inputSchema: zodToJsonSchema(t.inputSchema as Parameters<typeof zodToJsonSchema>[0]),
-        })),
-      };
-    });
+    // Not through the McpServer constructor: there, these capabilities install the SDK
+    // default handlers and declare listChanged, a notification Hive never emits.
+    lowLevelServer.registerCapabilities({ tools: {}, resources: { subscribe: true } });
 
-    lowLevelServer.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    lowLevelServer.setRequestHandler('tools/list', () => ({ tools: toolList }));
+
+    lowLevelServer.setRequestHandler('tools/call', async (request, handlerCtx) => {
       const toolName = request.params.name;
       const tool = toolCatalog.find((t) => t.name === toolName);
       if (!tool) {
-        throw new McpError(-32601, `tool not found: ${toolName}`);
+        throw new ProtocolError(MCP_ERR_INVALID_PARAMS, `tool not found: ${toolName}`);
       }
 
-      const sessionId = extra.sessionId;
-      if (sessionId === undefined) {
-        throw mapToMcpError(new SessionError('SESSION_NOT_FOUND'), deps.logger);
-      }
-
-      let state: SessionState;
       try {
-        sessionStore.requireIdentityFor(sessionId);
-        sessionStore.touch(sessionId);
-        const peeked = sessionStore.peek(sessionId);
-        if (!peeked) throw new SessionError('SESSION_NOT_FOUND');
-        state = peeked;
-      } catch (err) {
-        throw mapToMcpError(err, deps.logger);
-      }
+        const ctx = requestContextFrom(handlerCtx.http?.authInfo);
+        const participantId = ctx.identity.participantId;
 
-      // requireActiveSender middleware.
-      try {
-        const stateSummary = await deps.participantsRepo.getParticipantState(
-          state.identity.participantId,
-        );
+        // requireActiveSender middleware.
+        const stateSummary = await deps.participantsRepo.getParticipantState(participantId);
         if (!stateSummary || stateSummary.state !== 'active') {
-          throw mapToMcpError(new AuthError('PARTICIPANT_NOT_ACTIVE'), deps.logger);
+          throw new AuthError('PARTICIPANT_NOT_ACTIVE');
         }
-      } catch (err) {
-        if (err instanceof McpError) throw err;
-        throw mapToMcpError(err, deps.logger);
-      }
 
-      // Resolve the request-scoped requestId. The fastify request-id hook
-      // writes the canonical UUIDv7 back to req.headers[<header>], which the
-      // SDK propagates as extra.requestInfo.headers. Reading it here keeps the
-      // audit log row + http_request_completed log + handler events bound to
-      // the same correlation id (closes AC3 of PRY-018). Falls back to a fresh
-      // uuidv7 if the header is missing (eg. a future direct-stdio invocation
-      // without the fastify hook).
-      const ctx: RequestContext = {
-        identity: state.identity,
-        requestId: resolveRequestIdFromExtra(extra, requestIdHeaderName) ?? uuidv7(),
-        sessionState: state,
-      };
-
-      try {
-        const args = request.params.arguments ?? {};
-        const result = await tool.handler(args, ctx);
+        const result = await tool.handler(request.params.arguments ?? {}, ctx);
         deps.logger.info(
-          {
-            event: 'mcp_tool_dispatch_success',
-            tool: toolName,
-            sessionId,
-            participantId: state.identity.participantId,
-          },
+          { event: 'mcp_tool_dispatch_success', tool: toolName, participantId },
           'mcp tool dispatch success',
         );
-        return {
-          content: [{ type: 'text', text: JSON.stringify(result) }],
-          structuredContent: result as Record<string, unknown>,
-        };
+        return lowLevelServer.projectCallToolResult(
+          {
+            content: [{ type: 'text', text: JSON.stringify(result) }],
+            structuredContent: result,
+          },
+          undefined,
+        );
       } catch (err) {
-        throw mapToMcpError(err, deps.logger);
+        throw toProtocolError(err, deps.logger);
       }
     });
+
+    registerMailboxResources(mcpServer, { cellsRepo: deps.cellsRepo, logger: deps.logger });
 
     return mcpServer;
   }
 
-  return {
-    sessionStore,
-    toolCatalog,
-    buildMcpServerForSession,
-    bindSessionServer(sessionId, mcpServer) {
-      serversBySession.set(sessionId, mcpServer);
-    },
-    unbindSessionServer(sessionId) {
-      serversBySession.delete(sessionId);
-    },
-    async ensureSessionFor(sessionId, identity) {
-      const existing = sessionStore.peek(sessionId);
-      if (existing && !existing.invalidated && existing.subscription !== null) {
-        return existing;
-      }
-
-      const connectionId = uuidv7();
-      const state = sessionStore.create({ sessionId, identity, connectionId });
-
-      // Resolve the per-session McpServer that the http-host registered.
-      const mcpServer = serversBySession.get(sessionId);
-      if (!mcpServer) {
-        // The http-host hasn't bound the per-session server yet (race), or this
-        // is being called outside the normal flow. Skip subscription — next
-        // tool call will retry.
-        deps.logger.warn(
-          { event: 'mcp_ensure_session_no_server', sessionId },
-          'no per-session McpServer registered yet — subscription deferred',
-        );
-        return state;
-      }
-
-      const notifier: McpServerNotifier = {
-        sendResourceUpdated: (params) => mcpServer.server.sendResourceUpdated(params),
-        sendChannelNotification: (params) =>
-          mcpServer.server.notification({
-            method: 'notifications/claude/channel',
-            params,
-          }),
-      };
-      // Pin the notifier in the SessionState so it stays GC-anchored for the
-      // lifetime of the session — the SubscriberHandle holds it via WeakRef.
-      // Without this anchor the notifier literal is eligible for collection
-      // and `serverRef.deref()` would return undefined under memory pressure,
-      // silently dropping Waggle notifications.
-      state.notifierRef = notifier;
-
-      const handle = createMcpSubscriberHandle({
-        callerContext: identity,
-        serverRef: new WeakRef(notifier),
-        logger: deps.logger,
-      });
-
-      try {
-        const subscription = await deps.presenceRegistry.subscribe({
-          callerContext: identity,
-          handle,
-        });
-        sessionStore.attachSubscription(sessionId, subscription);
-      } catch (err) {
-        sessionStore.close(sessionId);
-        deps.logger.warn(
-          {
-            event: 'mcp_subscribe_failed',
-            sessionId,
-            participantId: identity.participantId,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          'presence subscribe failed during ensureSessionFor',
-        );
-        throw err;
-      }
-
-      deps.logger.info(
-        {
-          event: 'mcp_session_opened',
-          sessionId,
-          participantId: identity.participantId,
-          kind: identity.kind,
-        },
-        'mcp session opened',
-      );
-
-      return state;
-    },
-  };
-}
-
-// ---------- helpers ----------
-
-/**
- * Extracts the canonical UUIDv7 requestId from the SDK's `extra.requestInfo`.
- * The fastify request-id hook (observability/request-id.ts) writes the value
- * back to `req.headers[<header>]` so it propagates through the SDK transport.
- * Returns null if the header is absent or not a valid UUIDv7.
- */
-function resolveRequestIdFromExtra(
-  extra: { requestInfo?: { headers?: unknown } },
-  headerName: string,
-): string | null {
-  const headers = extra.requestInfo?.headers;
-  if (!headers || typeof headers !== 'object') return null;
-  const raw: unknown = (headers as Record<string, unknown>)[headerName];
-  const value: unknown = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof value !== 'string') return null;
-  if (!uuidValidate(value) || uuidVersion(value) !== 7) return null;
-  return value;
-}
-
-function mapToMcpError(err: unknown, logger?: Logger): McpError {
-  if (err instanceof McpError) return err;
-
-  if (isAuthError(err)) {
-    const mapped = mapDomainError(err);
-    if (logger) {
-      logger.warn(
-        {
-          event: 'mcp_tool_error',
-          domainCode: mapped.domainCode,
-          subCode: mapped.subCode,
-        },
-        mapped.wire.message,
-      );
-    }
-    return new McpError(mapped.wire.code, mapped.wire.message, mapped.wire.data);
-  }
-
-  const mapped = mapDomainError(err);
-  if (logger) {
-    logger.warn(
-      {
-        event: 'mcp_tool_error',
-        domainCode: mapped.domainCode,
-        subCode: mapped.subCode,
-      },
-      mapped.wire.message,
-    );
-  }
-  return new McpError(mapped.wire.code, mapped.wire.message, mapped.wire.data);
+  return { toolCatalog, buildServer, serverInfo };
 }

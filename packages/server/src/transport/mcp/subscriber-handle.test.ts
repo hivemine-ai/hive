@@ -1,622 +1,363 @@
-import type { Logger } from 'pino';
-import { describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 
-import type { IdentityContext } from '#domain/auth/types.js';
-import type { WaggleNotification } from '#domain/notifications/waggle/types.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { McpServerNotifier } from './subscriber-handle.js';
-import {
-  buildChannelContent,
-  buildChannelMeta,
-  createMcpSubscriberHandle,
-} from './subscriber-handle.js';
+import type { IdentityContext } from '#domain/auth/index.js';
+import type { StreamCloseReason, WaggleNotification } from '#domain/notifications/index.js';
+import { createLogger } from '#observability/logger.js';
+import type { Logger } from '#observability/logger.js';
 
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
+import { createStreamHandle, toEnvelope, type ListenSink } from './subscriber-handle.js';
 
-const UUID_V7_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const KEEPALIVE_MS = 1000;
+const STALL_MS = 3000;
+const SUBSCRIPTION_META = 'io.modelcontextprotocol/subscriptionId';
 
-function makeIdentity(): IdentityContext {
+class FakeSink extends EventEmitter implements ListenSink {
+  frames: string[] = [];
+  pendingCallbacks: Array<(err?: Error | null) => void> = [];
+  writableLength = 0;
+  writableEnded = false;
+  destroyed = false;
+  /** When false, write callbacks stay pending, as with a socket that does not drain. */
+  autoFlush = true;
+  failWith: Error | undefined;
+
+  write(chunk: string, callback: (err?: Error | null) => void): boolean {
+    this.frames.push(chunk);
+    if (this.failWith) {
+      callback(this.failWith);
+      return false;
+    }
+    if (this.autoFlush) {
+      callback();
+      return true;
+    }
+    this.writableLength += chunk.length;
+    this.pendingCallbacks.push(callback);
+    return false;
+  }
+
+  flush(): void {
+    this.writableLength = 0;
+    for (const callback of this.pendingCallbacks.splice(0)) callback();
+    this.emit('drain');
+  }
+
+  destroy(): void {
+    this.destroyed = true;
+  }
+
+  messages(): Array<Record<string, unknown>> {
+    return this.frames
+      .filter((f) => f.startsWith('event: message'))
+      .map((f) => JSON.parse(f.split('data: ')[1] ?? '') as Record<string, unknown>);
+  }
+}
+
+const NOTIFICATION: WaggleNotification = {
+  kind: 'online',
+  eventId: 'a'.repeat(64),
+  cellId: '01900000-0000-7000-8000-00000000000c',
+  recipientId: '01900000-0000-7000-8000-00000000000b',
+  unreadCount: 2,
+  coalescedCount: 7,
+  senderIds: ['01900000-0000-7000-8000-00000000000a'],
+  emittedAt: new Date('2026-11-02T10:00:00.000Z'),
+  waggleId: '01900000-0000-7000-8000-0000000000dd',
+};
+
+function identity(credentialExpiresAt?: Date): IdentityContext {
   return {
-    participantId: '01966e10-0000-7000-8000-000000000001',
-    kind: 'worker',
-    hiveId: '01966e10-0000-7000-8000-000000000002',
-    hiveName: 'test-hive',
-    colonyId: '01966e10-0000-7000-8000-000000000003',
-    snapshot: {
-      issuedAt: new Date('2026-01-01T00:00:00Z'),
-      credentialJti: '01966e10-0000-7000-8000-000000000004',
-      credentialKid: 'kid-001',
-    },
-    current: { state: 'active' },
-  };
+    participantId: NOTIFICATION.recipientId,
+    snapshot: { ...(credentialExpiresAt && { credentialExpiresAt }) },
+  } as unknown as IdentityContext;
 }
 
-function makeNotification(overrides: Partial<WaggleNotification> = {}): WaggleNotification {
-  return {
-    kind: 'online',
-    cellId: '01966e10-0000-7000-8000-000000000010',
-    recipientId: '01966e10-0000-7000-8000-000000000011',
-    unreadCount: 3,
-    senderIds: ['01966e10-0000-7000-8000-000000000012'],
-    emittedAt: new Date('2026-04-26T12:00:00.000Z'),
-    waggleId: '01966e10-0000-7000-8000-000000000013',
-    ...overrides,
-  };
+function build(options: { expiresAt?: Date; logger?: Logger; keepAliveMs?: number } = {}) {
+  const sink = new FakeSink();
+  const abort = vi.fn();
+  const handle = createStreamHandle({
+    callerContext: identity(options.expiresAt),
+    sink,
+    subscriptionId: 7,
+    serverInfo: { name: 'hive', version: '1' },
+    abort,
+    keepAliveIntervalMs: options.keepAliveMs ?? KEEPALIVE_MS,
+    stallTimeoutMs: STALL_MS,
+    logger: options.logger ?? createLogger({ level: 'silent' }),
+  });
+  const closes: StreamCloseReason[] = [];
+  handle.onClose((reason) => closes.push(reason));
+  return { sink, handle, abort, closes };
 }
 
-function makeNotifier(): McpServerNotifier & {
-  sendResourceUpdated: ReturnType<typeof vi.fn>;
-  sendChannelNotification: ReturnType<typeof vi.fn>;
-} {
-  return {
-    sendResourceUpdated: vi.fn().mockResolvedValue(undefined),
-    sendChannelNotification: vi.fn().mockResolvedValue(undefined),
-  };
-}
-
-function makeLogger(): Logger {
-  return {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-    trace: vi.fn(),
-    fatal: vi.fn(),
-  } as unknown as Logger;
-}
-
-function makeHandle(notifier: McpServerNotifier, identity?: IdentityContext, logger?: Logger) {
-  const callerContext = identity ?? makeIdentity();
-  return createMcpSubscriberHandle({
-    callerContext,
-    serverRef: new WeakRef(notifier),
-    logger: logger ?? makeLogger(),
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Group 1 — connectionId
-// ---------------------------------------------------------------------------
-
-describe('McpSubscriberHandle — connectionId', () => {
-  it('conforms to UUID v7 regex', () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    expect(handle.connectionId).toMatch(UUID_V7_REGEX);
-  });
-
-  it('generates distinct connectionIds for each instance', () => {
-    const notifier = makeNotifier();
-    const a = makeHandle(notifier);
-    const b = makeHandle(notifier);
-    expect(a.connectionId).not.toBe(b.connectionId);
-  });
-
-  it('exposes callerContext as the same reference passed in', () => {
-    const notifier = makeNotifier();
-    const identity = makeIdentity();
-    const handle = createMcpSubscriberHandle({
-      callerContext: identity,
-      serverRef: new WeakRef(notifier),
-      logger: makeLogger(),
-    });
-    expect(handle.callerContext).toBe(identity);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Group 2 — deliver Emit 1 (resources/updated) happy path
-// ---------------------------------------------------------------------------
-
-describe('McpSubscriberHandle — deliver Emit 1 (resources/updated)', () => {
-  it('calls sendResourceUpdated exactly once per deliver', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    await handle.deliver(makeNotification());
-    expect(notifier.sendResourceUpdated).toHaveBeenCalledTimes(1);
-  });
-
-  it('sends the correct URI for the cell', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    const notification = makeNotification({ cellId: '01966e10-0000-7000-8000-000000000010' });
-    await handle.deliver(notification);
-    const arg = notifier.sendResourceUpdated.mock.calls[0]?.[0] as {
-      uri: string;
+describe('toEnvelope', () => {
+  it('carries only the wire fields, in snake_case, with the subscription id', () => {
+    const envelope = toEnvelope(NOTIFICATION, 7) as {
+      method: string;
+      params: { uri: string; _meta: Record<string, unknown> };
     };
-    expect(arg.uri).toBe('hive://cells/01966e10-0000-7000-8000-000000000010');
-  });
 
-  it('sends _meta.hiveWaggle with snake_case fields matching the notification (online)', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    const notification = makeNotification({ kind: 'online' });
-    await handle.deliver(notification);
-    const arg = notifier.sendResourceUpdated.mock.calls[0]?.[0] as {
-      uri: string;
-      _meta: { hiveWaggle: Record<string, unknown> };
-    };
-    expect(arg._meta.hiveWaggle).toEqual({
+    expect(envelope.method).toBe('notifications/resources/updated');
+    expect(envelope.params.uri).toBe(`hive://cells/${NOTIFICATION.cellId}`);
+    expect(envelope.params._meta[SUBSCRIPTION_META]).toBe(7);
+    expect(envelope.params._meta['hiveWaggle']).toEqual({
       kind: 'online',
-      recipient_id: notification.recipientId,
-      unread_count: notification.unreadCount,
-      sender_ids: notification.senderIds,
-      emitted_at: notification.emittedAt.toISOString(),
-      waggle_id: notification.waggleId,
+      recipient_id: NOTIFICATION.recipientId,
+      unread_count: 2,
+      sender_ids: NOTIFICATION.senderIds,
+      emitted_at: '2026-11-02T10:00:00.000Z',
+      waggle_id: NOTIFICATION.waggleId,
+      event_id: NOTIFICATION.eventId,
     });
   });
 
-  it('sends _meta.hiveWaggle with snake_case fields matching the notification (replay)', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    const notification = makeNotification({ kind: 'replay' });
-    await handle.deliver(notification);
-    const arg = notifier.sendResourceUpdated.mock.calls[0]?.[0] as {
-      uri: string;
-      _meta: { hiveWaggle: Record<string, unknown> };
-    };
-    expect(arg._meta.hiveWaggle.kind).toBe('replay');
-  });
-
-  it('converts emittedAt Date to ISO 8601 string', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    const emittedAt = new Date('2026-04-26T12:34:56.789Z');
-    await handle.deliver(makeNotification({ emittedAt }));
-    const arg = notifier.sendResourceUpdated.mock.calls[0]?.[0] as {
-      _meta: { hiveWaggle: { emitted_at: string } };
-    };
-    expect(arg._meta.hiveWaggle.emitted_at).toBe('2026-04-26T12:34:56.789Z');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Group 3 — deliver when server is gone (WeakRef deref undefined)
-// ---------------------------------------------------------------------------
-
-describe('McpSubscriberHandle — deliver server gone', () => {
-  it('throws when serverRef.deref() returns undefined', async () => {
-    const fakeRef = {
-      deref: vi.fn().mockReturnValue(undefined),
-    } as unknown as WeakRef<McpServerNotifier>;
-    const handle = createMcpSubscriberHandle({
-      callerContext: makeIdentity(),
-      serverRef: fakeRef,
-      logger: makeLogger(),
-    });
-    await expect(handle.deliver(makeNotification())).rejects.toThrow('server gone');
-  });
-
-  it('error message is exactly "McpSubscriberHandle: server gone"', async () => {
-    const fakeRef = {
-      deref: vi.fn().mockReturnValue(undefined),
-    } as unknown as WeakRef<McpServerNotifier>;
-    const handle = createMcpSubscriberHandle({
-      callerContext: makeIdentity(),
-      serverRef: fakeRef,
-      logger: makeLogger(),
-    });
-    await expect(handle.deliver(makeNotification())).rejects.toThrow(
-      'McpSubscriberHandle: server gone',
+  it('never lets a body, a cursor or the coalesced count through', () => {
+    const raw = JSON.stringify(
+      toEnvelope({ ...NOTIFICATION, body: 'secret', cursor: 'c' } as WaggleNotification, 1),
     );
-  });
-
-  it('fires _fireCloseListeners before throwing when server is gone', async () => {
-    const fakeRef = {
-      deref: vi.fn().mockReturnValue(undefined),
-    } as unknown as WeakRef<McpServerNotifier>;
-    const handle = createMcpSubscriberHandle({
-      callerContext: makeIdentity(),
-      serverRef: fakeRef,
-      logger: makeLogger(),
-    });
-    const listener = vi.fn();
-    handle.onClose(listener);
-    await expect(handle.deliver(makeNotification())).rejects.toThrow();
-    expect(listener).toHaveBeenCalledTimes(1);
+    expect(raw).not.toContain('secret');
+    expect(raw).not.toContain('cursor');
+    expect(raw).not.toContain('coalesced');
   });
 });
 
-// ---------------------------------------------------------------------------
-// Group 4 — deliver Emit 1 throws (transport error on resources/updated)
-// ---------------------------------------------------------------------------
-
-describe('McpSubscriberHandle — deliver Emit 1 throws', () => {
-  it('propagates the SDK rejection from sendResourceUpdated', async () => {
-    const notifier: McpServerNotifier = {
-      sendResourceUpdated: vi.fn().mockRejectedValue(new Error('socket dead')),
-      sendChannelNotification: vi.fn().mockResolvedValue(undefined),
-    };
-    const handle = makeHandle(notifier);
-    await expect(handle.deliver(makeNotification())).rejects.toThrow('socket dead');
+describe('createStreamHandle', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
-  it('does not invoke sendChannelNotification if Emit 1 throws', async () => {
-    const channelMock = vi.fn().mockResolvedValue(undefined);
-    const notifier: McpServerNotifier = {
-      sendResourceUpdated: vi.fn().mockRejectedValue(new Error('socket dead')),
-      sendChannelNotification: channelMock,
-    };
-    const handle = makeHandle(notifier);
-    await expect(handle.deliver(makeNotification())).rejects.toThrow('socket dead');
-    expect(channelMock).not.toHaveBeenCalled();
-  });
+  describe('deliver', () => {
+    it('writes exactly one Envelope 1 frame in the SSE shape of the SDK router', async () => {
+      const { sink, handle } = build();
+      await handle.deliver(NOTIFICATION);
 
-  it('fires _fireCloseListeners when Emit 1 rejects', async () => {
-    const notifier: McpServerNotifier = {
-      sendResourceUpdated: vi.fn().mockRejectedValue(new Error('socket dead')),
-      sendChannelNotification: vi.fn().mockResolvedValue(undefined),
-    };
-    const handle = makeHandle(notifier);
-    const listener = vi.fn();
-    handle.onClose(listener);
-    await expect(handle.deliver(makeNotification())).rejects.toThrow('socket dead');
-    expect(listener).toHaveBeenCalledTimes(1);
-  });
-});
+      expect(sink.frames).toHaveLength(1);
+      expect(sink.frames[0]).toMatch(/^event: message\ndata: \{.*\}\n\n$/);
+      expect(sink.messages()[0]).toMatchObject({
+        jsonrpc: '2.0',
+        method: 'notifications/resources/updated',
+      });
+      handle.close('client_closed');
+    });
 
-// ---------------------------------------------------------------------------
-// Group 5 — deliver Emit 2 (claude/channel) happy path
-// ---------------------------------------------------------------------------
+    it('a failed write rejects after the handle closed itself with write_failed', async () => {
+      const { sink, handle, closes } = build();
+      sink.failWith = new Error('EPIPE');
 
-describe('McpSubscriberHandle — deliver Emit 2 (claude/channel) happy path', () => {
-  it('calls sendChannelNotification exactly once per deliver', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    await handle.deliver(makeNotification());
-    expect(notifier.sendChannelNotification).toHaveBeenCalledTimes(1);
-  });
+      await expect(handle.deliver(NOTIFICATION)).rejects.toThrow('EPIPE');
 
-  it('emits exactly two notifications per deliver (one per envelope)', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    await handle.deliver(makeNotification());
-    expect(notifier.sendResourceUpdated).toHaveBeenCalledTimes(1);
-    expect(notifier.sendChannelNotification).toHaveBeenCalledTimes(1);
-  });
+      expect(closes).toEqual(['write_failed']);
+      expect(sink.destroyed).toBe(true);
+    });
 
-  it('passes content as a non-empty string', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    await handle.deliver(makeNotification());
-    const arg = notifier.sendChannelNotification.mock.calls[0]?.[0] as {
-      content: string;
-      meta: Record<string, string>;
-    };
-    expect(typeof arg.content).toBe('string');
-    expect(arg.content.length).toBeGreaterThan(0);
-  });
+    it('rejects once closed, and a pending deliver rejects on close', async () => {
+      const { sink, handle } = build();
+      sink.autoFlush = false;
+      const pending = handle.deliver(NOTIFICATION);
+      handle.close('participant_suspended');
 
-  it('passes meta as a flat Record<string, string> with the six required keys', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    const notification = makeNotification();
-    await handle.deliver(notification);
-    const arg = notifier.sendChannelNotification.mock.calls[0]?.[0] as {
-      content: string;
-      meta: Record<string, string>;
-    };
-    expect(arg.meta).toEqual({
-      cell_id: notification.cellId,
-      kind: notification.kind,
-      unread_count: String(notification.unreadCount),
-      sender_ids: notification.senderIds.join(','),
-      waggle_id: notification.waggleId,
-      emitted_at: notification.emittedAt.toISOString(),
+      await expect(pending).rejects.toThrow('stream closed');
+      await expect(handle.deliver(NOTIFICATION)).rejects.toThrow('stream closed');
     });
   });
 
-  it('does not include params.channel (correctly absent per second amend)', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    await handle.deliver(makeNotification());
-    const arg = notifier.sendChannelNotification.mock.calls[0]?.[0] as {
-      content: string;
-      meta: Record<string, string>;
-      channel?: unknown;
-    };
-    expect(arg).not.toHaveProperty('channel');
-  });
-
-  it('does not include recipient_id in meta (omitted per spec)', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    await handle.deliver(makeNotification());
-    const arg = notifier.sendChannelNotification.mock.calls[0]?.[0] as {
-      meta: Record<string, string>;
-    };
-    expect(arg.meta).not.toHaveProperty('recipient_id');
-  });
-
-  it('all meta keys are identifier-only (letters, digits, underscores)', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    await handle.deliver(makeNotification());
-    const arg = notifier.sendChannelNotification.mock.calls[0]?.[0] as {
-      meta: Record<string, string>;
-    };
-    const identifierRegex = /^[A-Za-z_][A-Za-z0-9_]*$/;
-    for (const key of Object.keys(arg.meta)) {
-      expect(key).toMatch(identifierRegex);
-    }
-  });
-
-  it('all meta values are strings (no nested objects, arrays, or numbers)', async () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    await handle.deliver(makeNotification());
-    const arg = notifier.sendChannelNotification.mock.calls[0]?.[0] as {
-      meta: Record<string, unknown>;
-    };
-    for (const value of Object.values(arg.meta)) {
-      expect(typeof value).toBe('string');
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Group 6 — deliver Emit 2 fails (fail-safe absorbs the error)
-// ---------------------------------------------------------------------------
-
-describe('McpSubscriberHandle — deliver Emit 2 fails (fail-safe)', () => {
-  it('resolves successfully when sendChannelNotification rejects', async () => {
-    const notifier: McpServerNotifier = {
-      sendResourceUpdated: vi.fn().mockResolvedValue(undefined),
-      sendChannelNotification: vi.fn().mockRejectedValue(new Error('channel drift')),
-    };
-    const handle = makeHandle(notifier);
-    await expect(handle.deliver(makeNotification())).resolves.toBeUndefined();
-  });
-
-  it('logs warn with event mcp_channel_emit_failed when Emit 2 rejects', async () => {
-    const logger = makeLogger();
-    const notifier: McpServerNotifier = {
-      sendResourceUpdated: vi.fn().mockResolvedValue(undefined),
-      sendChannelNotification: vi.fn().mockRejectedValue(new Error('channel drift')),
-    };
-    const handle = makeHandle(notifier, undefined, logger);
-    await handle.deliver(makeNotification());
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ event: 'mcp_channel_emit_failed' }),
-      expect.any(String),
-    );
-  });
-
-  it('does not fire close listeners when only Emit 2 fails', async () => {
-    const notifier: McpServerNotifier = {
-      sendResourceUpdated: vi.fn().mockResolvedValue(undefined),
-      sendChannelNotification: vi.fn().mockRejectedValue(new Error('channel drift')),
-    };
-    const handle = makeHandle(notifier);
-    const listener = vi.fn();
-    handle.onClose(listener);
-    await handle.deliver(makeNotification());
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('Emit 1 still completes successfully when Emit 2 fails', async () => {
-    const sendResourceUpdated = vi.fn().mockResolvedValue(undefined);
-    const notifier: McpServerNotifier = {
-      sendResourceUpdated,
-      sendChannelNotification: vi.fn().mockRejectedValue(new Error('channel drift')),
-    };
-    const handle = makeHandle(notifier);
-    await handle.deliver(makeNotification());
-    expect(sendResourceUpdated).toHaveBeenCalledTimes(1);
-  });
-
-  it('warn log includes cellId and waggleId for traceability', async () => {
-    const logger = makeLogger();
-    const notifier: McpServerNotifier = {
-      sendResourceUpdated: vi.fn().mockResolvedValue(undefined),
-      sendChannelNotification: vi.fn().mockRejectedValue(new Error('channel drift')),
-    };
-    const handle = makeHandle(notifier, undefined, logger);
-    const notification = makeNotification();
-    await handle.deliver(notification);
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        event: 'mcp_channel_emit_failed',
-        cellId: notification.cellId,
-        waggleId: notification.waggleId,
-      }),
-      expect.any(String),
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Group 7 — onClose + _fireCloseListeners
-// ---------------------------------------------------------------------------
-
-describe('McpSubscriberHandle — onClose + _fireCloseListeners', () => {
-  it('invokes all registered listeners in registration order', () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    const calls: number[] = [];
-    handle.onClose(() => calls.push(1));
-    handle.onClose(() => calls.push(2));
-    handle.onClose(() => calls.push(3));
-    handle._fireCloseListeners();
-    expect(calls).toEqual([1, 2, 3]);
-  });
-
-  it('a throwing listener does not prevent subsequent listeners from running', () => {
-    const logger = makeLogger();
-    const notifier = makeNotifier();
-    const handle = createMcpSubscriberHandle({
-      callerContext: makeIdentity(),
-      serverRef: new WeakRef(notifier),
-      logger,
+  describe('keep-alive and detector', () => {
+    it('writes a keep-alive comment on an idle stream', async () => {
+      const { sink, handle } = build();
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_MS * 3);
+      expect(sink.frames).toEqual(Array<string>(3).fill(': keepalive\n\n'));
+      handle.close('client_closed');
     });
-    const ok1 = vi.fn();
-    const throwing = vi.fn().mockImplementation(() => {
-      throw new Error('listener error');
+
+    it('a failed keep-alive write closes with write_failed', async () => {
+      const { sink, closes } = build();
+      sink.failWith = new Error('ECONNRESET');
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_MS);
+      expect(closes).toEqual(['write_failed']);
     });
-    const ok2 = vi.fn();
-    handle.onClose(ok1);
-    handle.onClose(throwing);
-    handle.onClose(ok2);
-    expect(() => handle._fireCloseListeners()).not.toThrow();
-    expect(ok1).toHaveBeenCalledTimes(1);
-    expect(throwing).toHaveBeenCalledTimes(1);
-    expect(ok2).toHaveBeenCalledTimes(1);
-  });
 
-  it('logs via logger.warn when a listener throws', () => {
-    const logger = makeLogger();
-    const notifier = makeNotifier();
-    const handle = createMcpSubscriberHandle({
-      callerContext: makeIdentity(),
-      serverRef: new WeakRef(notifier),
-      logger,
+    it('closes with stalled when written bytes do not drain in time', async () => {
+      const warn = vi.fn();
+      const logger = {
+        warn,
+        info: () => undefined,
+        debug: () => undefined,
+      } as unknown as Logger;
+      const { sink, closes } = build({ logger });
+      sink.autoFlush = false;
+
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_MS);
+      await vi.advanceTimersByTimeAsync(STALL_MS - 1);
+      expect(closes).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(closes).toEqual(['stalled']);
+      expect(sink.destroyed).toBe(true);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'mcp_listen_network_cut_detected', silenceMs: STALL_MS }),
+        expect.any(String),
+      );
     });
-    handle.onClose(() => {
-      throw new Error('listener error');
+
+    it('a stream that drains in time never stalls, however slow', async () => {
+      const { sink, handle, closes } = build();
+      sink.autoFlush = false;
+      for (let i = 0; i < 20; i += 1) {
+        await vi.advanceTimersByTimeAsync(KEEPALIVE_MS);
+        sink.flush();
+      }
+      expect(closes).toEqual([]);
+      handle.close('client_closed');
     });
-    handle._fireCloseListeners();
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ event: 'subscriber_handle_onclose_listener_failed' }),
-    );
-  });
 
-  it('empties the listeners array after firing (second call is a no-op)', () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    const listener = vi.fn();
-    handle.onClose(listener);
-    handle._fireCloseListeners();
-    handle._fireCloseListeners();
-    expect(listener).toHaveBeenCalledTimes(1);
-  });
-
-  it('accepts new listeners after a fire (for next batch)', () => {
-    const notifier = makeNotifier();
-    const handle = makeHandle(notifier);
-    const first = vi.fn();
-    handle.onClose(first);
-    handle._fireCloseListeners();
-    const second = vi.fn();
-    handle.onClose(second);
-    handle._fireCloseListeners();
-    expect(first).toHaveBeenCalledTimes(1);
-    expect(second).toHaveBeenCalledTimes(1);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Group 8 — buildChannelContent (pure function)
-// ---------------------------------------------------------------------------
-
-describe('buildChannelContent', () => {
-  it('uses singular "message" when unreadCount === 1', () => {
-    const content = buildChannelContent(makeNotification({ unreadCount: 1 }));
-    // "1 unread message in your mailbox" — singular noun before "in your mailbox".
-    // Note: the actionable instruction "Run check_unread_messages" still has the
-    // plural in the tool name regardless of count — that is a fixed tool identifier.
-    expect(content).toContain('1 unread message in your mailbox');
-    expect(content).not.toContain('1 unread messages');
-  });
-
-  it('uses plural "messages" when unreadCount > 1', () => {
-    const content = buildChannelContent(makeNotification({ unreadCount: 5 }));
-    expect(content).toContain('5 unread messages ');
-  });
-
-  it('uses plural "messages" when unreadCount === 0 (edge case, replay without unread)', () => {
-    const content = buildChannelContent(makeNotification({ unreadCount: 0 }));
-    expect(content).toContain('0 unread messages ');
-  });
-
-  it('includes the actionable instruction "Run check_unread_messages to read."', () => {
-    const content = buildChannelContent(makeNotification());
-    expect(content).toContain('Run check_unread_messages to read.');
-  });
-
-  it('appends an HTML comment with kind, waggle_id, and emitted_at for traceability', () => {
-    const notification = makeNotification({
-      kind: 'online',
-      waggleId: '01966e10-0000-7000-8000-000000000099',
-      emittedAt: new Date('2026-04-27T12:00:00.000Z'),
+    it('a drain with bytes still pending restarts the clock', async () => {
+      const { sink, handle, closes } = build();
+      sink.autoFlush = false;
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_MS);
+      await vi.advanceTimersByTimeAsync(STALL_MS - 100);
+      sink.emit('drain');
+      await vi.advanceTimersByTimeAsync(STALL_MS - 1);
+      expect(closes).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(closes).toEqual(['stalled']);
+      handle.close('client_closed');
     });
-    const content = buildChannelContent(notification);
-    expect(content).toContain(
-      '<!-- waggle: kind=online, waggle_id=01966e10-0000-7000-8000-000000000099, emitted_at=2026-04-27T12:00:00.000Z -->',
-    );
-  });
 
-  it('separates prose and HTML comment with a blank line', () => {
-    const content = buildChannelContent(makeNotification());
-    const lines = content.split('\n');
-    expect(lines.length).toBeGreaterThanOrEqual(3);
-    expect(lines[0]).toContain('You have');
-    expect(lines[1]).toBe('');
-    expect(lines.at(-1)).toMatch(/^<!-- waggle: /);
-  });
-
-  it('reflects kind=replay in the HTML comment', () => {
-    const content = buildChannelContent(makeNotification({ kind: 'replay' }));
-    expect(content).toContain('kind=replay');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Group 9 — buildChannelMeta (pure function)
-// ---------------------------------------------------------------------------
-
-describe('buildChannelMeta', () => {
-  it('produces exactly the six required keys', () => {
-    const meta = buildChannelMeta(makeNotification());
-    expect(Object.keys(meta).sort()).toEqual(
-      ['cell_id', 'emitted_at', 'kind', 'sender_ids', 'unread_count', 'waggle_id'].sort(),
-    );
-  });
-
-  it('coerces unread_count number to string', () => {
-    const meta = buildChannelMeta(makeNotification({ unreadCount: 42 }));
-    expect(meta.unread_count).toBe('42');
-    expect(typeof meta.unread_count).toBe('string');
-  });
-
-  it('joins senderIds array as CSV string', () => {
-    const senderIds = [
-      '01966e10-0000-7000-8000-000000000020',
-      '01966e10-0000-7000-8000-000000000021',
-      '01966e10-0000-7000-8000-000000000022',
-    ];
-    const meta = buildChannelMeta(makeNotification({ senderIds }));
-    expect(meta.sender_ids).toBe(senderIds.join(','));
-  });
-
-  it('emits empty string for sender_ids when the array is empty', () => {
-    const meta = buildChannelMeta(makeNotification({ senderIds: [] }));
-    expect(meta.sender_ids).toBe('');
-  });
-
-  it('coerces emittedAt Date to ISO 8601 string', () => {
-    const emittedAt = new Date('2026-04-27T12:34:56.789Z');
-    const meta = buildChannelMeta(makeNotification({ emittedAt }));
-    expect(meta.emitted_at).toBe('2026-04-27T12:34:56.789Z');
-  });
-
-  it('passes through cellId, kind, and waggleId verbatim', () => {
-    const notification = makeNotification({
-      cellId: '01966e10-0000-7000-8000-000000000010',
-      kind: 'replay',
-      waggleId: '01966e10-0000-7000-8000-000000000013',
+    it('a stream with nothing pending has no clock running', async () => {
+      const { handle, closes } = build();
+      await vi.advanceTimersByTimeAsync(STALL_MS * 10);
+      expect(closes).toEqual([]);
+      handle.close('client_closed');
     });
-    const meta = buildChannelMeta(notification);
-    expect(meta.cell_id).toBe('01966e10-0000-7000-8000-000000000010');
-    expect(meta.kind).toBe('replay');
-    expect(meta.waggle_id).toBe('01966e10-0000-7000-8000-000000000013');
   });
 
-  it('all values are strings (Record<string, string> contract)', () => {
-    const meta = buildChannelMeta(makeNotification());
-    for (const value of Object.values(meta)) {
-      expect(typeof value).toBe('string');
-    }
+  describe('close', () => {
+    it.each(['evicted_lru', 'shutdown'] as const)('%s ends with the complete result', (reason) => {
+      const { sink, handle, abort, closes } = build();
+
+      handle.close(reason);
+
+      expect(sink.messages()).toEqual([
+        {
+          jsonrpc: '2.0',
+          id: 7,
+          result: {
+            resultType: 'complete',
+            _meta: {
+              [SUBSCRIPTION_META]: 7,
+              'io.modelcontextprotocol/serverInfo': { name: 'hive', version: '1' },
+            },
+          },
+        },
+      ]);
+      expect(abort).toHaveBeenCalledOnce();
+      expect(sink.destroyed).toBe(false);
+      expect(closes).toEqual([reason]);
+    });
+
+    it('a complete that cannot leave is torn down after the grace', async () => {
+      const { sink, handle } = build();
+      handle.close('shutdown');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sink.destroyed).toBe(true);
+    });
+
+    it.each([
+      'participant_revoked',
+      'participant_suspended',
+      'credential_expired',
+      'replay_failed',
+    ] as const)('%s cuts the stream without complete', (reason) => {
+      const { sink, handle, abort, closes } = build();
+
+      handle.close(reason);
+
+      expect(sink.messages()).toEqual([]);
+      expect(sink.destroyed).toBe(true);
+      expect(abort).toHaveBeenCalledOnce();
+      expect(closes).toEqual([reason]);
+    });
+
+    it('fires onClose once, for whatever ends first', () => {
+      const { sink, handle, closes } = build();
+      handle.close('shutdown');
+      handle.close('participant_revoked');
+      sink.emit('close');
+      expect(closes).toEqual(['shutdown']);
+    });
+
+    it('the response closing is client_closed', () => {
+      const { sink, closes } = build();
+      sink.emit('close');
+      expect(closes).toEqual(['client_closed']);
+    });
+
+    it('a response error is write_failed', () => {
+      const { sink, closes } = build();
+      sink.emit('error', new Error('EPIPE'));
+      expect(closes).toEqual(['write_failed']);
+    });
+
+    it('a callback registered on a closed handle fires at once with the same reason', () => {
+      const { handle } = build();
+      handle.close('evicted_lru');
+      const late = vi.fn();
+      handle.onClose(late);
+      expect(late).toHaveBeenCalledWith('evicted_lru');
+    });
+
+    it('a throwing listener does not stop the others', () => {
+      const { handle, closes } = build();
+      const second = vi.fn();
+      handle.onClose(() => {
+        throw new Error('boom');
+      });
+      handle.onClose(second);
+      handle.close('client_closed');
+      expect(closes).toEqual(['client_closed']);
+      expect(second).toHaveBeenCalledOnce();
+    });
+
+    it('stops writing keep-alives after closing', async () => {
+      const { sink, handle } = build();
+      handle.close('participant_revoked');
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_MS * 3);
+      expect(sink.frames).toEqual([]);
+    });
+  });
+
+  describe('credential expiry', () => {
+    it('closes at the expiry with credential_expired', async () => {
+      const { closes } = build({ expiresAt: new Date(Date.now() + 5000) });
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(closes).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(closes).toEqual(['credential_expired']);
+    });
+
+    it('survives a TTL past the 32-bit timer limit, re-arming in legs', async () => {
+      const dayMs = 24 * 60 * 60 * 1000;
+      const { handle, closes } = build({
+        expiresAt: new Date(Date.now() + 40 * dayMs),
+        keepAliveMs: 10 * dayMs,
+      });
+
+      await vi.advanceTimersByTimeAsync(39 * dayMs);
+      expect(closes).toEqual([]);
+      await vi.advanceTimersByTimeAsync(dayMs);
+      expect(closes).toEqual(['credential_expired']);
+      handle.close('client_closed');
+    });
+
+    it('an already expired credential closes right away', () => {
+      const { closes } = build({ expiresAt: new Date(Date.now() - 1) });
+      // onClose was registered after construction, so it fires on registration.
+      expect(closes).toEqual(['credential_expired']);
+    });
   });
 });

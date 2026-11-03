@@ -5,7 +5,9 @@ import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
 import type { CallerContext } from '../caller-context.js';
 import { isAuthError } from '../errors.js';
 import type { AuthError } from '../errors.js';
+import { noopCellsHook } from './cells-hook.js';
 import { createParticipantsWriteRepo } from './repository.write.js';
+import { createParticipantStateSignal, type ParticipantStateChange } from './state-signal.js';
 import { createParticipantsReadRepo } from './repository.js';
 import type { CellsRepoHook, DbExecutor } from './cells-hook.js';
 
@@ -245,6 +247,90 @@ describe('participants write repository', () => {
         expect((err as AuthError).code).toBe('INVALID_STATE_TRANSITION');
         expect((err as AuthError).subCode).toBe('capability_too_long');
       }
+    });
+  });
+
+  describe('state change signal', () => {
+    const build = () => {
+      const signal = createParticipantStateSignal();
+      const changes: ParticipantStateChange[] = [];
+      signal.onParticipantStateChanged((change) => changes.push(change));
+      return { repo: createParticipantsWriteRepo(world.db, { stateSignal: signal }), changes };
+    };
+    const stateOf = async (id: string): Promise<string | undefined> => {
+      const row = await world.db
+        .selectFrom('agents')
+        .select('state')
+        .where('id', '=', id)
+        .executeTakeFirst();
+      return row?.state;
+    };
+
+    it('suspendAgent then resumeAgent move the state and signal once each', async () => {
+      const { repo, changes } = build();
+      await repo.suspendAgent(world.workerAgentId, SYSTEM_CALLER);
+      expect(await stateOf(world.workerAgentId)).toBe('suspended');
+      await repo.suspendAgent(world.workerAgentId, SYSTEM_CALLER);
+
+      await repo.resumeAgent(world.workerAgentId, SYSTEM_CALLER);
+      expect(await stateOf(world.workerAgentId)).toBe('active');
+      await repo.resumeAgent(world.workerAgentId, SYSTEM_CALLER);
+
+      expect(changes).toEqual([
+        { participantId: world.workerAgentId, newState: 'suspended' },
+        { participantId: world.workerAgentId, newState: 'active' },
+      ]);
+    });
+
+    it('a revoked agent cannot be suspended or resumed', async () => {
+      const { repo, changes } = build();
+      await repo.revokeAgent(world.workerAgentId, SYSTEM_CALLER);
+      await repo.suspendAgent(world.workerAgentId, SYSTEM_CALLER);
+      await repo.resumeAgent(world.workerAgentId, SYSTEM_CALLER);
+      expect(await stateOf(world.workerAgentId)).toBe('revoked');
+      expect(changes).toEqual([{ participantId: world.workerAgentId, newState: 'revoked' }]);
+    });
+
+    it('suspendAgent and resumeAgent require an admin caller', async () => {
+      const { repo } = build();
+      const caller = { kind: 'identity', identity: { kind: 'worker' } } as unknown as CallerContext;
+      await expect(repo.suspendAgent(world.workerAgentId, caller)).rejects.toThrow();
+      await expect(repo.resumeAgent(world.workerAgentId, caller)).rejects.toThrow();
+    });
+
+    it('revokeAgent signals once, and not for an idempotent repeat', async () => {
+      const { repo, changes } = build();
+      await repo.revokeAgent(world.workerAgentId, SYSTEM_CALLER);
+      await repo.revokeAgent(world.workerAgentId, SYSTEM_CALLER);
+      expect(changes).toEqual([{ participantId: world.workerAgentId, newState: 'revoked' }]);
+    });
+
+    it('revokeHivekeeperWithCascade signals the keeper and each cascaded agent', async () => {
+      const { repo, changes } = build();
+      const result = await repo.revokeHivekeeperWithCascade(world.adminHivekeeperId, SYSTEM_CALLER);
+      expect(result.revokedAgentIds.length).toBeGreaterThan(0);
+      expect(changes).toEqual([
+        { participantId: world.adminHivekeeperId, newState: 'revoked' },
+        ...result.revokedAgentIds.map((participantId) => ({
+          participantId,
+          newState: 'revoked',
+        })),
+      ]);
+    });
+
+    it('a rolled back transition does not signal', async () => {
+      const signal = createParticipantStateSignal();
+      const changes: ParticipantStateChange[] = [];
+      signal.onParticipantStateChanged((change) => changes.push(change));
+      const repo = createParticipantsWriteRepo(world.db, {
+        stateSignal: signal,
+        cellsHook: {
+          ...noopCellsHook,
+          closeCell: () => Promise.reject(new Error('cell store down')),
+        },
+      });
+      await expect(repo.revokeAgent(world.workerAgentId, SYSTEM_CALLER)).rejects.toThrow();
+      expect(changes).toEqual([]);
     });
   });
 

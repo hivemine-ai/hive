@@ -10,7 +10,8 @@
 //      JWTClaimValidationFailed (iss/aud) → CREDENTIAL_INAUTHENTIC{iss_aud_mismatch}
 //      kid lookup miss                → CREDENTIAL_INAUTHENTIC{kid_unknown}
 //      JOSEAlgNotAllowed / JWSInvalid / JWTInvalid → CREDENTIAL_INAUTHENTIC{malformed}
-// 4. blocklist.contains(jti)?   → CREDENTIAL_REVOKED
+// 4. await blocklist.contains(jti)? → CREDENTIAL_REVOKED; a database failure propagates
+//    unmapped (fail closed, wire -32603), it is never reported as an auth failure
 // 5. participantsRepo.findById(sub)
 // 6. exists?                    → PARTICIPANT_NOT_FOUND
 // 7. state == 'active'?         → PARTICIPANT_NOT_ACTIVE{subCode: state}
@@ -48,8 +49,34 @@ export interface VerifierDeps {
   logger?: Logger;
 }
 
+export type ReverifyStreamResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason:
+        | 'credential_expired'
+        | 'credential_revoked'
+        | 'participant_not_found'
+        | 'participant_suspended'
+        | 'participant_revoked';
+    };
+
+export interface ReverifyStreamInput {
+  jti: UUIDv7;
+  participantId: UUIDv7;
+  credentialExpiresAt: Date;
+}
+
 export interface Verifier {
   verify(authorizationHeader: string | undefined): Promise<IdentityContext>;
+  /**
+   * Steps 4 to 7 for a stream that is already open: a stream never passes through
+   * `verify`, and this is the guarantee for changes made by another process. No Bearer
+   * and no signature check, only what the stream retained. A verdict is a return value
+   * in the order of the steps, cheapest first; a lookup failure throws, because an
+   * infrastructure failure is no reason to close a stream.
+   */
+  reverifyStream(input: ReverifyStreamInput): Promise<ReverifyStreamResult>;
 }
 
 export function createVerifier(deps: VerifierDeps): Verifier {
@@ -104,7 +131,7 @@ export function createVerifier(deps: VerifierDeps): Verifier {
       if (!jti || typeof jti !== 'string') {
         throw fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'malformed' }));
       }
-      if (deps.blocklist.contains(jti)) {
+      if (await deps.blocklist.contains(jti)) {
         throw fail(deps, new AuthError('CREDENTIAL_REVOKED'));
       }
 
@@ -148,6 +175,23 @@ export function createVerifier(deps: VerifierDeps): Verifier {
         );
       }
       return identity;
+    },
+
+    async reverifyStream({ jti, participantId, credentialExpiresAt }) {
+      // No clock tolerance: a stream is stricter than a new request.
+      if (Date.now() >= credentialExpiresAt.getTime()) {
+        return { ok: false, reason: 'credential_expired' };
+      }
+      if (await deps.blocklist.contains(jti)) {
+        return { ok: false, reason: 'credential_revoked' };
+      }
+      const participant = await deps.participantsRepo.findById(participantId);
+      if (!participant) return { ok: false, reason: 'participant_not_found' };
+      const state =
+        participant.kind === 'hivekeeper' ? participant.hivekeeper.state : participant.agent.state;
+      if (state === 'suspended') return { ok: false, reason: 'participant_suspended' };
+      if (state === 'revoked') return { ok: false, reason: 'participant_revoked' };
+      return { ok: true };
     },
   };
 }
@@ -200,6 +244,8 @@ function buildIdentityContext(
 ): IdentityContext {
   const issuedAt = typeof payload.iat === 'number' ? new Date(payload.iat * 1000) : new Date();
   const credentialJti = payload.jti as UUIDv7;
+  const credentialExpiresAt =
+    typeof payload.exp === 'number' ? { credentialExpiresAt: new Date(payload.exp * 1000) } : {};
 
   if (p.kind === 'hivekeeper') {
     const hk = p.hivekeeper;
@@ -207,6 +253,7 @@ function buildIdentityContext(
       issuedAt,
       credentialJti,
       credentialKid: kid,
+      ...credentialExpiresAt,
     };
     return {
       participantId: hk.id,
@@ -225,6 +272,7 @@ function buildIdentityContext(
     issuedAt,
     credentialJti,
     credentialKid: kid,
+    ...credentialExpiresAt,
     ...(Array.isArray(capsClaim) ? { capabilities: capsClaim as string[] } : {}),
   };
   // The IdentityContext.kind reflects what the JWT claimed (snapshot at issuance);
