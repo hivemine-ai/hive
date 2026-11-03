@@ -53,7 +53,7 @@ Hive serves MCP revision `2026-07-28` only. The revision is stateless: every req
 | `Accept`               | `application/json, text/event-stream`.                                                                                 |
 | `params._meta`         | `io.modelcontextprotocol/protocolVersion` (`2026-07-28`) and `io.modelcontextprotocol/clientCapabilities` (an object). |
 
-**Capabilities.** `server/discover` advertises exactly `tools` and `resources.subscribe`. Hive does not serve `prompts` and no longer declares `experimental['claude/channel']`. `tools/list` is cacheable (`ttlMs: 60000`, `cacheScope: "public"`); `resources/list` and `resources/read` answer per caller and are never cached (`ttlMs: 0`, `cacheScope: "private"`).
+**Capabilities.** `server/discover` advertises exactly `tools` and `resources.subscribe`. Hive does not serve `prompts` and no longer declares `experimental['claude/channel']`. `tools/list` is cacheable (`ttlMs: 60000`, `cacheScope: "public"`); `resources/templates/list` returns the single mailbox template `hive://cells/{cellId}` and is cacheable like `tools/list` (`ttlMs: 60000`, `cacheScope: "public"`); `resources/list` and `resources/read` answer per caller and are never cached (`ttlMs: 0`, `cacheScope: "private"`).
 
 **What is rejected:**
 

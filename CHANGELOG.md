@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `resources/templates/list` is implemented (PRY-085). It returns the mailbox template `hive://cells/{cellId}` (name, title, description and `mimeType` match `resources/list`) instead of `-32601`, cacheable with `ttlMs: 60000`, `cacheScope: "public"`. Reading still only works for the caller's own cell.
 - **MCP conformance in CI** (PRY-085). A new `conformance` job in `pr.yml` runs the official `@modelcontextprotocol/conformance` suite (pinned to `0.2.0-alpha.12`, requirement set `2026-07-28`) against a throwaway server. Known failures live in `deployment/conformance/baseline.yml`; see [MCP conformance](./docs/mcp-conformance.md). Run it locally with `deployment/conformance/run.sh`.
 
 ### Fixed

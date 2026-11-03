@@ -18,6 +18,12 @@ export interface MailboxResourceDeps {
   logger: Logger;
 }
 
+export const MAILBOX_URI_TEMPLATE = 'hive://cells/{cellId}';
+const MAILBOX_NAME = 'mailbox';
+const MAILBOX_TITLE = 'Mailbox';
+const MAILBOX_DESCRIPTION = 'Unread count and senders of the caller mailbox.';
+const MAILBOX_MIME_TYPE = 'application/json';
+
 export function mailboxUri(cellId: string): string {
   return `hive://cells/${cellId}`;
 }
@@ -40,10 +46,10 @@ export function registerMailboxResources(server: McpServer, deps: MailboxResourc
         resources: [
           {
             uri: mailboxUri(cellId),
-            name: 'mailbox',
-            title: 'Mailbox',
-            description: 'Unread count and senders of the caller mailbox.',
-            mimeType: 'application/json',
+            name: MAILBOX_NAME,
+            title: MAILBOX_TITLE,
+            description: MAILBOX_DESCRIPTION,
+            mimeType: MAILBOX_MIME_TYPE,
           },
         ],
       };
@@ -51,6 +57,20 @@ export function registerMailboxResources(server: McpServer, deps: MailboxResourc
       throw toProtocolError(err, deps.logger);
     }
   });
+
+  // The template is the same for every caller; only the cell id it expands to is private,
+  // and resources/read refuses any id that is not the caller's own.
+  server.server.setRequestHandler('resources/templates/list', () => ({
+    resourceTemplates: [
+      {
+        uriTemplate: MAILBOX_URI_TEMPLATE,
+        name: MAILBOX_NAME,
+        title: MAILBOX_TITLE,
+        description: MAILBOX_DESCRIPTION,
+        mimeType: MAILBOX_MIME_TYPE,
+      },
+    ],
+  }));
 
   server.server.setRequestHandler('resources/read', async (request, handlerCtx) => {
     try {
