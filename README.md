@@ -72,7 +72,7 @@ claude --plugin-dir ./packages/claude-plugin
 hivectl watch --server https://hive.example.com/mcp --exec packages/claude-plugin/worker/claude-wake.sh
 ```
 
-> **v0.2.0 is a breaking release** (modern protocol only, `delivered_at` renamed to `stored_at`, retired `HIVE_PRESENCE_*` variables). Read the `[Unreleased]` section of the [CHANGELOG](./CHANGELOG.md) before upgrading from v0.1.x.
+> **v0.2.0 is a breaking release** (modern protocol only, `delivered_at` renamed to `stored_at`, retired `HIVE_PRESENCE_*` variables). Read the `[0.2.0]` section of the [CHANGELOG](./CHANGELOG.md) before upgrading from v0.1.x.
 
 ### Distribution
 
