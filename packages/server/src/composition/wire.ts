@@ -100,6 +100,11 @@ export interface WireConfig {
   listenKeepAliveIntervalMs?: number;
   /** From HIVE_LISTEN_STALL_TIMEOUT_MS. Default 30 s (provisional). */
   listenStallTimeoutMs?: number;
+  /**
+   * From HIVE_LISTEN_LEASE_MS. Default 60 s. Lease granted to a listen that asks for one
+   * (`Hive-Listen-Lease`). 0 disables leases. Must be above the keep-alive interval.
+   */
+  listenLeaseMs?: number;
   /** From HIVE_MCP_REVERIFY_INTERVAL_SECONDS. Default 60 (provisional). 0 disables it. */
   reverifyIntervalSeconds?: number;
   /** From HIVE_CELL_MAX_UNREAD_PER_SENDER. Default 500 (provisional). */
@@ -165,6 +170,7 @@ export function resolveWireConfigFromEnv(
       parseCsvEnv(env['HIVE_MCP_ALLOWED_HOSTS']).map((host) => host.toLowerCase()),
     listenKeepAliveIntervalMs: resolveKeepAliveIntervalMs(env, overrides),
     listenStallTimeoutMs: resolveStallTimeoutMs(env, overrides),
+    listenLeaseMs: resolveLeaseMs(env, overrides),
     reverifyIntervalSeconds:
       overrides.reverifyIntervalSeconds ??
       parseIntEnv(env['HIVE_MCP_REVERIFY_INTERVAL_SECONDS'], 60, {
@@ -222,6 +228,33 @@ function resolveStallTimeoutMs(env: NodeJS.ProcessEnv, overrides: WireConfig): n
     );
   }
   return stallMs;
+}
+
+const MAX_LEASE_MS = 24 * 60 * 60 * 1000;
+// The client renews every quarter of the lease, so three renewals can be lost before it
+// runs out. It never renews faster than every 100 ms, hence the floor.
+const MIN_LEASE_MS = 400;
+
+// The lease must also outlast a keep-alive period, or an idle but healthy stream would
+// look the same as a dead one to anyone reading the logs. Env and override values go
+// through the same checks.
+function resolveLeaseMs(env: NodeJS.ProcessEnv, overrides: WireConfig): number {
+  const leaseMs =
+    overrides.listenLeaseMs ??
+    parseIntEnv(env['HIVE_LISTEN_LEASE_MS'], 60_000, { name: 'HIVE_LISTEN_LEASE_MS' });
+  if (leaseMs === 0) return 0;
+  if (!Number.isInteger(leaseMs) || leaseMs < MIN_LEASE_MS || leaseMs > MAX_LEASE_MS) {
+    throw new Error(
+      `HIVE_LISTEN_LEASE_MS must be an integer of 0 (disabled) or between ${String(MIN_LEASE_MS)} and ${String(MAX_LEASE_MS)}, got ${String(leaseMs)}`,
+    );
+  }
+  const keepAliveMs = resolveKeepAliveIntervalMs(env, overrides);
+  if (leaseMs <= keepAliveMs) {
+    throw new Error(
+      `HIVE_LISTEN_LEASE_MS must be above HIVE_LISTEN_KEEPALIVE_INTERVAL_MS (${String(keepAliveMs)}), got ${String(leaseMs)}`,
+    );
+  }
+  return leaseMs;
 }
 
 function parseCsvEnv(raw: string | undefined): string[] {
@@ -355,6 +388,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     keepAliveIntervalMs: cfg.listenKeepAliveIntervalMs,
     stallTimeoutMs: cfg.listenStallTimeoutMs,
     reverifyIntervalSeconds: cfg.reverifyIntervalSeconds,
+    leaseMs: cfg.listenLeaseMs > 0 ? cfg.listenLeaseMs : null,
   });
 
   // 8. HTTP host.

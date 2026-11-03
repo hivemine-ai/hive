@@ -7,8 +7,10 @@
 // bytes still undrained. Frames match the router's, so a client cannot tell them apart.
 //
 // A dead path shows up in two ways: a failed write (`write_failed`), or bytes that stop
-// draining (`stalled`). Nothing here can see a silent partition while the kernel still
-// accepts the bytes; that one ends when TCP gives up.
+// draining (`stalled`). Neither sees a silent partition while the kernel still accepts
+// the bytes. A client that asked for a lease covers that case: it renews the lease with
+// a request of its own, and a lease that runs out ends the stream (`lease_expired`).
+// Without a lease, a silent partition ends only when TCP gives up.
 
 import { SERVER_INFO_META_KEY, SUBSCRIPTION_ID_META_KEY } from '@modelcontextprotocol/server';
 import { v7 as uuidv7 } from 'uuid';
@@ -46,10 +48,21 @@ export interface StreamHandleDeps {
   keepAliveIntervalMs: number;
   stallTimeoutMs: number;
   logger: Logger;
+  /** Absent: the client asked for no lease and the stream never expires for silence. */
+  leaseMs?: number;
+}
+
+export interface StreamHandle extends SubscriberHandle {
+  /** Restarts the lease. False when the stream has no lease or is already closed. */
+  renewLease(): boolean;
 }
 
 /** Forced closes the client must see as a clean end, so it reconnects. */
-const COMPLETE_REASONS: ReadonlySet<StreamCloseReason> = new Set(['evicted_lru', 'shutdown']);
+const COMPLETE_REASONS: ReadonlySet<StreamCloseReason> = new Set([
+  'evicted_lru',
+  'shutdown',
+  'lease_expired',
+]);
 
 /** Grace for the `complete` frame to leave before the socket is torn down anyway. */
 const COMPLETE_FLUSH_MS = 1000;
@@ -87,7 +100,7 @@ export function toEnvelope(
   };
 }
 
-export function createStreamHandle(deps: StreamHandleDeps): SubscriberHandle {
+export function createStreamHandle(deps: StreamHandleDeps): StreamHandle {
   const { callerContext, sink, subscriptionId, logger } = deps;
   const connectionId: UUIDv7 = uuidv7();
   const closeListeners: Array<(reason: StreamCloseReason) => void> = [];
@@ -97,6 +110,7 @@ export function createStreamHandle(deps: StreamHandleDeps): SubscriberHandle {
   let stallTimer: NodeJS.Timeout | undefined;
   let expiryTimer: NodeJS.Timeout | undefined;
   let flushTimer: NodeJS.Timeout | undefined;
+  let leaseTimer: NodeJS.Timeout | undefined;
 
   function cancelStall(): void {
     clearTimeout(stallTimer);
@@ -138,6 +152,7 @@ export function createStreamHandle(deps: StreamHandleDeps): SubscriberHandle {
   function release(): void {
     clearInterval(keepAliveTimer);
     clearTimeout(expiryTimer);
+    clearTimeout(leaseTimer);
     cancelStall();
     sink.off('drain', onDrain);
     const err = new Error('stream closed');
@@ -235,6 +250,23 @@ export function createStreamHandle(deps: StreamHandleDeps): SubscriberHandle {
     expiryTimer.unref();
   }
 
+  function armLease(leaseMs: number): void {
+    clearTimeout(leaseTimer);
+    leaseTimer = setTimeout(() => {
+      logger.warn(
+        {
+          event: 'mcp_listen_lease_expired',
+          connectionId,
+          participantId: callerContext.participantId,
+          leaseMs,
+        },
+        'listen lease expired without a renewal',
+      );
+      terminate('lease_expired');
+    }, leaseMs);
+    leaseTimer.unref();
+  }
+
   sink.on('drain', onDrain);
   sink.on('close', onSinkClose);
   sink.on('error', onSinkError);
@@ -246,6 +278,7 @@ export function createStreamHandle(deps: StreamHandleDeps): SubscriberHandle {
 
   const expiresAt = callerContext.snapshot.credentialExpiresAt;
   if (expiresAt !== undefined) armExpiry(expiresAt);
+  if (deps.leaseMs !== undefined && closeReason === undefined) armLease(deps.leaseMs);
 
   return {
     connectionId,
@@ -264,6 +297,12 @@ export function createStreamHandle(deps: StreamHandleDeps): SubscriberHandle {
 
     close(reason) {
       terminate(reason);
+    },
+
+    renewLease() {
+      if (deps.leaseMs === undefined || closeReason !== undefined) return false;
+      armLease(deps.leaseMs);
+      return true;
     },
 
     onClose(callback) {

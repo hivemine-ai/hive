@@ -9,6 +9,8 @@ import {
 } from '@modelcontextprotocol/client';
 
 import { ListenError } from './errors.js';
+import { leaseFetch } from './lease-fetch.js';
+import type { Lease } from './lease-fetch.js';
 import { livenessFetch } from './liveness-fetch.js';
 import type { FetchLike } from './liveness-fetch.js';
 
@@ -28,6 +30,8 @@ export interface SdkClientOptions {
   fetch?: FetchLike;
   /** Called for every chunk of bytes read from a streaming response. */
   onBytes?: () => void;
+  /** Asks for a listen lease under this key and records what the server grants. */
+  lease?: Lease;
 }
 
 /** Maps any SDK failure to a `ListenError` without leaking request details. */
@@ -61,7 +65,8 @@ export function toListenError(err: unknown): ListenError {
 
 /** Builds and connects a client pinned to the 2026-07-28 revision. */
 export async function connectClient(options: SdkClientOptions): Promise<Client> {
-  const base: FetchLike = options.fetch ?? ((input, init) => fetch(input, init));
+  const plain: FetchLike = options.fetch ?? ((input, init) => fetch(input, init));
+  const base = options.lease ? leaseFetch(plain, options.lease) : plain;
   const transport = new StreamableHTTPClientTransport(new URL(options.url), {
     requestInit: { headers: { authorization: `Bearer ${options.credential}` } },
     fetch: options.onBytes ? livenessFetch(base, options.onBytes) : base,

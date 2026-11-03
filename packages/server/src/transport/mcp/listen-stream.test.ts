@@ -25,6 +25,10 @@ class FakeRaw extends EventEmitter {
   writableEnded = false;
   destroyed = false;
   socket = { setKeepAlive: vi.fn() };
+  headers: Record<string, string> = {};
+  setHeader(name: string, value: string): void {
+    this.headers[name.toLowerCase()] = value;
+  }
   write(_chunk: string, callback: () => void): boolean {
     callback();
     return true;
@@ -77,16 +81,22 @@ function build(overrides: Partial<ListenStreamsDeps> = {}) {
     keepAliveIntervalMs: 60_000,
     stallTimeoutMs: 30_000,
     reverifyIntervalSeconds: 0,
+    leaseMs: 60_000,
     ...overrides,
   });
   return { streams, subscribe, log };
 }
 
-function open(streams: ReturnType<typeof build>['streams'], uris: unknown = [OWN_URI]) {
+function open(
+  streams: ReturnType<typeof build>['streams'],
+  uris: unknown = [OWN_URI],
+  options: { leaseKey?: string; identity?: IdentityContext } = {},
+) {
   const raw = new FakeRaw();
   const binding = streams.onResponse({
     body: listenBody(uris),
-    identity: IDENTITY,
+    identity: options.identity ?? IDENTITY,
+    ...(options.leaseKey !== undefined && { leaseKey: options.leaseKey }),
     requestId: '01900000-0000-7000-8000-0000000000bb',
     response: sseResponse(),
     raw: raw as unknown as ServerResponse,
@@ -390,6 +400,129 @@ describe('reverifyOpenStreams', () => {
     streams.start();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(reverifyStream).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+});
+
+describe('listen lease', () => {
+  const KEY = 'k'.repeat(22);
+  const OTHER = {
+    participantId: '01900000-0000-7000-8000-0000000000ee',
+    snapshot: { credentialJti: '01900000-0000-7000-8000-0000000000ef' },
+  } as unknown as IdentityContext;
+
+  it('a listen with a lease key gets the lease length back and expires without beats', () => {
+    vi.useFakeTimers();
+    const { streams, log } = build({ leaseMs: 600 });
+    const { raw } = open(streams, [OWN_URI], { leaseKey: KEY });
+
+    expect(raw.headers['hive-listen-lease-ms']).toBe('600');
+    expect(log.entries[0]).toMatchObject({ event: 'mcp_listen_opened', leaseMs: 600 });
+    vi.advanceTimersByTime(600);
+
+    expect(log.entries).toContainEqual(
+      expect.objectContaining({ event: 'mcp_listen_closed', closeReason: 'lease_expired' }),
+    );
+    expect(streams.__openCount()).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it('a listen without the header has no lease and never expires', () => {
+    vi.useFakeTimers();
+    const { streams, log } = build({ leaseMs: 600, keepAliveIntervalMs: 24 * 60 * 60 * 1000 });
+    const { raw } = open(streams);
+
+    expect(raw.headers['hive-listen-lease-ms']).toBeUndefined();
+    expect(log.entries[0]).toMatchObject({ event: 'mcp_listen_opened', leaseMs: null });
+    vi.advanceTimersByTime(7 * 24 * 60 * 60 * 1000);
+
+    expect(streams.__openCount()).toBe(1);
+    raw.emit('close');
+    vi.useRealTimers();
+  });
+
+  it('a renewal by the same participant with the same key keeps the stream open', () => {
+    vi.useFakeTimers();
+    const { streams } = build({ leaseMs: 600 });
+    const { raw } = open(streams, [OWN_URI], { leaseKey: KEY });
+
+    for (let beat = 0; beat < 5; beat += 1) {
+      vi.advanceTimersByTime(500);
+      expect(streams.renewLease({ key: KEY, identity: IDENTITY })).toBe(true);
+    }
+
+    expect(streams.__openCount()).toBe(1);
+    raw.emit('close');
+    vi.useRealTimers();
+  });
+
+  it('another participant carrying the same key cannot renew it', () => {
+    vi.useFakeTimers();
+    const { streams, log } = build({ leaseMs: 600 });
+    open(streams, [OWN_URI], { leaseKey: KEY });
+
+    vi.advanceTimersByTime(500);
+    expect(streams.renewLease({ key: KEY, identity: OTHER })).toBe(false);
+    vi.advanceTimersByTime(100);
+
+    expect(log.entries).toContainEqual(
+      expect.objectContaining({ event: 'mcp_listen_closed', closeReason: 'lease_expired' }),
+    );
+    vi.useRealTimers();
+  });
+
+  it('two participants may use the same key without touching each other', () => {
+    vi.useFakeTimers();
+    const { streams } = build({ leaseMs: 600 });
+    const mine = open(streams, [], { leaseKey: KEY });
+    open(streams, [], { leaseKey: KEY, identity: OTHER });
+
+    vi.advanceTimersByTime(500);
+    expect(streams.renewLease({ key: KEY, identity: OTHER })).toBe(true);
+    vi.advanceTimersByTime(100);
+
+    expect(streams.__openCount()).toBe(1);
+    expect(mine.raw.destroyed).toBe(false);
+    streams.stop();
+    vi.useRealTimers();
+  });
+
+  it('an unknown key, or the key of a closed stream, renews nothing', () => {
+    const { streams } = build({ leaseMs: 600 });
+    expect(streams.renewLease({ key: KEY, identity: IDENTITY })).toBe(false);
+
+    const { raw } = open(streams, [OWN_URI], { leaseKey: KEY });
+    raw.emit('close');
+
+    expect(streams.renewLease({ key: KEY, identity: IDENTITY })).toBe(false);
+  });
+
+  it.each([
+    ['too short', 'short'],
+    ['too long', 'k'.repeat(129)],
+    ['outside the base64url alphabet', `${'k'.repeat(21)} `],
+  ])('a malformed key (%s) is ignored, as if absent', (_label, key) => {
+    vi.useFakeTimers();
+    const { streams } = build({ leaseMs: 600 });
+    const { raw } = open(streams, [OWN_URI], { leaseKey: key });
+
+    expect(raw.headers['hive-listen-lease-ms']).toBeUndefined();
+    vi.advanceTimersByTime(6000);
+    expect(streams.__openCount()).toBe(1);
+    raw.emit('close');
+    vi.useRealTimers();
+  });
+
+  it('a disabled lease ignores the header and answers no lease length', () => {
+    vi.useFakeTimers();
+    const { streams } = build({ leaseMs: null });
+    const { raw } = open(streams, [OWN_URI], { leaseKey: KEY });
+
+    expect(raw.headers['hive-listen-lease-ms']).toBeUndefined();
+    vi.advanceTimersByTime(6000);
+    expect(streams.__openCount()).toBe(1);
+    expect(streams.renewLease({ key: KEY, identity: IDENTITY })).toBe(false);
+    raw.emit('close');
     vi.useRealTimers();
   });
 });

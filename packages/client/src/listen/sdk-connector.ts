@@ -1,9 +1,14 @@
 // The real `connect` used by the listen loop: opens one `subscriptions/listen`
 // stream on the caller's own mailbox, validates every event and watches for
 // silence. It calls no tool: the mailbox URI comes from `resources/list`.
+//
+// Every connection asks for a lease. If the server grants one, a renewal goes out
+// every quarter of it until the stream ends. A failed renewal is ignored: the
+// silence detector still decides when to reconnect.
 
 import { ListenError } from './errors.js';
 import { parseWaggleMeta } from './event.js';
+import { beatIntervalMs, createLease } from './lease-fetch.js';
 import type { CloseReason, ConnectHandlers, ListenConnection } from './listen-loop.js';
 import { closeClient, connectClient, settleWithin, toListenError } from './sdk-client.js';
 import type { SdkClientOptions } from './sdk-client.js';
@@ -20,8 +25,10 @@ export function createSdkConnector(
 ): (handlers: ConnectHandlers, signal: AbortSignal) => Promise<ListenConnection> {
   return async (handlers, signal) => {
     let lastByteAt = Date.now();
+    const lease = createLease();
     const client = await connectClient({
       ...options,
+      lease,
       onBytes: () => {
         lastByteAt = Date.now();
       },
@@ -48,6 +55,20 @@ export function createSdkConnector(
       const subscription = await client.listen({ resourceSubscriptions: [mailboxUri] }, { signal });
       lastByteAt = Date.now();
 
+      const leaseMs = lease.leaseMs;
+      let beat: NodeJS.Timeout | undefined;
+      if (leaseMs !== null) {
+        const everyMs = beatIntervalMs(leaseMs);
+        beat = setInterval(() => {
+          client.discover({ timeout: everyMs }).catch(() => undefined);
+        }, everyMs);
+        beat.unref();
+      }
+      const stopBeat = (): void => {
+        clearInterval(beat);
+        beat = undefined;
+      };
+
       let timer: NodeJS.Timeout | undefined;
       const silence = new Promise<CloseReason>((resolve) => {
         timer = setInterval(
@@ -61,12 +82,15 @@ export function createSdkConnector(
       const closed: Promise<CloseReason> = Promise.race([subscription.closed, silence]).finally(
         () => {
           if (timer) clearInterval(timer);
+          stopBeat();
         },
       );
       return {
         closed,
+        leaseMs,
         close: async () => {
           if (timer) clearInterval(timer);
+          stopBeat();
           await settleWithin(subscription.close());
           await closeClient(client);
         },

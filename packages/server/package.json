@@ -35,6 +35,7 @@
     "zod": "^4.2.0"
   },
   "devDependencies": {
+    "@hive/client": "workspace:*",
     "@modelcontextprotocol/client": "2.4.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/pg": "^8.11.10",
