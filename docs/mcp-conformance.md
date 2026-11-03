@@ -7,6 +7,8 @@ Hive runs the official MCP conformance suite, [`@modelcontextprotocol/conformanc
 
 ## Run it locally
 
+The suite needs Node 22 or newer.
+
 ```bash
 pnpm install && pnpm -r build
 deployment/conformance/run.sh            # exit 0 when every failure is in the baseline
