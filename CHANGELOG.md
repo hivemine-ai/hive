@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - The server logs a one-time `allowed_hosts_empty` warning at startup when `HIVE_MCP_ALLOWED_HOSTS` is empty or unset, explaining that the `Host` header is not validated and how to set the variable (PRY-085). Behaviour is unchanged.
+- **Expired credential revocations are purged** (PRY-085). `credential_revocations` was read on every verification but never trimmed. The server now deletes, at start and then every `HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS` (default `3600`; `0` disables), the rows whose credential expired more than the clock tolerance ago, in batches of 1000, on SQLite and Postgres. Revocations of still-valid credentials are never touched. Each pass logs `auth_revocations_purged` with the row count. See [Authentication](./docs/auth.md).
 
 ## [0.2.0] - 2026-11-03
 
