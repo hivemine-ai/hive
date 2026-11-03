@@ -60,6 +60,10 @@ v0.2.0. Hive moves to MCP revision `2026-07-28` and gains stream-bound presence 
 
 - The boot banner reported the wrong listening port when no override was set — `bind 127.0.0.1:7700` while the server was actually bound to `8443` (PRY-071, post-v0.1.9 polish). The CLI banner used a stale literal `'7700'` as the fallback for `HIVE_MCP_HTTP_PORT`, while the wire and the http-host both default to `8443`. The default port is now lifted to a single shared constant `HIVE_DEFAULT_HTTP_PORT` in `@hive/shared` (sibling pattern to `HIVE_VERSION`), so the banner and the server bind read the same value. Same class of bug previously fixed for the version literal in PRY-068. The fallback for `HIVE_MCP_HTTP_HOST` in the banner also lifts to `HIVE_DEFAULT_HTTP_HOST` for symmetry — kept distinct from the wire's `'0.0.0.0'` programmatic default by design (the CLI value is the operator-facing safe loopback default; bind-all still requires the explicit `hivectl config network bind-all` opt-in). No behavior change for operators who already set `HIVE_MCP_HTTP_PORT` or `--port`.
 
+### CI
+
+- **npm publishing now uses trusted publishing (OIDC)** (PRY-082): `release.yml` no longer reads `NPM_TOKEN`; the publish jobs run with `id-token: write`, npm >= 11.5.1, `npm publish --provenance`, and the `npm-publish` GitHub environment (only on real publishes, not on `dry_run`). The `NPM_TOKEN` secret can be deleted. Trusted publishers must be configured on npmjs.com for the four `@hivemine/hivectl*` packages (repo `hivemine-ai/hive`, workflow `release.yml`, environment `npm-publish`).
+
 ## [0.1.9] - 2026-05-07
 
 ### Fixed (regression introduced in v0.1.6 by PRY-068)
