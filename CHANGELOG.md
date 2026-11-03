@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **MCP conformance in CI** (PRY-085). A new `conformance` job in `pr.yml` runs the official `@modelcontextprotocol/conformance` suite (pinned to `0.2.0-alpha.12`, requirement set `2026-07-28`) against a throwaway server. Known failures live in `deployment/conformance/baseline.yml`; see [MCP conformance](./docs/mcp-conformance.md). Run it locally with `deployment/conformance/run.sh`.
 
+### Documentation
+
+- **Correction to the v0.2.0 known limitation on macOS and the local network** (PRY-084). The single-binary `hivectl` is not at fault: an unmodified ad-hoc-signed binary reaches LAN servers when launched from an app that has the macOS Local Network permission. On macOS 15+, connections to local-network addresses depend on the permission of the app that launches `hivectl` (Terminal, an IDE, the Claude Code desktop app). If `hivectl` or `hivectl watch` fails with `fetch failed` against a LAN server, enable that app in System Settings > Privacy & Security > Local Network. See [hivectl watch](./docs/hivectl-watch.md).
+
 ### Fixed
 
 - GitHub release assets are now self-contained `hivectl-<platform>.tar.gz` archives (binary + bundled `better-sqlite3` + `native/`, same layout as the npm platform package) plus `SHA256SUMS`. The bare `hivectl-<platform>` binaries attached to v0.2.0 failed with `Cannot find module 'better-sqlite3'` when run standalone (PRY-085).
