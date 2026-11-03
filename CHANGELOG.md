@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### CI
+
+- **npm publishing now uses trusted publishing (OIDC)** (PRY-082): `release.yml` no longer reads `NPM_TOKEN`; the publish jobs run with `id-token: write`, npm >= 11.5.1, `npm publish --provenance`, and the `npm-publish` GitHub environment (only on real publishes, not on `dry_run`). The `NPM_TOKEN` secret can be deleted. Trusted publishers must be configured on npmjs.com for the four `@hivemine/hivectl*` packages (repo `hivemine-ai/hive`, workflow `release.yml`, environment `npm-publish`).
+
 ## [0.2.0] - 2026-11-03
 
 v0.2.0. Hive moves to MCP revision `2026-07-28` and gains stream-bound presence and `hivectl watch`. **This release has breaking changes; read the first section before upgrading.** Operators of v0.1.x should also read [Upgrading from v0.1.x](./deployment/README.md#upgrading-from-v01x).

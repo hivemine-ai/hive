@@ -207,6 +207,10 @@ jobs:
     name: Publish binary packages
     needs: [prepare, build]
     runs-on: ubuntu-latest
+    environment: ${{ needs.prepare.outputs.dry_run == 'false' && 'npm-publish' || '' }}
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: true
       max-parallel: 4
@@ -232,7 +236,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          registry-url: https://registry.npmjs.org/
+
+      - name: Install npm >= 11.5.1 (required for trusted publishing)
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - name: Preflight OIDC token availability
+        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
+        run: |
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+            echo "FAIL: ACTIONS_ID_TOKEN_REQUEST_URL is empty; the job lacks 'id-token: write'." >&2
+            echo "      npm trusted publishing (OIDC) cannot work without it." >&2
+            exit 1
+          fi
+          echo "OK: OIDC token endpoint available"
 
       - name: Download SEA binary
         uses: actions/download-artifact@v4
@@ -677,20 +695,16 @@ jobs:
 
       - name: Publish to npm
         if: ${{ needs.prepare.outputs.dry_run == 'false' }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           PLATFORM_NAME="${{ matrix.platform }}-${{ matrix.arch }}"
           cd "staging/@hivemine/hivectl-${PLATFORM_NAME}"
-          npm publish --access public
+          npm publish --access public --provenance
 
       - name: Validate publish in dry-run mode (Test layer 3)
         if: ${{ needs.prepare.outputs.dry_run == 'true' }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          # `npm publish --dry-run` validates auth + tarball + local hooks
-          # WITHOUT uploading to the registry. Replaces the previous echo-only
+          # `npm publish --dry-run` validates tarball + local hooks (NOT the
+          # OIDC exchange, which needs a real publish) WITHOUT uploading to the registry. Replaces the previous echo-only
           # summary step that left the entire publish path untested in
           # dry-run mode (the blind spot that allowed the bundleDependencies
           # bug to ship undetected across PRY-060 → PRY-064).
@@ -703,13 +717,31 @@ jobs:
     name: Publish wrapper package
     needs: [prepare, publish-binaries]
     runs-on: ubuntu-latest
+    environment: ${{ needs.prepare.outputs.dry_run == 'false' && 'npm-publish' || '' }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          registry-url: https://registry.npmjs.org/
+
+      - name: Install npm >= 11.5.1 (required for trusted publishing)
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - name: Preflight OIDC token availability
+        if: ${{ needs.prepare.outputs.dry_run == 'false' }}
+        run: |
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+            echo "FAIL: ACTIONS_ID_TOKEN_REQUEST_URL is empty; the job lacks 'id-token: write'." >&2
+            echo "      npm trusted publishing (OIDC) cannot work without it." >&2
+            exit 1
+          fi
+          echo "OK: OIDC token endpoint available"
 
       - name: Pin wrapper version + optionalDependencies
         run: |
@@ -770,16 +802,12 @@ jobs:
 
       - name: Publish to npm
         if: ${{ needs.prepare.outputs.dry_run == 'false' }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd npm/hivectl
-          npm publish --access public
+          npm publish --access public --provenance
 
       - name: Validate publish in dry-run mode (Test layer 3)
         if: ${{ needs.prepare.outputs.dry_run == 'true' }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           # Same dry-run real-publish-path validation as publish-binaries
           # Test layer 3; applied to the wrapper package. Replaces the
