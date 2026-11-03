@@ -630,6 +630,53 @@ jobs:
           rm -rf "${TEST_DIR}"
           rm -f "${PKG_DIR}/${TARBALL}"
 
+      - name: Build self-contained release archive (PRY-085)
+        shell: bash
+        env:
+          PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
+        run: |
+          # The bare SEA binary cannot run standalone: it resolves
+          # better-sqlite3 (+ bindings, file-uri-to-path) through
+          # createRequire from <binary>/../node_modules, and needs the
+          # native/ backup binding. Ship the same layout as the npm platform
+          # package, as hivectl-<platform>-<arch>.tar.gz with a single
+          # top-level directory. Built from the staging dir BEFORE any npm
+          # pack/install so it holds exactly what npm publishes.
+          mkdir -p release-archives
+          tar -czf "release-archives/hivectl-${PLATFORM_NAME}.tar.gz" \
+            -C "${GITHUB_WORKSPACE}/staging/@hivemine" "hivectl-${PLATFORM_NAME}"
+          ls -la release-archives
+          tar -tzf "release-archives/hivectl-${PLATFORM_NAME}.tar.gz" | grep -E "bin/hivectl$|native/better_sqlite3.node$|node_modules/better-sqlite3/build/Release/better_sqlite3.node$|node_modules/bindings/|node_modules/file-uri-to-path/" | sort -u | head -20
+
+      - name: Smoke-test release archive (extract + hivectl --version)
+        if: ${{ matrix.os_filter == 'linux' && matrix.cpu_filter == 'x64' }}
+        shell: bash
+        env:
+          PLATFORM_NAME: ${{ matrix.platform }}-${{ matrix.arch }}
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          # Extract into a fresh temp dir (no workspace node_modules in the
+          # resolution chain) and run the binary exactly as a user would.
+          TEST_DIR=$(mktemp -d)
+          tar -xzf "release-archives/hivectl-${PLATFORM_NAME}.tar.gz" -C "${TEST_DIR}"
+          OUT=$("${TEST_DIR}/hivectl-${PLATFORM_NAME}/bin/hivectl" --version) || {
+            echo "FAIL: extracted archive binary did not run"; exit 1; }
+          BINARY_VERSION=$(printf '%s\n' "${OUT}" | tail -1 | tr -d '[:space:]')
+          if [ "${BINARY_VERSION}" != "${EXPECTED_VERSION}" ]; then
+            echo "FAIL: archive hivectl --version returned '${BINARY_VERSION}', expected '${EXPECTED_VERSION}'"
+            exit 1
+          fi
+          echo "OK: extracted archive runs standalone: ${BINARY_VERSION}"
+          rm -rf "${TEST_DIR}"
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archive-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release-archives/hivectl-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Verify version is publishable (Test layer 2 — burn check)
         if: ${{ needs.prepare.outputs.dry_run == 'false' }}
         shell: bash
@@ -831,15 +878,14 @@ jobs:
         with:
           path: artifacts/
 
-      - name: Rename binaries for release assets
+      - name: Collect release archives and checksums
         shell: bash
         run: |
           mkdir -p release-assets
-          for dir in artifacts/hivectl-*; do
-            platform_arch="${dir#artifacts/hivectl-}"
-            cp "${dir}/hivectl" "release-assets/hivectl-${platform_arch}"
-            chmod +x "release-assets/hivectl-${platform_arch}"
+          for dir in artifacts/release-archive-*; do
+            cp "${dir}"/hivectl-*.tar.gz release-assets/
           done
+          (cd release-assets && sha256sum hivectl-*.tar.gz > SHA256SUMS && cat SHA256SUMS)
           ls -la release-assets
 
       # workflow_dispatch path: no GitHub release exists yet — create it with
