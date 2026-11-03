@@ -281,7 +281,7 @@ TLS termination is the operator's responsibility — run the server behind nginx
 The revision requires the server to validate `Origin`, as a defense against DNS rebinding on a loopback bind. Hive checks it before the Bearer token:
 
 - `HIVE_MCP_ALLOWED_ORIGINS` (comma-separated, default empty): an allow-list of `Origin` values. A request with **no** `Origin` header (every non-browser client, including Claude Code, `hivectl watch` and `curl`) always passes; a request with an `Origin` that is not on the list gets HTTP 403. With the default, no browser origin is allowed.
-- `HIVE_MCP_ALLOWED_HOSTS` (comma-separated, default empty): an allow-list of `Host` values, compared case-insensitively. Empty means `Host` is not validated. Set it to the public name of your deployment (for example `hive.example.com`) if you want requests for any other `Host` refused.
+- `HIVE_MCP_ALLOWED_HOSTS` (comma-separated, default empty): an allow-list of `Host` values, compared case-insensitively. Empty means `Host` is not validated, so a request with any `Host` (including a DNS-rebinding attempt) is accepted; the server logs a one-time `allowed_hosts_empty` warning at startup in that case. Set it to the public name of your deployment (for example `hive.example.com`) if you want requests for any other `Host` refused.
 
 ## Configuration
 

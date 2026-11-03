@@ -367,6 +367,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
   return {
     async start() {
       listenStreams.start();
+      warnIfAllowedHostsEmpty(logger, cfg.allowedHosts);
       await httpHost.start();
       logger.info(
         { event: 'wire_started', host: cfg.httpHost, port: httpHost.port(), mcpPath: cfg.mcpPath },
@@ -463,6 +464,21 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
 async function closeKyselyDb(db: Kysely<Database>): Promise<void> {
   await db.destroy();
+}
+
+/**
+ * Emits a one-shot `allowed_hosts_empty` warn when `HIVE_MCP_ALLOWED_HOSTS`
+ * is empty. An empty list makes the origin guard skip `Host` validation
+ * entirely, so a DNS-rebinding request carrying any `Host` value is accepted
+ * (Origin is still checked). Behaviour is unchanged; this only surfaces it.
+ */
+export function warnIfAllowedHostsEmpty(logger: Logger, allowedHosts: readonly string[]): void {
+  if (allowedHosts.length === 0) {
+    logger.warn(
+      { event: 'allowed_hosts_empty', envVar: 'HIVE_MCP_ALLOWED_HOSTS' },
+      'HIVE_MCP_ALLOWED_HOSTS is empty: the Host header is not validated, so requests with any Host (including DNS-rebinding attempts) are accepted. Set it to a comma-separated list of the names clients use, for example HIVE_MCP_ALLOWED_HOSTS=hive.example.com',
+    );
+  }
 }
 
 /**
