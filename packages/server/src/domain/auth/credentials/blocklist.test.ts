@@ -113,4 +113,15 @@ describe('blocklist', () => {
     const blocklist = createBlocklist(world.db, { clockToleranceSeconds: 1 });
     expect(await blocklist.purgeExpired(now)).toBe(1);
   });
+
+  it('purgeExpired removes a backlog larger than one batch', async () => {
+    const now = new Date('2026-11-02T12:00:00.000Z');
+    for (let i = 0; i < 7; i++) await insertRevocation(uuidv7(), new Date(now.getTime() - 60_000));
+    const live = uuidv7();
+    await insertRevocation(live, new Date(now.getTime() + 60_000));
+
+    const blocklist = createBlocklist(world.db, { purgeBatchSize: 3 });
+    expect(await blocklist.purgeExpired(now)).toBe(7);
+    expect(await blocklist.contains(live)).toBe(true);
+  });
 });

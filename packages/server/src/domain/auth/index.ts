@@ -53,6 +53,7 @@ export type {
 } from './participants/repository.js';
 
 export { createBlocklist } from './credentials/blocklist.js';
+export { createRevocationPurger } from './credentials/revocation-purger.js';
 export type { AddRevocationInput, Blocklist } from './credentials/blocklist.js';
 
 export { createVerifier } from './credentials/verifier.js';

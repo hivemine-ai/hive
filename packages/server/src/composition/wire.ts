@@ -34,6 +34,7 @@ import {
   createRotator,
   loadAllKeypairs,
   createBlocklist,
+  createRevocationPurger,
   createVerifier,
 } from '#domain/auth/index.js';
 import type {
@@ -103,6 +104,8 @@ export interface WireConfig {
   reverifyIntervalSeconds?: number;
   /** From HIVE_CELL_MAX_UNREAD_PER_SENDER. Default 500 (provisional). */
   maxUnreadPerSender?: number;
+  /** From HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS. Default 3600. 0 disables the purge. */
+  revocationPurgeIntervalSeconds?: number;
 }
 
 export interface WireDeps {
@@ -166,6 +169,12 @@ export function resolveWireConfigFromEnv(
       overrides.reverifyIntervalSeconds ??
       parseIntEnv(env['HIVE_MCP_REVERIFY_INTERVAL_SECONDS'], 60, {
         name: 'HIVE_MCP_REVERIFY_INTERVAL_SECONDS',
+        min: 0,
+      }),
+    revocationPurgeIntervalSeconds:
+      overrides.revocationPurgeIntervalSeconds ??
+      parseIntEnv(env['HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS'], 3600, {
+        name: 'HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS',
         min: 0,
       }),
     maxUnreadPerSender:
@@ -244,6 +253,11 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     );
   }
   const blocklist = createBlocklist(db);
+  const revocationPurger = createRevocationPurger({
+    blocklist,
+    logger,
+    intervalSeconds: cfg.revocationPurgeIntervalSeconds,
+  });
 
   const participantsRepo = createParticipantsReadRepo(db, dbConfig.dialect);
   // Resolve hiveId — the verifier needs the canonical hive identifier.
@@ -368,6 +382,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     async start() {
       listenStreams.start();
       warnIfAllowedHostsEmpty(logger, cfg.allowedHosts);
+      revocationPurger.start();
       await httpHost.start();
       logger.info(
         { event: 'wire_started', host: cfg.httpHost, port: httpHost.port(), mcpPath: cfg.mcpPath },
@@ -410,6 +425,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
         );
       }
       listenStreams.stop();
+      revocationPurger.stop();
       notifications.stop();
       const drainMs = Math.max(1, cfg.shutdownDrainTimeoutSeconds) * 1000;
       await stopWithDrainTimeout(httpHost.stop(), drainMs, (err) => {
