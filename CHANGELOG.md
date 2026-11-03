@@ -6,29 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-04
+
+v0.2.1. Server-side detection of a silent network cut (opt-in), self-contained release archives, and a round of hardening and CI work. **No breaking changes**: a v0.2.0 client works against a v0.2.1 server and the other way round.
+
 ### Added
 
 - **Server-side detection of a silent network cut, opt-in listen lease** (PRY-083). A `subscriptions/listen` that carries `Hive-Listen-Lease: <key>` gets a lease, announced in `Hive-Listen-Lease-Ms`; the client renews it with `server/discover` carrying the same key, and a lease that runs out closes the stream with the new close reason `lease_expired` (with `complete`), logs `mcp_listen_lease_expired` and takes the participant `offline`. Keys are bound to the authenticated participant. New variable `HIVE_LISTEN_LEASE_MS` (default `60000`; `0` disables, otherwise between `400` and `86400000` and above the keep-alive interval). `hivectl watch` asks for a lease on every connection and renews it every quarter of the lease, so a silently cut `watch` now goes `offline` within 45 to 60 s instead of staying `online` until TCP gives up (about 15 min on Linux). Fully compatible both ways: a listen without the header behaves as in v0.2.0, and a newer client facing a v0.2.0 server sends no renewals. `watch.connected` now logs `leaseMs`. See [Listen lease](./docs/mcp-server.md#listen-lease).
 - `resources/templates/list` is implemented (PRY-085). It returns the mailbox template `hive://cells/{cellId}` (name, title, description and `mimeType` match `resources/list`) instead of `-32601`, cacheable with `ttlMs: 60000`, `cacheScope: "public"`. Reading still only works for the caller's own cell.
-- **MCP conformance in CI** (PRY-085). A new `conformance` job in `pr.yml` runs the official `@modelcontextprotocol/conformance` suite (pinned to `0.2.0-alpha.12`, requirement set `2026-07-28`) against a throwaway server. Known failures live in `deployment/conformance/baseline.yml`; see [MCP conformance](./docs/mcp-conformance.md). Run it locally with `deployment/conformance/run.sh`.
+- The server logs a one-time `allowed_hosts_empty` warning at startup when `HIVE_MCP_ALLOWED_HOSTS` is empty or unset, explaining that the `Host` header is not validated and how to set the variable (PRY-085). Behaviour is unchanged.
+
+### Changed
+
+- **Expired credential revocations are purged** (PRY-085). `credential_revocations` was read on every verification but never trimmed. The server now deletes, at start and then every `HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS` (default `3600`; `0` disables), the rows whose credential expired more than the clock tolerance ago, in batches of 1000, on SQLite and Postgres. Revocations of still-valid credentials are never touched. Each pass logs `auth_revocations_purged` with the row count. See [Authentication](./docs/auth.md).
+- `resources/read` for a mailbox URI the caller does not own now echoes the requested URI in the error data (`{ "uri": ... }`, SEP-2164 SHOULD). The code (`-32602`) and message are unchanged, and a foreign mailbox is still indistinguishable from a missing one.
+
+### Fixed
+
+- GitHub release assets are now self-contained `hivectl-<platform>.tar.gz` archives (binary + bundled `better-sqlite3` + `native/`, same layout as the npm platform package) plus `SHA256SUMS`. The bare `hivectl-<platform>` binaries attached to v0.2.0 failed with `Cannot find module 'better-sqlite3'` when run standalone (PRY-085).
+
+### CI
+
+- New `conformance` job in `pr.yml` runs the official `@modelcontextprotocol/conformance` suite (pinned to `0.2.0-alpha.12`, requirement set `2026-07-28`) against a throwaway server. Known failures live in `deployment/conformance/baseline.yml`; see [MCP conformance](./docs/mcp-conformance.md). Run it locally with `deployment/conformance/run.sh`.
+- New `postgres` job in `pr.yml` runs `send.test.ts` (per-sender unread cap, including the concurrent-send race) against a Postgres 16 service container via `HIVE_TEST_PG_URL` (PRY-085).
 
 ### Documentation
 
 - **Correction to the v0.2.0 known limitation on macOS and the local network** (PRY-084). The single-binary `hivectl` is not at fault: an unmodified ad-hoc-signed binary reaches LAN servers when launched from an app that has the macOS Local Network permission. On macOS 15+, connections to local-network addresses depend on the permission of the app that launches `hivectl` (Terminal, an IDE, the Claude Code desktop app). If `hivectl` or `hivectl watch` fails with `fetch failed` against a LAN server, enable that app in System Settings > Privacy & Security > Local Network. See [hivectl watch](./docs/hivectl-watch.md).
 
-### Fixed
+### Known limitations (v0.2.0 notes, updated)
 
-- GitHub release assets are now self-contained `hivectl-<platform>.tar.gz` archives (binary + bundled `better-sqlite3` + `native/`, same layout as the npm platform package) plus `SHA256SUMS`. The bare `hivectl-<platform>` binaries attached to v0.2.0 failed with `Cannot find module 'better-sqlite3'` when run standalone (PRY-085).
-- `resources/read` for a mailbox URI the caller does not own now echoes the requested URI in the error data (`{ "uri": ... }`, SEP-2164 SHOULD). The code (`-32602`) and message are unchanged, and a foreign mailbox is still indistinguishable from a missing one.
-
-### Added
-
-- The server logs a one-time `allowed_hosts_empty` warning at startup when `HIVE_MCP_ALLOWED_HOSTS` is empty or unset, explaining that the `Host` header is not validated and how to set the variable (PRY-085). Behaviour is unchanged.
-- **Expired credential revocations are purged** (PRY-085). `credential_revocations` was read on every verification but never trimmed. The server now deletes, at start and then every `HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS` (default `3600`; `0` disables), the rows whose credential expired more than the clock tolerance ago, in batches of 1000, on SQLite and Postgres. Revocations of still-valid credentials are never touched. Each pass logs `auth_revocations_purged` with the row count. See [Authentication](./docs/auth.md).
-
-### CI
-
-- New `postgres` job in `pr.yml` runs `send.test.ts` (per-sender unread cap, including the concurrent-send race) against a Postgres 16 service container via `HIVE_TEST_PG_URL` (PRY-085).
+- **Silent network cut: now detected for v0.2.1+ clients.** The v0.2.0 limitation ("the server does not detect a silent network cut") no longer applies to a client that asks for a listen lease, which `hivectl watch` from v0.2.1 does on every connection. A listen without a lease still behaves as in v0.2.0, so the participant of an older or custom client stays `online` until the client returns or TCP gives up.
+- **macOS and the local network: reclassified.** It was not a defect of the single-binary `hivectl`: it is the macOS Local Network permission of the app that launches it (see Documentation above). The v0.2.0 workaround of running `hivectl` through `node` is no longer needed; grant the permission to the launching app instead.
+- **v0.2.0 bare release binaries were broken.** The `hivectl-<platform>` files attached to the v0.2.0 GitHub release fail with `Cannot find module 'better-sqlite3'`. From v0.2.1 the assets are `hivectl-<platform>.tar.gz` archives plus `SHA256SUMS`. The npm packages of v0.2.0 are not affected.
+- The remaining v0.2.0 limitations (revocation applied within `HIVE_MCP_REVERIFY_INTERVAL_SECONDS`, no `agent suspend`/`resume` in `hivectl`, at-least-once wake-ups, provisional defaults) are unchanged.
 
 ## [0.2.0] - 2026-11-03
 
