@@ -37,7 +37,8 @@ v0.2.0. Hive moves to MCP revision `2026-07-28` and gains stream-bound presence 
 
 ### Known limitations
 
-- A silent network cut (a partition or a stopped client that leaves the socket open) is not detected by the server until the socket fails; the participant can stay `online` meanwhile. `hivectl watch` reconnects after 45 s without any byte. Accepted.
+- **A silent network cut is not detected by the server** (measured on a real LAN with a server-side `iptables` DROP of 121 s). The listen stream stays open and the participant stays `online` until the client returns (the old stream then closes with `client_closed`) or the OS TCP stack gives up (on Linux, on the order of 15 minutes; not measured). `hivectl watch` notices the silence on its own (about 32 s in the test, bound 45 s), reconnects with backoff and, once the network is back, surfaces everything sent during the cut through the replay: no message is lost. The only impact is overstated presence. Server-side detection is planned after v0.2.0.
+- **macOS: the ad-hoc-signed single-binary `hivectl` could not reach a Hive server on the local network** (`fetch failed` / "No route to host"), while `curl` and plain `node` could; most likely the macOS Local Network privacy permission. Workarounds: run `hivectl` through `node` from the npm package, or reach the server by a route that is not on the local subnet. To be investigated after v0.2.0.
 - A revocation or suspension applied with `hivectl` closes an open stream within `HIVE_MCP_REVERIFY_INTERVAL_SECONDS` (60 s by default), not instantly. New requests are rejected at once.
 - `hivectl` has no `agent suspend` or `resume` command yet; the server-side suspension exists. Revoke an agent to cut it off.
 - A message that is not marked with `mark_read` wakes a reactive agent again on every reconnection (at-least-once). Do not run a reactive session with `bypassPermissions`: the body of a message is untrusted content from another participant.
