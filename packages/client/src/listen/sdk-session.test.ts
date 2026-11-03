@@ -203,6 +203,104 @@ describe('closing over a silent network', () => {
   }, 15_000);
 });
 
+describe('listen lease over the 2.x SDK', () => {
+  const LEASE_MS = 400;
+
+  async function restart(leaseMs?: number): Promise<void> {
+    await server.close();
+    server = await startFakeHiveServer({
+      tokens: { [TOKEN]: PARTICIPANT },
+      ...(leaseMs !== undefined && { leaseMs }),
+    });
+  }
+
+  const listenKeys = (): Array<string | undefined> =>
+    server.leaseRequests.filter((r) => r.method === 'subscriptions/listen').map((r) => r.key);
+  const beatsWith = (key: string | undefined): number =>
+    server.leaseRequests.filter((r) => r.method === 'server/discover' && r.key === key).length;
+
+  it('asks for a lease and, once granted, renews it every quarter with the same key', async () => {
+    await restart(LEASE_MS);
+    const { done } = startLoop();
+    await waitFor(() => listenKeys().length === 1);
+    const key = listenKeys()[0];
+    expect(key).toMatch(/^[A-Za-z0-9_-]{22}$/);
+
+    await waitFor(() => beatsWith(key) >= 4, 3000);
+
+    expect(logs).toContainEqual({ event: 'watch.connected', leaseMs: LEASE_MS });
+    // The version probe and the other requests never carry the key.
+    const keyed = server.leaseRequests.filter((r) => r.key !== undefined).map((r) => r.method);
+    expect(new Set(keyed)).toEqual(new Set(['subscriptions/listen', 'server/discover']));
+    controller.abort();
+    await done;
+  });
+
+  it('a server without lease support gets the header but sends nothing back: no renewals', async () => {
+    await restart();
+    const { done } = startLoop();
+    await waitFor(() => listenKeys().length === 1);
+
+    await new Promise((r) => setTimeout(r, LEASE_MS * 2));
+
+    expect(listenKeys()[0]).toBeDefined();
+    expect(server.leaseRequests.filter((r) => r.method === 'server/discover' && r.key)).toEqual([]);
+    expect(logs).toContainEqual({ event: 'watch.connected', leaseMs: null });
+    controller.abort();
+    await done;
+  });
+
+  it('stops renewing when the stream ends, and the next connection uses a fresh key', async () => {
+    await restart(LEASE_MS);
+    const { done } = startLoop();
+    await waitFor(() => listenKeys().length === 1);
+    const first = listenKeys()[0];
+    await waitFor(() => beatsWith(first) >= 1, 3000);
+
+    server.dropStreams();
+    await waitFor(() => listenKeys().length === 2);
+    const second = listenKeys()[1];
+    expect(second).not.toBe(first);
+    await waitFor(() => beatsWith(second) >= 1, 3000);
+    const settled = beatsWith(first);
+    await new Promise((r) => setTimeout(r, LEASE_MS));
+
+    expect(beatsWith(first)).toBe(settled);
+    controller.abort();
+    await done;
+  });
+
+  it('stops renewing once watch is stopped', async () => {
+    await restart(LEASE_MS);
+    const { done } = startLoop();
+    await waitFor(() => listenKeys().length === 1);
+    controller.abort();
+    await done;
+    const settled = server.leaseRequests.length;
+
+    await new Promise((r) => setTimeout(r, LEASE_MS));
+
+    expect(server.leaseRequests.length).toBe(settled);
+  });
+
+  it('failing renewals do not end watch: events keep flowing on the same stream', async () => {
+    await restart(LEASE_MS);
+    server.setDiscoverFails(true);
+    const { events, done } = startLoop();
+    await waitFor(() => server.online().includes(PARTICIPANT));
+    const key = listenKeys()[0];
+    await waitFor(() => beatsWith(key) >= 3, 3000);
+
+    server.publish(PARTICIPANT, { eventId: 'evt-lease', senders: ['s1'], count: 1 });
+    await waitFor(() => events.length === 1);
+
+    expect(server.listenCount()).toBe(1);
+    expect(logs.filter((l) => l.event === 'watch.disconnected')).toEqual([]);
+    controller.abort();
+    await done;
+  });
+});
+
 describe('checkUnread over the 2.x SDK', () => {
   const opts = () => ({ url: server.url, credential: TOKEN, probeTimeoutMs: 3000 });
 
