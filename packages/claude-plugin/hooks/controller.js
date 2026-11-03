@@ -61,7 +61,7 @@ export function createController({ options, host }) {
   let onceHalted = false;
   /** One warning per failure episode, however many turns hit the same exit. */
   let onceWarned = false;
-  /** Watch stopped for good and said why: `--once` has nothing to add. */
+  /** Watch stopped for good and said why: `--once` has nothing to add. A reload starts over. */
   let watchReported = false;
   let flag = false;
   /** Bumped on every flag raise, so a raise during `--once` is never cleared by it. */

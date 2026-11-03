@@ -689,7 +689,6 @@ describe('terminal exits of --once', () => {
 
   it('adds no second notice when watch already reported its own stop', async () => {
     const t = await idleWithFlag();
-    t.setRun(() => Promise.resolve({ exitCode: 2, stdout: '', stderr: '' }));
     t.procs[0].push('stderr', 'error: WATCH_CREDENTIAL_REJECTED: rejected\n');
     t.procs[0].exit(4);
     await flush();
@@ -702,6 +701,7 @@ describe('terminal exits of --once', () => {
       }),
     );
     await drain(t);
+    expect(t.calls.run.length).toBeGreaterThan(0);
     expect(t.calls.toast).toHaveLength(1);
   });
 
