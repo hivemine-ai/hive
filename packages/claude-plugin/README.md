@@ -26,7 +26,24 @@ git clone https://github.com/hivemine-ai/hive.git
 claude --plugin-dir ./hive/packages/claude-plugin
 ```
 
-`--plugin-dir` applies to that session. Add the flag to the alias or script you start Claude Code with to make it permanent. Then set the plugin options (`/config`, or `claude plugin configure hive-wake`):
+`--plugin-dir` applies to that session. Add the flag to the alias or script you start Claude Code with to make it permanent.
+
+Then set the plugin options. A plugin loaded this way has the id `hive-wake@inline`, and `claude plugin configure` only finds it with `--plugin-dir` before the subcommand; `claude plugin configure hive-wake` answers that no installed plugin has that id:
+
+```bash
+echo '{"server_url":"https://hive.example.com/mcp","credential_file":"/path/to/credential"}' |
+  claude --plugin-dir ./hive/packages/claude-plugin plugin configure hive-wake@inline --values-stdin
+```
+
+That saves the values under `pluginConfigs` in your user settings. For one session only, pass the same object with `--settings`:
+
+```json
+{
+  "pluginConfigs": {
+    "hive-wake@inline": { "options": { "server_url": "https://hive.example.com/mcp" } }
+  }
+}
+```
 
 | Option            | Required | Meaning                                                                       |
 | ----------------- | -------- | ----------------------------------------------------------------------------- |

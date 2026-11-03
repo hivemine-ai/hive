@@ -33,8 +33,15 @@ export interface SdkClientOptions {
 /** Maps any SDK failure to a `ListenError` without leaking request details. */
 export function toListenError(err: unknown): ListenError {
   if (err instanceof ListenError) return err;
-  if (err instanceof SdkHttpError && (err.status === 401 || err.status === 403)) {
+  if (err instanceof SdkHttpError && err.status === 401) {
     return new ListenError('auth_rejected', 'the server rejected the credential', { cause: err });
+  }
+  if (err instanceof SdkHttpError && err.status === 403) {
+    return new ListenError(
+      'transport',
+      'the server refused the Origin or Host of this request; check HIVE_MCP_ALLOWED_ORIGINS and HIVE_MCP_ALLOWED_HOSTS',
+      { cause: err },
+    );
   }
   if (err instanceof ProtocolError) {
     if (err.code === RPC_UNAUTHORIZED) {

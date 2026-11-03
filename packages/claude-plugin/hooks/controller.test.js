@@ -666,6 +666,45 @@ describe('terminal exits of --once', () => {
     expect(t.calls.run.length).toBeGreaterThan(1);
   });
 
+  it('resumes the idle retry when a later --once fails with a transient exit', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 4, stdout: '', stderr: '' }));
+    await drain(t);
+    t.setRun(() => Promise.resolve({ exitCode: 2, stdout: '', stderr: '' }));
+    t.controller.onTurnStart();
+    t.controller.onTurnComplete();
+    await flush();
+    const afterComplete = t.calls.run.length;
+    await drain(t);
+    expect(t.calls.run.length).toBeGreaterThan(afterComplete);
+  });
+
+  it('says the mod will ask again, not that the plugin must be reloaded', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 4, stdout: '', stderr: '' }));
+    await drain(t);
+    expect(t.calls.toast[0]).toContain('ask again');
+    expect(t.calls.toast[0]).not.toContain('reload');
+  });
+
+  it('adds no second notice when watch already reported its own stop', async () => {
+    const t = await idleWithFlag();
+    t.setRun(() => Promise.resolve({ exitCode: 2, stdout: '', stderr: '' }));
+    t.procs[0].push('stderr', 'error: WATCH_CREDENTIAL_REJECTED: rejected\n');
+    t.procs[0].exit(4);
+    await flush();
+    expect(t.calls.toast).toHaveLength(1);
+    t.setRun(() =>
+      Promise.resolve({
+        exitCode: 4,
+        stdout: '',
+        stderr: 'error: WATCH_CREDENTIAL_REJECTED: rejected\n',
+      }),
+    );
+    await drain(t);
+    expect(t.calls.toast).toHaveLength(1);
+  });
+
   it('warns again after a success, for a new failure episode', async () => {
     const t = await idleWithFlag();
     t.setRun(() => Promise.resolve({ exitCode: 4, stdout: '', stderr: '' }));

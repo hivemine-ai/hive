@@ -21,6 +21,7 @@ const HEALTHY_MS = 60_000;
 /** Consecutive short-lived runs before the user is warned. */
 const CRASH_WARNING_AFTER = 5;
 const STDERR_TAIL_CHARS = 4000;
+const WATCH_ERROR_LINE = /^error: (WATCH_[A-Z_]+)(?::\s*(.*))?$/m;
 /** Idle retry of `--once`: bounded backoff, until the flag clears or a terminal exit. */
 const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 60_000;
@@ -60,6 +61,8 @@ export function createController({ options, host }) {
   let onceHalted = false;
   /** One warning per failure episode, however many turns hit the same exit. */
   let onceWarned = false;
+  /** Watch stopped for good and said why: `--once` has nothing to add. */
+  let watchReported = false;
   let flag = false;
   /** Bumped on every flag raise, so a raise during `--once` is never cleared by it. */
   let flagSeq = 0;
@@ -155,8 +158,8 @@ export function createController({ options, host }) {
         haltOnce(result);
         return;
       }
-      if (result.exitCode !== 0) return;
       onceHalted = false;
+      if (result.exitCode !== 0) return;
       onceWarned = false;
       const lines = result.stdout.split('\n').filter((l) => l.trim() !== '');
       const event = lines.length > 0 ? parseEventLine(/** @type {string} */ (lines[0])) : null;
@@ -175,9 +178,13 @@ export function createController({ options, host }) {
   /** Stops the idle retry. The flag stays, so the next turn.complete asks again. */
   function haltOnce(/** @type {{ exitCode: number, stderr: string }} */ result) {
     onceHalted = true;
-    if (result.exitCode === EXIT_INTERRUPTED || onceWarned) return;
+    if (result.exitCode === EXIT_INTERRUPTED || onceWarned || watchReported) return;
     onceWarned = true;
-    host.toast(describeFailure('hivectl watch --once', result.stderr, result.exitCode));
+    const match = WATCH_ERROR_LINE.exec(result.stderr);
+    const cause = match?.[1] ?? `exit code ${String(result.exitCode)}`;
+    host.toast(
+      `hivectl watch --once failed with ${cause}. The mod will ask again at the next turn or event.`,
+    );
   }
 
   /** Reads one watch process to its end. Returns its exit info and stderr tail. */
@@ -199,15 +206,11 @@ export function createController({ options, host }) {
     }
   }
 
-  function describeFailure(
-    /** @type {string} */ what,
-    /** @type {string} */ stderrTail,
-    /** @type {number | null} */ code,
-  ) {
-    const match = /^error: (WATCH_[A-Z_]+)(?::\s*(.*))?$/m.exec(stderrTail);
+  function describeFailure(/** @type {string} */ stderrTail, /** @type {number | null} */ code) {
+    const match = WATCH_ERROR_LINE.exec(stderrTail);
     if (match)
-      return `${what} stopped with ${match[1]}${match[2] ? `: ${match[2]}` : ''}. It will not restart; fix the cause and reload the plugin.`;
-    return `${what} stopped with exit code ${String(code)} and will not restart; fix the cause and reload the plugin.`;
+      return `hivectl watch stopped with ${match[1]}${match[2] ? `: ${match[2]}` : ''}. It will not restart; fix the cause and reload the plugin.`;
+    return `hivectl watch stopped with exit code ${String(code)} and will not restart; fix the cause and reload the plugin.`;
   }
 
   async function supervise() {
@@ -233,7 +236,8 @@ export function createController({ options, host }) {
       const { exit, stderrTail } = outcome;
       if (exit.code === EXIT_INTERRUPTED) return;
       if (exit.code === EXIT_PRECONDITION || exit.code === EXIT_USER_ERROR) {
-        host.toast(describeFailure('hivectl watch', stderrTail, exit.code));
+        watchReported = true;
+        host.toast(describeFailure(stderrTail, exit.code));
         return;
       }
       const lived = host.now() - startedAt;

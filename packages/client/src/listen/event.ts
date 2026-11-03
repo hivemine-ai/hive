@@ -32,12 +32,16 @@ function isOpaqueId(value: unknown): value is string {
   );
 }
 
+/**
+ * A longer list is truncated, not rejected: dropping the event would lose a
+ * wake-up over a field that consumers only count. `count` stays exact.
+ */
 function parseSenders(value: unknown): string[] | null {
-  if (!Array.isArray(value) || value.length > MAX_SENDERS) return null;
+  if (!Array.isArray(value)) return null;
   const out: string[] = [];
   for (const item of value as unknown[]) {
     if (!isOpaqueId(item)) return null;
-    out.push(item);
+    if (out.length < MAX_SENDERS) out.push(item);
   }
   return out;
 }

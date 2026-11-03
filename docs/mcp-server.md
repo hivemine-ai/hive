@@ -157,7 +157,7 @@ Tools that accept a recipient (`send_message`, `get_agent_status`) or a sender f
 
 > **Operator convention.** Pick a `hive.name` that does NOT collide with a real TLD (e.g. avoid `com`, `net`). A Hivekeeper email whose domain happens to end in `.<hive-name>` would otherwise be parsed as an agent reference.
 
-When parsing fails (no `@`, multiple `@`s, or local-part outside the allowed alphabet), the tool returns JSON-RPC `-32602` with `subCode: 'reference_unparseable'`. When parsing succeeds but the lookup finds nothing, it returns JSON-RPC `-32004` with `subCode: 'reference_unresolved'` (privacy-uniform — the wire never distinguishes "not found" from "not visible").
+When parsing fails (no `@`, multiple `@`s, or local-part outside the allowed alphabet), the tool returns JSON-RPC `-32602` with `subCode: 'reference_unparseable'`. When parsing succeeds but the lookup finds nothing, it returns JSON-RPC `-32004` with `subCode: 'reference_unresolved'` (privacy-uniform — the wire never distinguishes "not found" from "not visible"). The exception is `read_mailbox.filter.from`: an unresolved sender there returns `-32602`.
 
 ### Push notifications (Waggle)
 
@@ -306,7 +306,7 @@ The revision requires the server to validate `Origin`, as a defense against DNS 
 | `HIVE_MCP_ALLOWED_ORIGINS`                   | _empty_ | Comma-separated allow-list of `Origin` values. Empty: only clients that send no `Origin` pass. See [Origin and Host](#origin-and-host).                                                                                   |
 | `HIVE_MCP_ALLOWED_HOSTS`                     | _empty_ | Comma-separated allow-list of `Host` values. Empty: `Host` is not validated.                                                                                                                                              |
 | `HIVE_MCP_REVERIFY_INTERVAL_SECONDS`         | `60`    | How often open streams are re-checked against the current credential and participant state. This is the maximum time a revoked or suspended participant keeps a stream. `0` disables the check (not for production).      |
-| `HIVE_LISTEN_KEEPALIVE_INTERVAL_MS`          | `15000` | Keep-alive frame period on every `subscriptions/listen` stream. Provisional.                                                                                                                                              |
+| `HIVE_LISTEN_KEEPALIVE_INTERVAL_MS`          | `15000` | Keep-alive frame period on every `subscriptions/listen` stream. Must be below `45000`, the silence after which `hivectl watch` reconnects. Provisional.                                                                   |
 | `HIVE_LISTEN_STALL_TIMEOUT_MS`               | `30000` | A stream whose written bytes do not drain for this long is closed (`stalled`). Must be below `45000`, the silence after which `hivectl watch` reconnects; the server refuses to start otherwise. Provisional.             |
 | `HIVE_PRESENCE_MAX_SESSIONS_PER_PARTICIPANT` | `16`    | Cap on simultaneous listen streams per participant (the name is kept from v0.1). At the cap the oldest stream is closed and the new one registers. A presence entry has no other timeout: it lives as long as its stream. |
 | `HIVE_WAGGLE_QUIET_WINDOW_MS`                | `500`   | Quiet window that coalesces several messages into one event.                                                                                                                                                              |

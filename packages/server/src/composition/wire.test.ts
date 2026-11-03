@@ -163,6 +163,16 @@ describe('resolveWireConfigFromEnv — listen', () => {
     });
   });
 
+  it('rejects a keep-alive interval that hivectl watch would read as silence', () => {
+    expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_KEEPALIVE_INTERVAL_MS: '45000' })).toThrow(
+      /HIVE_LISTEN_KEEPALIVE_INTERVAL_MS/,
+    );
+    expect(
+      resolveWireConfigFromEnv({ HIVE_LISTEN_KEEPALIVE_INTERVAL_MS: '44999' })
+        .listenKeepAliveIntervalMs,
+    ).toBe(44_999);
+  });
+
   it('fails at boot when the stall timeout does not beat the 45 s of hivectl watch', () => {
     expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_STALL_TIMEOUT_MS: '45000' })).toThrow(
       /HIVE_LISTEN_STALL_TIMEOUT_MS/,
