@@ -3,9 +3,9 @@
 // from a missing one, and a caller without a Cell gets the same answer. Contents are mailbox metadata, never message bodies: bodies are
 // read with read_mailbox, as untrusted data.
 
+import { ResourceNotFoundError } from '@modelcontextprotocol/server';
 import type { McpServer } from '@modelcontextprotocol/server';
 
-import { CellError } from '#domain/cells/index.js';
 import type { CellsRepo } from '#domain/cells/index.js';
 import type { Logger } from '#observability/logger.js';
 
@@ -58,7 +58,17 @@ export function registerMailboxResources(server: McpServer, deps: MailboxResourc
       const cellId = await callerCellId(deps, ctx);
       const uri = cellId === null ? null : mailboxUri(cellId);
       if (cellId === null || request.params.uri !== uri) {
-        throw new CellError('INVALID_INPUT', { subCode: 'mailbox_uri_not_owned' });
+        deps.logger.warn(
+          {
+            event: 'mcp_tool_error',
+            domainCode: 'INVALID_INPUT',
+            subCode: 'mailbox_uri_not_owned',
+          },
+          'invalid input',
+        );
+        // SEP-2164: the error data echoes the requested URI. It is the caller's own
+        // input, so it reveals nothing about whether the mailbox exists.
+        throw new ResourceNotFoundError(request.params.uri, 'invalid input');
       }
       const summary = await deps.cellsRepo.summarizeUnreadForCell(cellId);
       return {

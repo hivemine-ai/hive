@@ -47,3 +47,36 @@ jobs:
 
       - name: Test
         run: pnpm -r test
+
+  # Official MCP conformance suite against a throwaway server (PRY-085).
+  # Revision 2026-07-28 only: Hive rejects the legacy protocol by design
+  # (ADR-024), so the suite runs with `--requirements 2026-07-28`, which
+  # excludes every scenario of the older revisions. Known failures are the
+  # fixture-only scenarios listed in deployment/conformance/baseline.yml.
+  # See docs/mcp-conformance.md.
+  conformance:
+    name: MCP conformance (2026-07-28)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      # The suite needs Node >= 22 (`fs.globSync`); .nvmrc pins an older line.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Run the conformance suite
+        run: deployment/conformance/run.sh

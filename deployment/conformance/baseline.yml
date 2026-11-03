@@ -1,0 +1,48 @@
+# Known conformance failures for Hive, run by deployment/conformance/run.sh.
+# See docs/mcp-conformance.md for the reasoning behind each group.
+#
+# Hive is a purpose-built messaging server, not the suite's "everything server":
+# most failures below are fixture scenarios that call tools/prompts/resources
+# Hive deliberately does not expose, or methods of capabilities Hive does not
+# declare (prompts, completions). Per ADR-024 Hive serves 2026-07-28 only, so
+# the legacy-protocol scenarios are excluded by --requirements 2026-07-28 and
+# need no entries here.
+server:
+  # Fixture tools that exist only in the suite's reference server.
+  - tools-call-simple-text
+  - tools-call-image
+  - tools-call-audio
+  - tools-call-embedded-resource
+  - tools-call-mixed-content
+  - tools-call-error
+  - tools-call-with-progress
+  - input-required-result-basic-elicitation
+  - input-required-result-basic-sampling
+  - input-required-result-basic-list-roots
+  - input-required-result-request-state
+  - input-required-result-multiple-input-requests
+  - input-required-result-multi-round
+  - input-required-result-result-type
+  - input-required-result-tampered-state
+  - input-required-result-capability-check
+  - input-required-result-missing-input-response
+  - input-required-result-ignore-extra-params
+  # Fixture resources (the only readable Hive URI is the caller's mailbox).
+  - resources-read-text
+  - resources-read-binary
+  - resources-templates-read
+  # Capabilities Hive does not declare (prompts, completions, MRTR outside tools).
+  - completion-complete
+  - prompts-list
+  - prompts-get-simple
+  - prompts-get-with-args
+  - prompts-get-embedded-resource
+  - prompts-get-with-image
+  - input-required-result-non-tool-request
+  # Single checks inside scenarios Hive otherwise passes.
+  - server-stateless:sep-2575-server-rejects-undeclared-capability
+  - server-stateless:sep-2575-missing-capability-http-400
+  - server-stateless:sep-2575-http-server-no-independent-requests-on-stream
+  - server-stateless:sep-2575-server-no-log-without-loglevel
+  - caching:sep-2549-prompts-list-caching-hints
+  - caching:sep-2549-resources-templates-list-caching-hints

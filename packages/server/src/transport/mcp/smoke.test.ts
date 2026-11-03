@@ -39,7 +39,7 @@ interface JsonRpcResponse {
   jsonrpc: '2.0';
   id: number | string | null;
   result?: unknown;
-  error?: { code: number; message: string };
+  error?: { code: number; message: string; data?: unknown };
 }
 
 interface RpcOutcome {
@@ -817,10 +817,16 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
         params: { uri },
       });
     const foreign = await read(foreignUri);
-    const unknown = await read(`hive://cells/${uuidv7()}`);
+    const unknownUri = `hive://cells/${uuidv7()}`;
+    const unknown = await read(unknownUri);
 
     expect(foreign.body?.error?.code).toBe(-32602);
-    expect(foreign.body?.error).toEqual(unknown.body?.error);
+    // The only difference is the echoed request URI (SEP-2164 `data.uri`).
+    expect(foreign.body?.error).toEqual({
+      ...unknown.body?.error,
+      data: { uri: foreignUri },
+    });
+    expect(unknown.body?.error?.data).toEqual({ uri: unknownUri });
   });
 
   it('never crosses identities between concurrent requests with different Bearers', async () => {
