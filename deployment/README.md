@@ -340,7 +340,7 @@ Metrics (Prometheus) and distributed tracing are **not yet** available.
 
 ## Upgrading from v0.1.x
 
-v0.2.0 is a breaking release. Read the `[Unreleased]` section of [`CHANGELOG.md`](../CHANGELOG.md) before upgrading.
+v0.2.0 is a breaking release. Read the `[0.2.0]` section of [`CHANGELOG.md`](../CHANGELOG.md) before upgrading.
 
 1. **Clients must support MCP `2026-07-28`.** The server rejects `initialize` (HTTP 400, `-32022`) and issues no `Mcp-Session-Id`; `GET /mcp` and `DELETE /mcp` answer 405. Upgrade Claude Code and any custom client first.
 2. **Rename in the API.** `delivered_at` is now `stored_at` and the state `delivered` is now `stored` in `send_message`, `read_mailbox`, filters and cursors; there are no aliases. A table-rebuild migration runs on start.
