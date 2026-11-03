@@ -1,6 +1,6 @@
 # Hive — Deployment (Docker)
 
-Reference deployment artifacts for running Hive OSS in containers. This directory documents v0.2.0, which serves MCP revision `2026-07-28` only (see [Upgrading from v0.1.x](#upgrading-from-v01x)).
+Reference deployment artifacts for running Hive OSS in containers. This directory documents v0.2.1, which serves MCP revision `2026-07-28` only (see [Upgrading from v0.1.x](#upgrading-from-v01x)).
 
 > **Looking for the no-Docker path?** If you don't need Postgres or container
 > isolation, you can run Hive directly with the CLI + SQLite. See
