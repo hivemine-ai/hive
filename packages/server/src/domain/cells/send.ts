@@ -239,6 +239,10 @@ export function createSender(deps: SenderDeps): Sender {
     // (abort). This closes the TOCTOU window flagged by PRY-003 /security-review.
     let resolvedCellId: UUIDv7 | null = null;
     let result: SendResult;
+    // The denial audit uses the outer db handle, which an open SQLite TX blocks
+    // (single connection). The engine hands the write back; it runs after the
+    // TX has rolled back (INC-2026-009 / PRY-087).
+    let pendingDenialAudit: (() => Promise<void>) | null = null;
     try {
       result = await deps.db.transaction().execute(async (tx) => {
         const recipientCellRow = await selectRecipientCellLocked(
@@ -260,6 +264,9 @@ export function createSender(deps: SenderDeps): Sender {
           executor: tx,
         };
         if (input.requestId !== undefined) canSendInput.requestId = input.requestId;
+        canSendInput.deferDenialAudit = (record) => {
+          pendingDenialAudit = record;
+        };
         const allowed = await deps.visibilityEngine.canSend(canSendInput);
         if (!allowed) {
           throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'visibility_denied' });
@@ -310,6 +317,11 @@ export function createSender(deps: SenderDeps): Sender {
         };
       });
     } catch (err) {
+      // TX already rolled back: the outer handle is free, so the deny is audited
+      // here. recordEvent is best-effort and never throws.
+      if (pendingDenialAudit !== null) {
+        await (pendingDenialAudit as () => Promise<void>)();
+      }
       if (err instanceof IdempotencyConflictSentinel) {
         // safe-cast: we only reach here if input.idempotencyKey was defined.
         const winning = await idempotencyLookup(

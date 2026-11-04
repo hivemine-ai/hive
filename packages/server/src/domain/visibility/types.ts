@@ -21,6 +21,16 @@ export interface CanSendInput {
    * narrows internally.
    */
   executor?: unknown;
+  /**
+   * Optional hand-off for the denial audit write. When provided and the decision
+   * is a deny, `canSend` does NOT write the audit row itself: it passes a thunk
+   * that performs the write to this callback, and the caller MUST invoke it once
+   * it is safe to touch the outer DB handle (i.e. after its transaction has
+   * ended). Required when `canSend` runs inside a transaction on a
+   * single-connection dialect (SQLite): the audit repo uses the outer handle,
+   * which is blocked by the open transaction (INC-2026-009).
+   */
+  deferDenialAudit?: (record: () => Promise<void>) => void;
 }
 
 export interface CanSeeInput {
