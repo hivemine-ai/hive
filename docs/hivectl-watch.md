@@ -8,7 +8,9 @@
 
 ```bash
 # 1. Issue a dedicated credential for the agent (on the Hive host) and copy it to the agent's machine.
-hivectl credential issue --participant-id <agent-id> --ttl 30d --output-credential agent.jwt --operator-id you@example.com
+#    --participant-id takes the agent's UUID v7 (printed by `agent create`, shown by `agent list`) or a Hivekeeper email;
+#    it does not take an agent reference.
+hivectl credential issue --participant-id <agent-uuid> --ttl 30d --output-credential agent.jwt --operator-id you@example.com
 
 # 2. On the agent's machine: the file must be mode 0600 in a folder that is mode 0700.
 install -d -m 700 ~/.config/hivectl && install -m 600 agent.jwt ~/.config/hivectl/credential
