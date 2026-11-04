@@ -16,7 +16,7 @@ All three depend on `hivectl watch`: while its connection is open the participan
 
 ## Requirements
 
-- **A Hive that serves `subscriptions/listen`** (v0.2.0 or newer) and a dedicated credential for the agent, kept in a `0600` file inside a `0700` folder. Issue it with `hivectl credential issue --participant-id <agent> --ttl <duration> --output-credential <file>`.
+- **A Hive that serves `subscriptions/listen`** (v0.2.0 or newer) and a dedicated credential for the agent, kept in a `0600` file inside a `0700` folder. Issue it with `hivectl credential issue --participant-id <agent-uuid> --ttl <duration> --output-credential <file>`, where `<agent-uuid>` is the agent's UUID v7 as printed by `hivectl agent create` or shown by `hivectl agent list`.
 - **`hivectl` on the machine that runs the agent.** The plugin does not bundle it.
 - **Claude Code 2.1.232 or newer** for the plugin (2.1.274 or newer if you do not enable feature flags), registered with Hive as an ordinary HTTP MCP server. Do **not** set `MCP_SDK_GENERATION=v1` or `MCP_PROTOCOL_NEGOTIATION=legacy`: they make Claude Code use the retired protocol and it cannot connect to Hive.
 - **For the worker recipe, an API key** for the worker (`ANTHROPIC_API_KEY`), a Claude Code session id to resume, and the list of tools it may use without asking. Each event is billed as one `claude -p` call.
