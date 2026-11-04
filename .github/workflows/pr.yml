@@ -47,3 +47,81 @@ jobs:
 
       - name: Test
         run: pnpm -r test
+
+  # Official MCP conformance suite against a throwaway server (PRY-085).
+  # Revision 2026-07-28 only: Hive rejects the legacy protocol by design
+  # (ADR-024), so the suite runs with `--requirements 2026-07-28`, which
+  # excludes every scenario of the older revisions. Known failures are the
+  # fixture-only scenarios listed in deployment/conformance/baseline.yml.
+  # See docs/mcp-conformance.md.
+  conformance:
+    name: MCP conformance (2026-07-28)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      # The suite needs Node >= 22 (`fs.globSync`); .nvmrc pins an older line.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Run the conformance suite
+        run: deployment/conformance/run.sh
+
+  # PRY-085: the per-sender unread cap is enforced under concurrency with a Postgres advisory
+  # lock; SQLite serializes writes, so only a real Postgres proves the race is closed.
+  postgres:
+    name: per-sender cap on Postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: hive
+          POSTGRES_PASSWORD: hive
+          POSTGRES_DB: hive_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hive -d hive_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      HIVE_TEST_PG_URL: postgres://hive:hive@localhost:5432/hive_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `#persistence/*` etc. resolve to `dist/`, so build before running the suite.
+      - name: Build
+        run: pnpm --filter @hive/server... build
+
+      - name: Per-sender cap tests (Postgres)
+        run: pnpm --filter @hive/server exec vitest run src/domain/cells/send.test.ts --reporter=verbose

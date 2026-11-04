@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   resolveWireConfigFromEnv,
   stopWithDrainTimeout,
+  warnIfAllowedHostsEmpty,
   warnIfStdoutConsumerMissing,
 } from './wire.js';
 
@@ -160,7 +161,65 @@ describe('resolveWireConfigFromEnv — listen', () => {
       listenStallTimeoutMs: 30_000,
       reverifyIntervalSeconds: 60,
       maxUnreadPerSender: 500,
+      listenLeaseMs: 60_000,
     });
+  });
+
+  it('reads HIVE_LISTEN_LEASE_MS and accepts 0 to disable leases', () => {
+    expect(resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '45000' }).listenLeaseMs).toBe(45_000);
+    expect(resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '0' }).listenLeaseMs).toBe(0);
+  });
+
+  it('rejects a lease that a keep-alive interval would outlast, or a malformed one', () => {
+    expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '15000' })).toThrow(
+      /HIVE_LISTEN_LEASE_MS must be above HIVE_LISTEN_KEEPALIVE_INTERVAL_MS/,
+    );
+    expect(() =>
+      resolveWireConfigFromEnv({}, { listenKeepAliveIntervalMs: 100, listenLeaseMs: 100 }),
+    ).toThrow(/HIVE_LISTEN_LEASE_MS/);
+    expect(
+      resolveWireConfigFromEnv({}, { listenKeepAliveIntervalMs: 100, listenLeaseMs: 600 })
+        .listenLeaseMs,
+    ).toBe(600);
+    expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '-1' })).toThrow();
+    expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '60000.5' })).toThrow();
+    expect(() => resolveWireConfigFromEnv({ HIVE_LISTEN_LEASE_MS: '86400001' })).toThrow();
+  });
+
+  it.each([
+    [-1, /HIVE_LISTEN_LEASE_MS must be an integer of 0 \(disabled\) or between 400 and 86400000/],
+    [Number.NaN, /HIVE_LISTEN_LEASE_MS must be an integer/],
+    [1.5, /HIVE_LISTEN_LEASE_MS must be an integer/],
+    [399, /between 400 and 86400000, got 399/],
+    [86_400_001, /between 400 and 86400000, got 86400001/],
+  ])('validates an override of %s like the env value', (leaseMs, message) => {
+    expect(() =>
+      resolveWireConfigFromEnv({}, { listenKeepAliveIntervalMs: 100, listenLeaseMs: leaseMs }),
+    ).toThrow(message);
+  });
+
+  it('rejects an env lease below the floor that keeps beats at a quarter of it', () => {
+    expect(() =>
+      resolveWireConfigFromEnv({
+        HIVE_LISTEN_LEASE_MS: '399',
+        HIVE_LISTEN_KEEPALIVE_INTERVAL_MS: '100',
+      }),
+    ).toThrow(/between 400 and 86400000/);
+    expect(
+      resolveWireConfigFromEnv({
+        HIVE_LISTEN_LEASE_MS: '400',
+        HIVE_LISTEN_KEEPALIVE_INTERVAL_MS: '100',
+      }).listenLeaseMs,
+    ).toBe(400);
+  });
+
+  it('a disabled lease skips the keep-alive check', () => {
+    expect(
+      resolveWireConfigFromEnv({
+        HIVE_LISTEN_LEASE_MS: '0',
+        HIVE_LISTEN_KEEPALIVE_INTERVAL_MS: '20000',
+      }).listenLeaseMs,
+    ).toBe(0);
   });
 
   it('rejects a keep-alive interval that hivectl watch would read as silence', () => {
@@ -187,5 +246,28 @@ describe('resolveWireConfigFromEnv — listen', () => {
       resolveWireConfigFromEnv({ HIVE_MCP_REVERIFY_INTERVAL_SECONDS: '0' }).reverifyIntervalSeconds,
     ).toBe(0);
     expect(() => resolveWireConfigFromEnv({ HIVE_CELL_MAX_UNREAD_PER_SENDER: '0' })).toThrow();
+  });
+});
+
+describe('warnIfAllowedHostsEmpty (PRY-085)', () => {
+  it('emits one structured warn when the allow-list is empty', () => {
+    const warn = vi.fn();
+    const logger = { warn } as unknown as Parameters<typeof warnIfAllowedHostsEmpty>[0];
+    warnIfAllowedHostsEmpty(logger, []);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [fields, message] = warn.mock.calls[0]! as [Record<string, unknown>, string];
+    expect(fields['event']).toBe('allowed_hosts_empty');
+    expect(fields['envVar']).toBe('HIVE_MCP_ALLOWED_HOSTS');
+    expect(message).toContain('HIVE_MCP_ALLOWED_HOSTS');
+    expect(message).toContain('Host header is not validated');
+  });
+
+  it('does not warn when the allow-list has entries', () => {
+    const warn = vi.fn();
+    const logger = { warn } as unknown as Parameters<typeof warnIfAllowedHostsEmpty>[0];
+    warnIfAllowedHostsEmpty(logger, ['hive.example.com']);
+
+    expect(warn).not.toHaveBeenCalled();
   });
 });

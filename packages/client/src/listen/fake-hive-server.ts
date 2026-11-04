@@ -22,6 +22,18 @@ export interface FakeHiveServerOptions {
   keepAliveMs?: number;
   /** Emit a `replay` event right after each listen acknowledgment when unread > 0. */
   replayOnListen?: boolean;
+  /**
+   * Grants this lease to a listen that carries `Hive-Listen-Lease`, announced in
+   * `Hive-Listen-Lease-Ms`. Absent: a server without lease support, which ignores the
+   * header. The fake never expires a stream; it only records what the client sent.
+   */
+  leaseMs?: number;
+}
+
+export interface FakeLeaseRequest {
+  method: string;
+  /** Value of `Hive-Listen-Lease`, if any. */
+  key: string | undefined;
 }
 
 export interface FakeHiveServer {
@@ -30,6 +42,8 @@ export interface FakeHiveServer {
   toolCalls: string[];
   /** Every JSON-RPC method received, in order. */
   methods: string[];
+  /** Every request received, in order, with its lease key. */
+  leaseRequests: FakeLeaseRequest[];
   /** Number of `subscriptions/listen` requests accepted. */
   listenCount(): number;
   setUnread(participant: string, unread: FakeUnread): void;
@@ -52,6 +66,8 @@ export interface FakeHiveServer {
   setToolDelay(ms: number): void;
   /** Makes `tools/call` of `check_unread_messages` answer a JSON-RPC internal error. */
   setCheckFails(fails: boolean): void;
+  /** Answers every `server/discover` with HTTP 500 (a failing lease renewal). */
+  setDiscoverFails(fails: boolean): void;
   close(): Promise<void>;
 }
 
@@ -90,6 +106,8 @@ export async function startFakeHiveServer(options: FakeHiveServerOptions): Promi
   const sockets = new Set<Socket>();
   const toolCalls: string[] = [];
   const methods: string[] = [];
+  const leaseRequests: FakeLeaseRequest[] = [];
+  let discoverFails = false;
   let listens = 0;
   let rejectAuth = false;
   let unsupported = false;
@@ -176,6 +194,8 @@ export async function startFakeHiveServer(options: FakeHiveServerOptions): Promi
       const body = JSON.parse(raw) as { method?: string; params?: Record<string, unknown> };
       const method = body.method ?? '';
       methods.push(method);
+      const leaseKey = req.headers['hive-listen-lease'];
+      leaseRequests.push({ method, key: typeof leaseKey === 'string' ? leaseKey : undefined });
       if (method === 'tools/call') toolCalls.push(`call:${String(body.params?.['name'])}`);
       if (rejectAuth) return jsonRpcError(res, 401, -32001, 'authentication failed');
       const token = /^Bearer (.+)$/i.exec(req.headers.authorization ?? '')?.[1];
@@ -185,6 +205,10 @@ export async function startFakeHiveServer(options: FakeHiveServerOptions): Promi
         return jsonRpcError(res, 400, -32022, 'unsupported protocol version', {
           supported: ['2026-07-28'],
         });
+      }
+
+      if (method === 'server/discover' && discoverFails && leaseKey !== undefined) {
+        return jsonRpcError(res, 500, -32603, 'internal error');
       }
 
       const isListen = method === 'subscriptions/listen';
@@ -239,7 +263,11 @@ export async function startFakeHiveServer(options: FakeHiveServerOptions): Promi
           }
         }
       }
-      res.writeHead(response.status, Object.fromEntries(response.headers));
+      const responseHeaders: Record<string, string> = Object.fromEntries(response.headers);
+      if (isListen && isSse && options.leaseMs !== undefined && typeof leaseKey === 'string') {
+        responseHeaders['hive-listen-lease-ms'] = String(options.leaseMs);
+      }
+      res.writeHead(response.status, responseHeaders);
       if (!response.body) return void res.end();
       const readable = Readable.fromWeb(response.body);
       readable.on('error', () => res.destroy());
@@ -268,6 +296,7 @@ export async function startFakeHiveServer(options: FakeHiveServerOptions): Promi
     url: `http://127.0.0.1:${port}/mcp`,
     toolCalls,
     methods,
+    leaseRequests,
     listenCount: () => listens,
     setUnread: (participant, u) => void unread.set(participant, u),
     publish,
@@ -284,6 +313,7 @@ export async function startFakeHiveServer(options: FakeHiveServerOptions): Promi
     setUnsupportedProtocol: (v) => void (unsupported = v),
     setToolDelay: (ms) => void (toolDelayMs = ms),
     setCheckFails: (v) => void (checkFails = v),
+    setDiscoverFails: (v) => void (discoverFails = v),
     close: async () => {
       await handler.close();
       for (const s of sockets) s.destroy();

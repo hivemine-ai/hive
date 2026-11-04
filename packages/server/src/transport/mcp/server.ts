@@ -56,6 +56,7 @@ const DEFAULT_INSTRUCTIONS =
 // the mailbox depends on the caller, so it must not be cached across participants.
 const CACHE_HINTS = {
   'tools/list': { ttlMs: 60_000, cacheScope: 'public' },
+  'resources/templates/list': { ttlMs: 60_000, cacheScope: 'public' },
   'resources/list': { ttlMs: 0, cacheScope: 'private' },
   'resources/read': { ttlMs: 0, cacheScope: 'private' },
 } as const;

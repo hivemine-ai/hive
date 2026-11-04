@@ -12,6 +12,8 @@ export type CloseReason = 'local' | 'graceful' | 'remote' | 'silence';
 export interface ListenConnection {
   /** Resolves once, never rejects, when the stream ends. */
   readonly closed: Promise<CloseReason>;
+  /** Lease granted by the server; null when it granted none (or does not support it). */
+  readonly leaseMs?: number | null;
   close(): Promise<void>;
 }
 
@@ -104,7 +106,7 @@ export async function runListenLoop(
 
     window.success();
     const connectedAt = deps.now();
-    deps.log({ event: 'watch.connected' });
+    deps.log({ event: 'watch.connected', leaseMs: connection.leaseMs ?? null });
     const outcome = await Promise.race([connection.closed, aborted]);
     await connection.close().catch(() => {});
     if (outcome === 'aborted' || options.signal.aborted) break;

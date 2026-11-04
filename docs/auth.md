@@ -51,6 +51,8 @@ The Hive enforces invariant **"at least one active admin Hivekeeper exists at al
 | **Rotate** | Atomically issues a new JWT and adds the old `jti` to the revocation blocklist. Use when a credential is suspected leaked, or just to reset the clock.      |
 | **Revoke** | Adds a `jti` to the blocklist without issuing a replacement. The credential is rejected on the next verification.                                           |
 
+**Revocation cleanup.** Every verification reads the revocation table, so the server deletes a row once its credential has expired (`exp` plus the 5 s clock tolerance): from then on verification rejects the token as `CREDENTIAL_EXPIRED` before the blocklist is consulted, so the row can no longer matter. The purge runs at server start and then every hour, in batches of 1000 rows, and logs `auth_revocations_purged` with the `purged` count and `durationMs` (a failed pass logs `auth_revocations_purge_failed` and retries on the next tick). A revocation of a still-valid credential is never purged. Tune with `HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS`.
+
 ### What's NOT in v0.1
 
 - Browser flows (OAuth, OpenID Connect)
@@ -81,14 +83,15 @@ When a JWT is rejected by the verifier, you'll see one of:
 
 Environment variables consumed at boot:
 
-| Env var              | Default                       | Purpose                                                                                  |
-| -------------------- | ----------------------------- | ---------------------------------------------------------------------------------------- |
-| `HIVE_DB_DIALECT`    | `sqlite`                      | Database dialect. `sqlite` or `postgres`. Inferred from `HIVE_DB_URL` prefix if not set. |
-| `HIVE_DB_URL`        | `sqlite:./var/db/hive.sqlite` | Connection URL. Prefix `sqlite:` or `postgres://`.                                       |
-| `HIVE_DB_POOL_SIZE`  | `10`                          | Postgres-only: connection pool size. Ignored for SQLite.                                 |
-| `HIVE_DB_SQLITE_WAL` | `true`                        | SQLite-only: enable WAL journal mode. Set to `false` to disable.                         |
-| `HIVE_AUTH_KEYS_DIR` | `./var/keys`                  | Directory for signing key PEMs. Private keys are created with mode `0600`.               |
-| `HIVE_LOG_LEVEL`     | `info`                        | Pino logger level.                                                                       |
+| Env var                                       | Default                       | Purpose                                                                                       |
+| --------------------------------------------- | ----------------------------- | --------------------------------------------------------------------------------------------- |
+| `HIVE_DB_DIALECT`                             | `sqlite`                      | Database dialect. `sqlite` or `postgres`. Inferred from `HIVE_DB_URL` prefix if not set.      |
+| `HIVE_DB_URL`                                 | `sqlite:./var/db/hive.sqlite` | Connection URL. Prefix `sqlite:` or `postgres://`.                                            |
+| `HIVE_DB_POOL_SIZE`                           | `10`                          | Postgres-only: connection pool size. Ignored for SQLite.                                      |
+| `HIVE_DB_SQLITE_WAL`                          | `true`                        | SQLite-only: enable WAL journal mode. Set to `false` to disable.                              |
+| `HIVE_AUTH_KEYS_DIR`                          | `./var/keys`                  | Directory for signing key PEMs. Private keys are created with mode `0600`.                    |
+| `HIVE_LOG_LEVEL`                              | `info`                        | Pino logger level.                                                                            |
+| `HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS` | `3600`                        | How often expired revocations are purged. `0` disables the purge (the table then only grows). |
 
 ## See also
 

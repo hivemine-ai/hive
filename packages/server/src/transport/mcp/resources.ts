@@ -3,9 +3,9 @@
 // from a missing one, and a caller without a Cell gets the same answer. Contents are mailbox metadata, never message bodies: bodies are
 // read with read_mailbox, as untrusted data.
 
+import { ResourceNotFoundError } from '@modelcontextprotocol/server';
 import type { McpServer } from '@modelcontextprotocol/server';
 
-import { CellError } from '#domain/cells/index.js';
 import type { CellsRepo } from '#domain/cells/index.js';
 import type { Logger } from '#observability/logger.js';
 
@@ -17,6 +17,12 @@ export interface MailboxResourceDeps {
   cellsRepo: CellsRepo;
   logger: Logger;
 }
+
+export const MAILBOX_URI_TEMPLATE = 'hive://cells/{cellId}';
+const MAILBOX_NAME = 'mailbox';
+const MAILBOX_TITLE = 'Mailbox';
+const MAILBOX_DESCRIPTION = 'Unread count and senders of the caller mailbox.';
+const MAILBOX_MIME_TYPE = 'application/json';
 
 export function mailboxUri(cellId: string): string {
   return `hive://cells/${cellId}`;
@@ -40,10 +46,10 @@ export function registerMailboxResources(server: McpServer, deps: MailboxResourc
         resources: [
           {
             uri: mailboxUri(cellId),
-            name: 'mailbox',
-            title: 'Mailbox',
-            description: 'Unread count and senders of the caller mailbox.',
-            mimeType: 'application/json',
+            name: MAILBOX_NAME,
+            title: MAILBOX_TITLE,
+            description: MAILBOX_DESCRIPTION,
+            mimeType: MAILBOX_MIME_TYPE,
           },
         ],
       };
@@ -52,13 +58,37 @@ export function registerMailboxResources(server: McpServer, deps: MailboxResourc
     }
   });
 
+  // The template is the same for every caller; only the cell id it expands to is private,
+  // and resources/read refuses any id that is not the caller's own.
+  server.server.setRequestHandler('resources/templates/list', () => ({
+    resourceTemplates: [
+      {
+        uriTemplate: MAILBOX_URI_TEMPLATE,
+        name: MAILBOX_NAME,
+        title: MAILBOX_TITLE,
+        description: MAILBOX_DESCRIPTION,
+        mimeType: MAILBOX_MIME_TYPE,
+      },
+    ],
+  }));
+
   server.server.setRequestHandler('resources/read', async (request, handlerCtx) => {
     try {
       const ctx = requestContextFrom(handlerCtx.http?.authInfo);
       const cellId = await callerCellId(deps, ctx);
       const uri = cellId === null ? null : mailboxUri(cellId);
       if (cellId === null || request.params.uri !== uri) {
-        throw new CellError('INVALID_INPUT', { subCode: 'mailbox_uri_not_owned' });
+        deps.logger.warn(
+          {
+            event: 'mcp_tool_error',
+            domainCode: 'INVALID_INPUT',
+            subCode: 'mailbox_uri_not_owned',
+          },
+          'invalid input',
+        );
+        // SEP-2164: the error data echoes the requested URI. It is the caller's own
+        // input, so it reveals nothing about whether the mailbox exists.
+        throw new ResourceNotFoundError(request.params.uri, 'invalid input');
       }
       const summary = await deps.cellsRepo.summarizeUnreadForCell(cellId);
       return {

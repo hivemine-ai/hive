@@ -12,7 +12,16 @@ npm install -g @hivemine/hivectl
 
 Self-contained SEA binary (~108 MB) — no Node runtime required at the install host. Per-platform packages cover `linux-x64`, `linux-arm64`, `darwin-arm64`; the wrapper `@hivemine/hivectl` resolves to the right binary on install via npm `optionalDependencies` filtered by `os` / `cpu`.
 
-> **Intel Mac (`darwin-x64`) note for v0.1.0.** Apple Silicon Macs (M1/M2/M3+) are supported via the `darwin-arm64` binary. Intel Macs do not have a native binary in v0.1.0 — install [Rosetta 2](https://support.apple.com/en-us/HT211861) (`softwareupdate --install-rosetta` on macOS 15+; macOS 11-14 prompts automatically on first need) and use the `linux-x64` binary. See `CHANGELOG.md` under `[Unreleased]/Changed` for the GitHub Actions runner rationale and reversibility plan.
+Without npm, each GitHub release attaches one self-contained archive per platform (`hivectl-linux-x64.tar.gz`, `hivectl-linux-arm64.tar.gz`, `hivectl-darwin-arm64.tar.gz`) plus a `SHA256SUMS` file. The archive has the same layout as the npm platform package (`bin/hivectl`, `native/`, `node_modules/`); the binary resolves `better-sqlite3` relative to its own location, so keep the extracted directory intact and do not copy `bin/hivectl` out on its own.
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS   # use `shasum -a 256 -c` on macOS
+tar -xzf hivectl-linux-x64.tar.gz
+./hivectl-linux-x64/bin/hivectl --version
+ln -s "$PWD/hivectl-linux-x64/bin/hivectl" /usr/local/bin/hivectl   # optional
+```
+
+> **Intel Mac (`darwin-x64`) note for v0.1.0.** Apple Silicon Macs (M1/M2/M3+) are supported via the `darwin-arm64` binary. Intel Macs do not have a native binary in v0.1.0 — install [Rosetta 2](https://support.apple.com/en-us/HT211861) (`softwareupdate --install-rosetta` on macOS 15+; macOS 11-14 prompts automatically on first need) and use the `linux-x64` binary. See `CHANGELOG.md` under `[0.1.1]/Changed` for the GitHub Actions runner rationale and reversibility plan.
 
 Contributors building from source: see [`packages/cli/README.md`](../packages/cli/README.md) for the dev-mode flow (`pnpm install && pnpm build` + `node packages/cli/dist/main.js <args>`).
 
@@ -112,7 +121,7 @@ Running `hivectl` with no arguments renders a local snapshot view in three frame
 ```
 $ hivectl
 
-    ⬢ ⬢ ⬢    hivectl  ·  v0.2.0  ·  apache-2.0
+    ⬢ ⬢ ⬢    hivectl  ·  v0.2.1  ·  apache-2.0
   ⬢ ⬢ ⬢ ⬢ ⬢  open-source MCP server for collaborative AI agents
     ⬢ ⬢ ⬢    snapshot 12s ago · ~/.local/state/hive/status.json
 
@@ -160,7 +169,7 @@ In pretty mode (`--output table`, the default for an interactive TTY) `init` ren
 
 ```
        ⬢ ⬢ ⬢ ⬢
-     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      hivectl   ·   v0.2.0
+     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      hivectl   ·   v0.2.1
    ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢
      ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      bootstrapping a fresh Hive
        ⬢ ⬢ ⬢ ⬢        apache-2.0  ·  hivemine-ai/hive
@@ -304,7 +313,7 @@ Bind-address precedence (highest wins): `--host` flag → `HIVE_MCP_HTTP_HOST` e
 
 By default `serve` boots in **3 phases** for human operators sitting at a terminal:
 
-1. **Boot banner + sub-block** — the compact identity banner (`⬢ ⬢ ⬢ hivectl · v0.2.0 · apache-2.0` + tagline + `starting hive · <hive-name>`) followed by 3 metadata rows (`bind`, `database`, `log level`). The hive name comes from the on-disk status snapshot (per [ADR-022](https://github.com/hivemine-ai/hive-vault)) — fresh installs without an `init` yet show `starting hive` (no suffix). The `database` row strips Postgres credentials (`postgres://hive:***@db.example.com:5432/hivedb` is rendered as `postgres · hive@db.example.com:5432/hivedb`).
+1. **Boot banner + sub-block** — the compact identity banner (`⬢ ⬢ ⬢ hivectl · v0.2.1 · apache-2.0` + tagline + `starting hive · <hive-name>`) followed by 3 metadata rows (`bind`, `database`, `log level`). The hive name comes from the on-disk status snapshot (per [ADR-022](https://github.com/hivemine-ai/hive-vault)) — fresh installs without an `init` yet show `starting hive` (no suffix). The `database` row strips Postgres credentials (`postgres://hive:***@db.example.com:5432/hivedb` is rendered as `postgres · hive@db.example.com:5432/hivedb`).
 2. **Live log stream** — every pino log line is reformatted to the canonical shape `hh:mm:ss.mmm␣␣LEVEL␣␣module.path␣␣message␣␣k=v…`. Level chips (`INFO ` / `DEBUG` / `WARN ` / `ERROR`) are 5 chars wide, padded right; the module column is padded to a width determined at boot (default 20 chars when no namespaces are known); separators are 2 spaces between segments. The log emitter on the server side is unchanged — pino still emits raw JSON internally, the formatter is read-only of that JSON line.
 3. **Readiness line** — once the HTTP listener is bound and answering health probes, a single line `⬡ ready · http://<host>:<port>` prints in the OK colour. After this, the live log stream continues showing actual traffic.
 

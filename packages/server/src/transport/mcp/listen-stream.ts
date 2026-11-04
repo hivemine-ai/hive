@@ -7,6 +7,12 @@
 // that passed `authorize` is the own mailbox and counts as presence. An empty one, which
 // is how Claude Code opens its own stream, is served and never counts, but it has the
 // same lifecycle: keep-alive, expiry, re-verification and `complete` on shutdown.
+//
+// Lease (opt-in): a listen that carries `Hive-Listen-Lease: <key>` gets a lease of
+// `leaseMs`, announced back in `Hive-Listen-Lease-Ms`. The client renews it by sending
+// `server/discover` with the same key. Keys are bound to the participant that opened
+// the stream, so another participant carrying the same key renews nothing. A stream
+// without the header keeps today's behaviour and never expires for silence.
 
 import { v7 as uuidv7 } from 'uuid';
 
@@ -24,7 +30,7 @@ import type { Logger } from '#observability/logger.js';
 import { MCP_ERR_INVALID_PARAMS } from './error-codes.js';
 import type { ListenBinding, ListenEdge, ListenResponseInput } from './http-host.js';
 import { mailboxUri } from './resources.js';
-import { createStreamHandle } from './subscriber-handle.js';
+import { createStreamHandle, type StreamHandle } from './subscriber-handle.js';
 import type { WireError } from './types.js';
 
 export interface ListenStreamsDeps {
@@ -37,6 +43,8 @@ export interface ListenStreamsDeps {
   stallTimeoutMs: number;
   /** 0 disables the periodic pass. */
   reverifyIntervalSeconds: number;
+  /** Lease granted to a listen that asks for one. Null disables leases: the header is ignored. */
+  leaseMs: number | null;
 }
 
 export interface ListenStreams extends ListenEdge {
@@ -56,6 +64,15 @@ export interface ListenStreams extends ListenEdge {
 interface OpenStream {
   handle: SubscriberHandle;
   identity: IdentityContext;
+}
+
+export const LEASE_RESPONSE_HEADER = 'hive-listen-lease-ms';
+
+/** Long enough to be unguessable, short enough to bound the map key. */
+const LEASE_KEY_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+
+function leaseSlot(participantId: string, key: string): string {
+  return `${participantId}:${key}`;
 }
 
 const INVALID_INPUT: WireError = { code: MCP_ERR_INVALID_PARAMS, message: 'invalid input' };
@@ -91,6 +108,7 @@ function subscribeFailureReason(subCode: string | undefined): StreamCloseReason 
 export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
   const { logger } = deps;
   const open = new Map<string, OpenStream>();
+  const leases = new Map<string, StreamHandle>();
   let reverifyTimer: NodeJS.Timeout | undefined;
   let reverifying = false;
 
@@ -109,6 +127,12 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
     resourceSubscriptionsCount: number,
   ): SubscriberHandle {
     const { body, identity, requestId, raw, abort } = input;
+    const leaseKey =
+      deps.leaseMs !== null &&
+      input.leaseKey !== undefined &&
+      LEASE_KEY_PATTERN.test(input.leaseKey)
+        ? input.leaseKey
+        : undefined;
     const handle = createStreamHandle({
       callerContext: identity,
       sink: raw,
@@ -118,8 +142,16 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
       keepAliveIntervalMs: deps.keepAliveIntervalMs,
       stallTimeoutMs: deps.stallTimeoutMs,
       logger,
+      ...(leaseKey !== undefined && deps.leaseMs !== null && { leaseMs: deps.leaseMs }),
     });
     raw.socket?.setKeepAlive(true, deps.keepAliveIntervalMs);
+    const leaseMs = leaseKey !== undefined ? deps.leaseMs : null;
+    let slot: string | undefined;
+    if (leaseKey !== undefined) {
+      slot = leaseSlot(identity.participantId, leaseKey);
+      leases.set(slot, handle);
+      raw.setHeader(LEASE_RESPONSE_HEADER, String(leaseMs));
+    }
 
     const fields = {
       streamId,
@@ -128,13 +160,14 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
       subscribesOwnMailbox,
     };
     logger.info(
-      { event: 'mcp_listen_opened', ...fields, resourceSubscriptionsCount, requestId },
+      { event: 'mcp_listen_opened', ...fields, resourceSubscriptionsCount, leaseMs, requestId },
       'listen stream opened',
     );
     open.set(handle.connectionId, { handle, identity });
     const openedAt = Date.now();
     handle.onClose((closeReason) => {
       open.delete(handle.connectionId);
+      if (slot !== undefined && leases.get(slot) === handle) leases.delete(slot);
       logger.info(
         {
           event: 'mcp_listen_closed',
@@ -252,6 +285,10 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
       clearInterval(reverifyTimer);
       reverifyTimer = undefined;
       for (const { handle } of Array.from(open.values())) handle.close('shutdown');
+    },
+
+    renewLease({ key, identity }) {
+      return leases.get(leaseSlot(identity.participantId, key))?.renewLease() ?? false;
     },
 
     reverifyOpenStreams,
