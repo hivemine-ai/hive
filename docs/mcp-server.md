@@ -2,7 +2,7 @@
 
 The Hive MCP server exposes the Auth, Cell Store, Visibility, Audit, and Waggle subsystems behind a Model Context Protocol (MCP) HTTP transport. Client agents speak JSON-RPC over HTTP to call tools and receive push notifications over one long-lived stream.
 
-> **Status:** v0.2.1 serves MCP revision `2026-07-28` and nothing else. There is no `initialize` handshake, no session and no legacy fallback. See [Protocol](#protocol) and the breaking changes in the [CHANGELOG](../CHANGELOG.md).
+> **Status:** v0.2.2 serves MCP revision `2026-07-28` and nothing else. There is no `initialize` handshake, no session and no legacy fallback. See [Protocol](#protocol) and the breaking changes in the [CHANGELOG](../CHANGELOG.md).
 
 ## Quick start
 

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-04
+
+v0.2.2. Fixes a hang of `send_message` denied by the visibility matrix on SQLite. **No breaking changes**: a v0.2.1 client works against a v0.2.2 server and the other way round.
+
 ### Fixed
 
 - **A `send_message` or `reply_to` denied by the visibility matrix no longer hangs on SQLite** (PRY-087, INC-2026-009). The denial audit row was written on the outer database handle while the send transaction still held SQLite's only connection, so the call never returned. The audit write is now deferred until the transaction has rolled back; the denial is still audited exactly once, the caller gets `RECIPIENT_UNREACHABLE` (`visibility_denied`) promptly, and Postgres behaviour is unchanged.

@@ -1,6 +1,6 @@
 {
   "name": "hive-wake",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Wakes an idle Claude Code session when Hive has unread messages, through hivectl watch.",
   "license": "Apache-2.0",
   "userConfig": {
