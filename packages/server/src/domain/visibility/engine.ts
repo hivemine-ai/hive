@@ -162,17 +162,23 @@ export function createVisibilityEngine(
         }
       }
 
-      // Step 3 (invariant): every deny converges here before returning.
+      // Step 3 (invariant): every deny converges here before returning. The
+      // write either happens inline or is handed to the caller via
+      // `deferDenialAudit`, who owns running it after its transaction ends.
       if (decision.kind === 'deny') {
-        await deps.recorder.recordEvent(
-          buildDenialAuditEvent(
-            input.callerContext,
-            input.recipientId,
-            decision,
-            occurredAt,
-            input.requestId,
-          ),
+        const event = buildDenialAuditEvent(
+          input.callerContext,
+          input.recipientId,
+          decision,
+          occurredAt,
+          input.requestId,
         );
+        const record = (): Promise<void> => deps.recorder.recordEvent(event);
+        if (input.deferDenialAudit) {
+          input.deferDenialAudit(record);
+        } else {
+          await record();
+        }
         return false;
       }
 

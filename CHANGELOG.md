@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `send_message` or `reply_to` denied by the visibility matrix no longer hangs on SQLite** (PRY-087, INC-2026-009). The denial audit row was written on the outer database handle while the send transaction still held SQLite's only connection, so the call never returned. The audit write is now deferred until the transaction has rolled back; the denial is still audited exactly once, the caller gets `RECIPIENT_UNREACHABLE` (`visibility_denied`) promptly, and Postgres behaviour is unchanged.
+
 ### Changed
 
 - **Documentation aligned with the friendly identifiers of the ADR-020 cascade** (PRY-043, PRY-E — last — of the cascade; docs only, no behaviour change). In v0.1.x the cascade made `hivectl` accept readable references wherever a participant or credential is named: `--operator-id` takes a Hivekeeper email or a UUID v7 (PRY-039); `agent revoke <agent-ref>` takes `<name>@<owner-local>.<hive>` (PRY-040); `credential rotate` and `credential revoke` take `<participant-ref>:latest` for the currently-active credential (PRY-041); `audit query --actor-id` and `--subject-id` take an email, an agent reference or a UUID v7 (PRY-042). The audit of README, `docs/` and the package READMEs against the current `hivectl --help` found no leftover raw-id placeholders except in the `hivectl watch` and reactive-agents guides, which now say that `credential issue --participant-id` takes the agent's UUID v7 (or a Hivekeeper email), and `docs/hivectl.md` no longer claims that every participant flag accepts every form: `--operator-id`, `--owner`, `credential issue --participant-id` and `credential list` accept an email or a UUID v7 but not an agent reference.

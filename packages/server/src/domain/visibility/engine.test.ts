@@ -277,6 +277,34 @@ describe('visibilityEngine.canSend — deny + audit invariant', () => {
     expect(denials[0]?.actor_id).toBe(h.world.workerAgentId);
   });
 
+  it('deferDenialAudit hands the write to the caller: nothing is recorded until the thunk runs', async () => {
+    const callerCtx = ctxFor(
+      'worker',
+      h.world.workerAgentId,
+      h.world.hiveId,
+      h.world.colonyId,
+      h.world.adminHivekeeperId,
+    );
+    let pending: (() => Promise<void>) | null = null;
+    const allowed = await h.engine.canSend({
+      callerContext: callerCtx,
+      recipientId: h.world.workerOfNonAdminId,
+      deferDenialAudit: (record) => {
+        pending = record;
+      },
+    });
+    expect(allowed).toBe(false);
+    expect(pending).not.toBeNull();
+    expect(await findDenialsAgainst(h.db, h.world.hiveId, h.world.workerOfNonAdminId)).toHaveLength(
+      0,
+    );
+
+    await (pending as unknown as () => Promise<void>)();
+    const denials = await findDenialsAgainst(h.db, h.world.hiveId, h.world.workerOfNonAdminId);
+    expect(denials).toHaveLength(1);
+    expect(denials[0]?.reason_code).toBe('worker_to_other_owner_worker');
+  });
+
   it('hivekeeper → other-owner worker → deny + reason hivekeeper_to_other_owner_worker', async () => {
     const callerCtx = ctxFor(
       'hivekeeper',
