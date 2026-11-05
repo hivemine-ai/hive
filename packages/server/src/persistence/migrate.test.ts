@@ -62,8 +62,8 @@ describe('migrateToLatest', () => {
     const downResult = await migrateDown(db);
     expect(downResult.results?.[0]?.status).toBe('Success');
 
-    // `migrateDown` only rolls back the most recent migration: the ADR-026 enrollment
-    // delta on `agents` and `credentials`. All tables remain.
+    // `migrateDown` only rolls back the most recent migration: the ADR-026 widening of
+    // the audit_log categories. All tables remain.
     const tables = await sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'kysely_%'
       ORDER BY name
@@ -71,12 +71,13 @@ describe('migrateToLatest', () => {
     const remaining = tables.rows.map((r) => r.name).sort();
     expect(remaining).toEqual(EXPECTED_TABLES);
 
-    const agentCols = await sql<{ name: string }>`
-      PRAGMA table_info(agents)
-    `.execute(db);
-    const agentColNames = agentCols.rows.map((r) => r.name);
-    expect(agentColNames).toContain('last_connected_at');
-    expect(agentColNames).not.toContain('origin');
+    await sql`INSERT INTO hives (id, name) VALUES ('h', 'h')`.execute(db);
+    await expect(
+      sql`
+        INSERT INTO audit_log (id, hive_id, occurred_at, category, decision, actor_kind)
+        VALUES ('a', 'h', '2026-11-05T00:00:00.000Z', 'agent_enrolled', 'success', 'system')
+      `.execute(db),
+    ).rejects.toThrow(/CHECK/i);
   });
 
   it('inserts a default state row with CURRENT_TIMESTAMP working in SQLite', async () => {

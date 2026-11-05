@@ -18,8 +18,12 @@ const DIALECT: DbDialect = PG_URL !== undefined && PG_URL !== '' ? 'postgres' : 
 
 const LATEST = '20261105120000_enrollment-agents-credentials';
 const V02_MIGRATIONS = Object.fromEntries(
-  Object.entries(ALL_MIGRATIONS).filter(([name]) => name !== LATEST),
+  Object.entries(ALL_MIGRATIONS).filter(([name]) => name < LATEST),
 );
+// Later migrations are left out so `migrateDown` rolls back this one.
+const THROUGH_LATEST = {
+  migrations: Object.fromEntries(Object.entries(ALL_MIGRATIONS).filter(([name]) => name <= LATEST)),
+};
 
 async function freshDb(): Promise<Kysely<Database>> {
   if (DIALECT === 'postgres') {
@@ -97,7 +101,7 @@ describe(`${LATEST} (${DIALECT})`, () => {
     db = await freshDb();
     await migrateToLatest(db, { migrations: V02_MIGRATIONS });
     await seedV02World();
-    await migrateToLatest(db);
+    await migrateToLatest(db, THROUGH_LATEST);
   });
 
   afterEach(async () => {
@@ -246,7 +250,7 @@ describe(`${LATEST} (${DIALECT})`, () => {
   });
 
   it('is reversible: down restores the v0.2.x agents and credentials shape', async () => {
-    await migrateDown(db);
+    await migrateDown(db, THROUGH_LATEST);
     const agentCols = await db.introspection.getTables();
     const agents = agentCols.find((t) => t.name === 'agents');
     const credentials = agentCols.find((t) => t.name === 'credentials');

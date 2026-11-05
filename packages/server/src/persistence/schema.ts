@@ -170,7 +170,16 @@ export type AuditEventCategoryDb =
   | 'admin_retention_policy_set'
   | 'admin_retention_policy_clear'
   | 'admin_purge_run'
-  | 'waggle_push_suppressed';
+  | 'waggle_push_suppressed'
+  | 'enrollment_credential_issued'
+  | 'enrollment_credential_rotated'
+  | 'enrollment_credential_revoked'
+  | 'agent_enrolled'
+  | 'agent_claimed'
+  | 'agent_retired'
+  | 'agent_revived'
+  | 'admin_agent_release'
+  | 'enrollment_reject_alert';
 
 export type AuditDecisionDb = 'allow' | 'deny' | 'success' | 'failure';
 export type AuditActorKindDb = 'hivekeeper' | 'worker' | 'scout' | 'system';

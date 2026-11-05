@@ -15,6 +15,7 @@ import { runListAgents } from './commands/agent/list.js';
 import { runRevokeAgent } from './commands/agent/revoke.js';
 import { registerConfigGroup } from './commands/config/index.js';
 import { runIssueCredential } from './commands/credential/issue.js';
+import { runIssueEnrollmentCredential } from './commands/credential/issue-enrollment.js';
 import { runListCredentials } from './commands/credential/list.js';
 import { runRevokeCredential } from './commands/credential/revoke.js';
 import { runRotateCredential } from './commands/credential/rotate.js';
@@ -25,6 +26,7 @@ import { performMigrate } from './commands/migrate.js';
 import { parseLogLevel, runServe } from './commands/serve.js';
 import { registerServiceGroup } from './commands/service/index.js';
 import { registerWatchCommand } from './commands/watch/index.js';
+import { CliError } from '#error/cli-error.js';
 import { mapErrorToExit } from '#error/handler.js';
 import { asOptionalNumber, asOptionalString, asString, asStringArray } from './input/coerce.js';
 import { formatOutput, formatOutputList, resolveOutputMode } from './output/format.js';
@@ -35,6 +37,7 @@ import {
   createHivekeeperSchema,
   initSchema,
   issueCredentialSchema,
+  issueEnrollmentCredentialSchema,
   listAgentsSchema,
   listCredentialsSchema,
   listKeepersSchema,
@@ -418,20 +421,69 @@ export function buildProgram(): BuildProgramResult {
   const credential = program.command('credential').description('Credential lifecycle.');
   credential
     .command('issue')
-    .description('Issue a new credential for a participant.')
-    .requiredOption('--participant-id <ref>', 'participant (email or UUIDv7)')
+    .description(
+      'Issue a new credential for a participant, or with --enrollment an enrollment ' +
+        'credential that registers Claude Code sessions as Workers of --owner.',
+    )
+    .option('--participant-id <ref>', 'participant (email or UUIDv7)')
+    .option('--enrollment', 'issue an enrollment credential (scope enroll)', false)
+    .option('--owner <ref>', 'with --enrollment: owner Hivekeeper (email or UUIDv7)')
+    .option('--name-prefix <prefix>', 'with --enrollment: required prefix of agent names')
+    .option(
+      '--max-agents <n>',
+      'with --enrollment: active agents allowed (<= HIVE_ENROLLMENT_MAX_AGENTS)',
+    )
     .option('--ttl <duration>', 'credential TTL')
     .option('--reason <text>', 'free-form audit reason')
     .option('--output-credential <path>', 'write JWT to this file (perms 0600)')
     .action(async (cmdOpts: Record<string, unknown>) => {
       const s = state();
+      if (cmdOpts['enrollment'] === true) {
+        await runHandler(
+          s,
+          async () => {
+            if (cmdOpts['participantId'] !== undefined) {
+              throw new CliError('CONFIG_INVALID', {
+                subCode: 'enrollment_excludes_participant_id',
+                message: '--enrollment cannot be combined with --participant-id',
+              });
+            }
+            const owner = asOptionalString(cmdOpts['owner']);
+            if (owner === undefined) {
+              throw new CliError('CONFIG_INVALID', {
+                subCode: 'enrollment_requires_owner',
+                message: '--enrollment requires --owner <email-or-uuid>',
+              });
+            }
+            const runtime = await getRuntime(s.logger);
+            return runIssueEnrollmentCredential(runtime, {
+              globals: s.globals,
+              ownerRef: owner,
+              namePrefix: asOptionalString(cmdOpts['namePrefix']),
+              maxAgents: asOptionalString(cmdOpts['maxAgents']),
+              ttl: asOptionalString(cmdOpts['ttl']),
+              reason: asOptionalString(cmdOpts['reason']),
+              outputCredential: asOptionalString(cmdOpts['outputCredential']),
+            });
+          },
+          (value, mode) => formatOutput(value, { mode, schema: issueEnrollmentCredentialSchema }),
+        );
+        return;
+      }
       await runHandler(
         s,
         async () => {
+          const participantId = asOptionalString(cmdOpts['participantId']);
+          if (participantId === undefined) {
+            throw new CliError('CONFIG_INVALID', {
+              subCode: 'participant_id_required',
+              message: '--participant-id <ref> is required (or use --enrollment --owner <ref>)',
+            });
+          }
           const runtime = await getRuntime(s.logger);
           return runIssueCredential(runtime, {
             globals: s.globals,
-            participantRef: asString(cmdOpts['participantId']),
+            participantRef: participantId,
             ttl: asOptionalString(cmdOpts['ttl']),
             reason: asOptionalString(cmdOpts['reason']),
             outputCredential: asOptionalString(cmdOpts['outputCredential']),
@@ -473,6 +525,11 @@ export function buildProgram(): BuildProgramResult {
         'currently-active credential.',
     )
     .option('--reason <text>', 'free-form audit reason')
+    .option(
+      '--revoke-agents',
+      'enrollment credentials only: also revoke the agents registered through it',
+      false,
+    )
     .action(async (jti: string, cmdOpts: Record<string, unknown>) => {
       const s = state();
       await runHandler(
@@ -483,6 +540,7 @@ export function buildProgram(): BuildProgramResult {
             globals: s.globals,
             jti,
             reason: asOptionalString(cmdOpts['reason']),
+            revokeAgents: cmdOpts['revokeAgents'] === true,
           });
         },
         (value, mode) => formatOutput(value, { mode, schema: revokeCredentialSchema }),
