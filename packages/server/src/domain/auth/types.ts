@@ -30,6 +30,8 @@ export interface CredentialSnapshot {
   scope?: 'enroll';
   namePrefix?: string;
   maxAgents?: number;
+  /** ADR-026: set by `verifyRenewalBearer`; the Bearer is a holder proof, maybe expired. */
+  renewal?: true;
 }
 
 /**

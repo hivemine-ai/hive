@@ -108,6 +108,11 @@ function rowToAgent(row: Selectable<AgentsTable>): Agent {
     createdAt: isoToDate(row.created_at),
     revokedAt: row.revoked_at ? isoToDate(row.revoked_at) : null,
     lastConnectedAt: row.last_connected_at ? isoToDate(row.last_connected_at) : null,
+    origin: row.origin,
+    enrolledVia: row.enrolled_via,
+    description: row.description,
+    retiredAt: row.retired_at ? isoToDate(row.retired_at) : null,
+    lastWorkerJti: row.last_worker_jti,
   };
 }
 

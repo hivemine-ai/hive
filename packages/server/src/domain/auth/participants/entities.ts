@@ -41,6 +41,12 @@ export interface Agent {
   createdAt: Date;
   revokedAt: Date | null;
   lastConnectedAt: Date | null;
+  // ADR-026 session enrollment.
+  origin: 'manual' | 'enrollment';
+  enrolledVia: UUIDv7 | null;
+  description: string | null;
+  retiredAt: Date | null;
+  lastWorkerJti: UUIDv7 | null;
 }
 
 /**

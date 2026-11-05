@@ -14,7 +14,9 @@ import { createVerifier } from './verifier.js';
 import type { Verifier } from './verifier.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const T0 = new Date('2026-11-05T12:00:00.000Z');
+// Second-aligned (JWT times are whole seconds) and current, because `verify` reads the
+// real clock.
+const T0 = new Date(Math.floor(Date.now() / 1000) * 1000);
 
 async function expectAuthError(
   promise: Promise<unknown>,

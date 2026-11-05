@@ -25,7 +25,10 @@
 
 import * as jose from 'jose';
 
+import type { Kysely } from 'kysely';
+
 import type { Logger } from '#observability/logger.js';
+import type { Database } from '#persistence/schema.js';
 import { requireAdminCaller } from '../caller-context.js';
 import { AuthError } from '../errors.js';
 import type { SigningKey } from '#domain/auth/keys/keypair-store.js';
@@ -50,6 +53,12 @@ export interface VerifierDeps {
   hiveStableIdentifier: UUIDv7;
   clockToleranceSeconds?: number;
   logger?: Logger;
+  // ADR-026 renewal: verifyRenewalBearer reads the token row and the revocation reason.
+  db?: Kysely<Database>;
+  // HIVE_HOLDER_PROOF_WINDOW_DAYS. Default 7.
+  holderProofWindowDays?: number;
+  // Clock of verifyRenewalBearer. Injectable for tests.
+  now?: () => Date;
 }
 
 export type ReverifyStreamResult =
@@ -72,6 +81,13 @@ export interface ReverifyStreamInput {
 
 export interface Verifier {
   verify(authorizationHeader: string | undefined): Promise<IdentityContext>;
+  /**
+   * ADR-026 renewal variant: accepts the last Worker token issued for the Agent
+   * (`agents.last_worker_jti`), not revoked or superseded, even expired up to
+   * HIVE_HOLDER_PROOF_WINDOW_DAYS after its `exp`, with the Agent `active` and
+   * `origin = 'enrollment'`. Only the `register_session` binding uses it.
+   */
+  verifyRenewalBearer(authorizationHeader: string | undefined): Promise<IdentityContext>;
   /** `verify` plus the admin check; a scoped credential fails with `scoped_credential`. */
   verifyAndRequireAdmin(authorizationHeader: string | undefined): Promise<IdentityContext>;
   /**
@@ -87,7 +103,91 @@ export interface Verifier {
 export function createVerifier(deps: VerifierDeps): Verifier {
   const clockToleranceSec = deps.clockToleranceSeconds ?? 5;
 
+  const holderProofWindowMs = (deps.holderProofWindowDays ?? 7) * 24 * 60 * 60 * 1000;
+
   const verifier: Verifier = {
+    async verifyRenewalBearer(authorizationHeader): Promise<IdentityContext> {
+      const { db } = deps;
+      if (!db) throw new Error('verifyRenewalBearer requires VerifierDeps.db');
+      const now = deps.now ? deps.now() : new Date();
+      const { token, kid, signingKey } = parseBearerAndKey(deps, authorizationHeader);
+      const invalid = (): AuthError =>
+        fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'holder_proof_invalid' }));
+      const superseded = (): AuthError =>
+        fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'holder_proof_superseded' }));
+
+      // Step 3c': like verify, except that `exp` may lie inside the holder-proof window.
+      // jose checks `exp` last, after the signature, iss/aud and nbf, so a JWTExpired
+      // carries a payload that passed every other check.
+      let payload: jose.JWTPayload;
+      try {
+        const verified = await jose.jwtVerify(token, signingKey.publicKey, {
+          issuer: deps.hiveStableIdentifier,
+          audience: deps.hiveStableIdentifier,
+          algorithms: ['EdDSA'],
+          clockTolerance: `${clockToleranceSec}s`,
+          currentDate: now,
+        });
+        payload = verified.payload;
+      } catch (cause) {
+        if (!(cause instanceof jose.errors.JWTExpired) || cause.claim !== 'exp') {
+          throw fail(deps, mapJoseError(cause));
+        }
+        payload = cause.payload;
+        const exp = typeof payload.exp === 'number' ? payload.exp * 1000 : 0;
+        if (now.getTime() > exp + holderProofWindowMs + clockToleranceSec * 1000) {
+          throw fail(
+            deps,
+            new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'holder_proof_expired', cause }),
+          );
+        }
+      }
+
+      // Step 3d: only Worker tokens issued by register_session.
+      const claims = payload as { kind?: unknown; scope?: unknown };
+      const jti = payload.jti;
+      const sub = payload.sub;
+      if (typeof jti !== 'string' || typeof sub !== 'string') {
+        throw fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'malformed' }));
+      }
+      if (claims.kind !== 'worker' || claims.scope !== undefined) throw invalid();
+      const row = await db
+        .selectFrom('credentials')
+        .select('enrolled_via')
+        .where('jti', '=', jti)
+        .executeTakeFirst();
+      if (!row?.enrolled_via) throw invalid();
+
+      // Step 4': a superseded proof is not a revoked credential.
+      const revocation = await db
+        .selectFrom('credential_revocations')
+        .select('reason')
+        .where('jti', '=', jti)
+        .executeTakeFirst();
+      if (revocation !== undefined) {
+        if (revocation.reason === 'superseded') throw superseded();
+        throw fail(deps, new AuthError('CREDENTIAL_REVOKED'));
+      }
+
+      // Steps 5-7 as in verify, then 7' and 8'.
+      const participant = await deps.participantsRepo.findById(sub);
+      if (!participant) throw fail(deps, new AuthError('PARTICIPANT_NOT_FOUND'));
+      if (participant.kind !== 'agent') throw invalid();
+      const { agent } = participant;
+      if (agent.state !== 'active') {
+        throw fail(deps, new AuthError('PARTICIPANT_NOT_ACTIVE', { subCode: agent.state }));
+      }
+      if (agent.origin !== 'enrollment') throw invalid();
+      if (agent.lastWorkerJti !== jti) throw superseded();
+
+      const hive = await deps.participantsRepo.findHiveById(deps.hiveStableIdentifier);
+      if (!hive) {
+        throw new Error(`DB anomaly: Hive ${deps.hiveStableIdentifier} row missing during verify`);
+      }
+      const identity = buildIdentityContext(participant, hive, payload, kid);
+      return { ...identity, snapshot: { ...identity.snapshot, renewal: true } };
+    },
+
     async verifyAndRequireAdmin(authorizationHeader): Promise<IdentityContext> {
       const identity = await verifier.verify(authorizationHeader);
       try {
@@ -99,34 +199,7 @@ export function createVerifier(deps: VerifierDeps): Verifier {
     },
 
     async verify(authorizationHeader): Promise<IdentityContext> {
-      // Step 1: Bearer header present?
-      if (!authorizationHeader) {
-        throw fail(deps, new AuthError('CREDENTIAL_MISSING'));
-      }
-      const match = BEARER_PATTERN.exec(authorizationHeader);
-      if (!match || match[1] === undefined) {
-        throw fail(deps, new AuthError('CREDENTIAL_MISSING'));
-      }
-      const token = match[1].trim();
-      if (token.length === 0) {
-        throw fail(deps, new AuthError('CREDENTIAL_MISSING'));
-      }
-
-      // Step 2-3: kid lookup + jose verify
-      let protectedHeader: jose.ProtectedHeaderParameters;
-      try {
-        protectedHeader = jose.decodeProtectedHeader(token);
-      } catch (cause) {
-        throw fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'malformed', cause }));
-      }
-      const kid = protectedHeader.kid;
-      if (!kid || typeof kid !== 'string') {
-        throw fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'malformed' }));
-      }
-      const signingKey = deps.signingKeys.get(kid);
-      if (!signingKey) {
-        throw fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'kid_unknown' }));
-      }
+      const { token, kid, signingKey } = parseBearerAndKey(deps, authorizationHeader);
 
       let payload: jose.JWTPayload;
       try {
@@ -214,6 +287,41 @@ export function createVerifier(deps: VerifierDeps): Verifier {
     },
   };
   return verifier;
+}
+
+function parseBearerAndKey(
+  deps: VerifierDeps,
+  authorizationHeader: string | undefined,
+): { token: string; kid: string; signingKey: SigningKey } {
+  // Step 1: Bearer header present?
+  if (!authorizationHeader) {
+    throw fail(deps, new AuthError('CREDENTIAL_MISSING'));
+  }
+  const match = BEARER_PATTERN.exec(authorizationHeader);
+  if (!match || match[1] === undefined) {
+    throw fail(deps, new AuthError('CREDENTIAL_MISSING'));
+  }
+  const token = match[1].trim();
+  if (token.length === 0) {
+    throw fail(deps, new AuthError('CREDENTIAL_MISSING'));
+  }
+
+  // Steps 2-3b: kid lookup; the caller runs jose.jwtVerify
+  let protectedHeader: jose.ProtectedHeaderParameters;
+  try {
+    protectedHeader = jose.decodeProtectedHeader(token);
+  } catch (cause) {
+    throw fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'malformed', cause }));
+  }
+  const kid = protectedHeader.kid;
+  if (!kid || typeof kid !== 'string') {
+    throw fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'malformed' }));
+  }
+  const signingKey = deps.signingKeys.get(kid);
+  if (!signingKey) {
+    throw fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'kid_unknown' }));
+  }
+  return { token, kid, signingKey };
 }
 
 function mapJoseError(cause: unknown): AuthError {
