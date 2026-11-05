@@ -82,6 +82,9 @@ export interface IssueEnrollmentCredentialInput {
   namePrefix?: string;
   maxAgents?: number;
   ttl?: Duration;
+  // Recorded as `issued_by` for the system caller (the `hivectl --operator-id`); an
+  // authenticated caller is always recorded as itself.
+  issuedBy?: UUIDv7;
 }
 
 export interface CreateEnrolledAgentInput {
@@ -257,7 +260,7 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
     issueWorkerToken,
 
     async issueEnrollmentCredential(input, caller): Promise<IssuedCredential> {
-      const issuedBy = authorizeIssue(input.ownerId, caller);
+      const issuedBy = authorizeIssue(input.ownerId, caller) ?? input.issuedBy ?? null;
       validateClaims(input, deps.hiveMaxAgents);
 
       const owner = await deps.participantsRepo.findById(input.ownerId);

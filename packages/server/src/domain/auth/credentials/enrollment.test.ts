@@ -174,6 +174,19 @@ describe('issueEnrollmentCredential', () => {
     expect(row.issued_by).toBeNull();
   });
 
+  it('records the issuedBy of the system caller (hivectl --operator-id)', async () => {
+    const issued = await enrollment.issueEnrollmentCredential(
+      { ownerId: world.nonAdminHivekeeperId, issuedBy: world.adminHivekeeperId },
+      { kind: 'system' },
+    );
+    const row = await world.db
+      .selectFrom('credentials')
+      .select('issued_by')
+      .where('jti', '=', issued.jti)
+      .executeTakeFirstOrThrow();
+    expect(row.issued_by).toBe(world.adminHivekeeperId);
+  });
+
   it('rejects a caller that authenticated with a scoped credential, even for itself', async () => {
     await expectAuthError(
       enrollment.issueEnrollmentCredential(

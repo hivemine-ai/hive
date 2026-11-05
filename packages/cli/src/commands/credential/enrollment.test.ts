@@ -155,6 +155,35 @@ describe('hivectl credential --enrollment', () => {
     });
   });
 
+  it('records the --operator-id as issued_by, on issue and on rotate', async () => {
+    await boot();
+    const operator = { ...GLOBALS, operatorId: 'leo@example.com' };
+    const issued = await runIssueEnrollmentCredential(runtime, issueOpts({ globals: operator }));
+    const rotated = await runRotateCredential(runtime, {
+      globals: operator,
+      jti: issued.jti,
+      ttl: undefined,
+      outputCredential: path.join(workDir, 'enroll-2.jwt'),
+    });
+    const rows = await runtime.db
+      .selectFrom('credentials')
+      .select(['jti', 'issued_by'])
+      .where('jti', 'in', [issued.jti, rotated.newJti])
+      .execute();
+    expect(rows.map((r) => r.issued_by)).toEqual([issued.ownerId, issued.ownerId]);
+  });
+
+  it('leaves issued_by empty without --operator-id', async () => {
+    await boot();
+    const issued = await runIssueEnrollmentCredential(runtime, issueOpts());
+    const row = await runtime.db
+      .selectFrom('credentials')
+      .select('issued_by')
+      .where('jti', '=', issued.jti)
+      .executeTakeFirstOrThrow();
+    expect(row.issued_by).toBeNull();
+  });
+
   it('issue --enrollment rejects user errors with EXIT_USER_ERROR and an unknown owner with EXIT_NOT_FOUND', async () => {
     await boot();
     await expectExit(

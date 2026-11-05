@@ -60,6 +60,7 @@ export async function runIssueEnrollmentCredential(
       ...(opts.namePrefix !== undefined ? { namePrefix: opts.namePrefix } : {}),
       ...(maxAgents !== undefined ? { maxAgents } : {}),
       ...(ttlMs !== undefined ? { ttl: ttlMs } : {}),
+      ...(actor.actorId !== null ? { issuedBy: actor.actorId } : {}),
     },
     toCallerContext(actor),
   );
