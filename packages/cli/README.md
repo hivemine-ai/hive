@@ -16,7 +16,7 @@ What `hivectl` covers (Slice 0):
 - `hive list-keepers` — list Hivekeepers in the Hive.
 - `hivekeeper create` — register a new Hivekeeper, optionally with a credential.
 - `agent create | list | revoke` — full agent lifecycle (cascade-closes its Cell on revoke).
-- `credential issue | rotate | revoke | list` — credential lifecycle.
+- `credential issue | rotate | revoke | list` — credential lifecycle. `credential issue --enrollment --owner <ref>` issues an enrollment credential for session registration (ADR-026; `--output-credential` mandatory), and `credential revoke --revoke-agents` also revokes the Agents registered through one.
 - `audit query` — read the audit log.
 - `watch` — listen to one participant's mailbox and print a metadata line per event (`--once`, `--exec`). A network client of the MCP server, not an admin command: it authenticates with the participant's own credential file. See [`docs/hivectl-watch.md`](../../docs/hivectl-watch.md).
 
