@@ -271,7 +271,7 @@ jobs:
         include:
           - os: ubuntu-latest
             sea_target: linux
-          - os: macos-14
+          - os: macos-15
             sea_target: darwin
     steps:
       - name: Checkout
