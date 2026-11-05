@@ -66,3 +66,32 @@ export async function blocklistWorkerTokens(
     .execute();
   return rows.map((r) => r.jti);
 }
+
+export interface HolderProofWindowOptions {
+  holderProofWindowDays?: number;
+  clockToleranceSeconds?: number;
+}
+
+/**
+ * Deletes the `credentials` rows of Worker tokens that can no longer serve as holder
+ * proof (pass 3 of `runEnrollmentRetention`; the job that schedules it is PRY-094).
+ * Returns how many rows were removed.
+ */
+export async function purgeExpiredWorkerTokens(
+  executor: DbExecutor,
+  now: Date,
+  options: HolderProofWindowOptions = {},
+): Promise<number> {
+  const result = await executor
+    .deleteFrom('credentials')
+    .where('enrolled_via', 'is not', null)
+    .where(
+      'expires_at',
+      '<',
+      dateToIso(
+        holderProofCutoff(now, options.holderProofWindowDays, options.clockToleranceSeconds),
+      ),
+    )
+    .executeTakeFirst();
+  return Number(result.numDeletedRows);
+}

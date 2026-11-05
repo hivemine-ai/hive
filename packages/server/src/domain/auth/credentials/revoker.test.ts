@@ -81,7 +81,10 @@ describe('revoker', () => {
       participantId: world.adminHivekeeperId,
     });
     await revoker.revokeCredential({ jti: issued.jti });
-    await expect(revoker.revokeCredential({ jti: issued.jti })).resolves.toBeUndefined();
+    await expect(revoker.revokeCredential({ jti: issued.jti })).resolves.toEqual({
+      revokedTokenJtis: [],
+      revokedAgentIds: [],
+    });
     expect(await blocklist.contains(issued.jti)).toBe(true);
   });
 });

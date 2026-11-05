@@ -129,4 +129,4 @@ jobs:
 
       # Each suite recreates the `public` schema, so the files must not run in parallel.
       - name: Enrollment schema and auth tests (Postgres)
-        run: pnpm --filter @hive/server exec vitest run src/persistence/migrate.enrollment.test.ts src/domain/auth/credentials/enrollment.worker-token.test.ts src/domain/auth/credentials/enrollment.registration.test.ts --no-file-parallelism --reporter=verbose
+        run: pnpm --filter @hive/server exec vitest run src/persistence/migrate.enrollment.test.ts src/domain/auth/credentials/enrollment.worker-token.test.ts src/domain/auth/credentials/enrollment.registration.test.ts src/domain/auth/credentials/enrollment.cascade.test.ts --no-file-parallelism --reporter=verbose
