@@ -3,13 +3,15 @@
 //
 // 1. Bearer header present?     → CREDENTIAL_MISSING
 // 2. Parse token from header
-// 3. jose.jwtVerify (signature, alg whitelist, iss/aud, exp, nbf):
+// 3. jose.jwtVerify (signature, alg whitelist, iss/aud, exp, nbf), then the ADR-026
+//    `scope` claim (only "enroll" is known):
 //      JWSSignatureVerificationFailed → CREDENTIAL_INAUTHENTIC{signature}
 //      JWTExpired                     → CREDENTIAL_EXPIRED
 //      JWTClaimValidationFailed (nbf) → CREDENTIAL_NOT_YET_VALID
 //      JWTClaimValidationFailed (iss/aud) → CREDENTIAL_INAUTHENTIC{iss_aud_mismatch}
 //      kid lookup miss                → CREDENTIAL_INAUTHENTIC{kid_unknown}
 //      JOSEAlgNotAllowed / JWSInvalid / JWTInvalid → CREDENTIAL_INAUTHENTIC{malformed}
+//      unknown scope                  → CREDENTIAL_INAUTHENTIC{malformed}
 // 4. await blocklist.contains(jti)? → CREDENTIAL_REVOKED; a database failure propagates
 //    unmapped (fail closed, wire -32603), it is never reported as an auth failure
 // 5. participantsRepo.findById(sub)
@@ -24,6 +26,7 @@
 import * as jose from 'jose';
 
 import type { Logger } from '#observability/logger.js';
+import { requireAdminCaller } from '../caller-context.js';
 import { AuthError } from '../errors.js';
 import type { SigningKey } from '#domain/auth/keys/keypair-store.js';
 import type { Hive, Participant } from '#domain/auth/participants/entities.js';
@@ -69,6 +72,8 @@ export interface ReverifyStreamInput {
 
 export interface Verifier {
   verify(authorizationHeader: string | undefined): Promise<IdentityContext>;
+  /** `verify` plus the admin check; a scoped credential fails with `scoped_credential`. */
+  verifyAndRequireAdmin(authorizationHeader: string | undefined): Promise<IdentityContext>;
   /**
    * Steps 4 to 7 for a stream that is already open: a stream never passes through
    * `verify`, and this is the guarantee for changes made by another process. No Bearer
@@ -82,7 +87,17 @@ export interface Verifier {
 export function createVerifier(deps: VerifierDeps): Verifier {
   const clockToleranceSec = deps.clockToleranceSeconds ?? 5;
 
-  return {
+  const verifier: Verifier = {
+    async verifyAndRequireAdmin(authorizationHeader): Promise<IdentityContext> {
+      const identity = await verifier.verify(authorizationHeader);
+      try {
+        requireAdminCaller({ kind: 'authenticated', identity });
+      } catch (err) {
+        throw err instanceof AuthError ? fail(deps, err) : err;
+      }
+      return identity;
+    },
+
     async verify(authorizationHeader): Promise<IdentityContext> {
       // Step 1: Bearer header present?
       if (!authorizationHeader) {
@@ -124,6 +139,10 @@ export function createVerifier(deps: VerifierDeps): Verifier {
         payload = verified.payload;
       } catch (cause) {
         throw fail(deps, mapJoseError(cause));
+      }
+      const scope = (payload as { scope?: unknown }).scope;
+      if (scope !== undefined && scope !== 'enroll') {
+        throw fail(deps, new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'malformed' }));
       }
 
       // Step 4: blocklist
@@ -194,6 +213,7 @@ export function createVerifier(deps: VerifierDeps): Verifier {
       return { ok: true };
     },
   };
+  return verifier;
 }
 
 function mapJoseError(cause: unknown): AuthError {
@@ -249,11 +269,15 @@ function buildIdentityContext(
 
   if (p.kind === 'hivekeeper') {
     const hk = p.hivekeeper;
+    const claims = payload as { scope?: 'enroll'; name_prefix?: unknown; max_agents?: unknown };
     const snapshot: CredentialSnapshot = {
       issuedAt,
       credentialJti,
       credentialKid: kid,
       ...credentialExpiresAt,
+      ...(claims.scope !== undefined ? { scope: claims.scope } : {}),
+      ...(typeof claims.name_prefix === 'string' ? { namePrefix: claims.name_prefix } : {}),
+      ...(typeof claims.max_agents === 'number' ? { maxAgents: claims.max_agents } : {}),
     };
     return {
       participantId: hk.id,
@@ -262,7 +286,9 @@ function buildIdentityContext(
       hiveName: hive.name,
       colonyId: hk.colonyId,
       snapshot,
-      current: { state: 'active', isAdmin: hk.isAdmin },
+      // ADR-026: a scoped credential carries no admin authority, so `isAdmin` stays unset.
+      current:
+        claims.scope !== undefined ? { state: 'active' } : { state: 'active', isAdmin: hk.isAdmin },
     };
   }
 

@@ -1,4 +1,4 @@
-// Domain error codes for the auth subsystem. The 13 values are the canonical
+// Domain error codes for the auth subsystem. The values are the canonical
 // error vocabulary mapped to wire codes by the transport layer (per the
 // "Mapping de errores" section of the Auth + Identity tech spec).
 
@@ -15,7 +15,8 @@ export type AuthErrorCode =
   | 'PARTICIPANT_NOT_FOUND_FOR_ISSUE'
   | 'LAST_ADMIN_INVARIANT'
   | 'INVALID_STATE_TRANSITION'
-  | 'HIVE_ALREADY_INITIALIZED';
+  | 'HIVE_ALREADY_INITIALIZED'
+  | 'INVALID_INPUT';
 
 export interface AuthErrorOptions {
   subCode?: string;

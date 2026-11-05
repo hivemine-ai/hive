@@ -7,7 +7,7 @@ import { CliError } from '#error/cli-error.js';
 import { resolveParticipantReference } from '#input/parse-reference.js';
 import type { GlobalCliOpts } from '#types.js';
 
-export type AgentState = 'active' | 'suspended' | 'revoked';
+export type AgentState = 'active' | 'suspended' | 'retired' | 'revoked';
 
 export interface ListAgentsOpts {
   globals: GlobalCliOpts;

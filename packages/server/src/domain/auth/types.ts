@@ -26,6 +26,10 @@ export interface CredentialSnapshot {
   credentialKid: string;
   /** From `exp`. A long stream closes here; every credential Hive issues carries it. */
   credentialExpiresAt?: Date;
+  /** ADR-026: present only on enrollment credentials; absent means a full credential. */
+  scope?: 'enroll';
+  namePrefix?: string;
+  maxAgents?: number;
 }
 
 /**
