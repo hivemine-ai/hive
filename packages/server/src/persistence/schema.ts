@@ -50,10 +50,15 @@ export interface AgentsTable {
   type: 'worker' | 'scout';
   capabilities: JsonText;
   instructions: string;
-  state: 'active' | 'suspended' | 'revoked';
+  state: 'active' | 'suspended' | 'retired' | 'revoked';
   created_at: Generated<IsoTimestamp>;
   revoked_at: IsoTimestamp | null;
   last_connected_at: IsoTimestamp | null;
+  origin: Generated<'manual' | 'enrollment'>;
+  enrolled_via: Generated<UUIDv7 | null>;
+  description: Generated<string | null>;
+  retired_at: Generated<IsoTimestamp | null>;
+  last_worker_jti: Generated<UUIDv7 | null>;
 }
 
 export interface CredentialsTable {
@@ -67,6 +72,8 @@ export interface CredentialsTable {
   snapshot: JsonText;
   issued_by: UUIDv7 | null;
   revoked_at: IsoTimestamp | null;
+  scope: Generated<'enroll' | null>;
+  enrolled_via: Generated<UUIDv7 | null>;
 }
 
 export interface CredentialRevocationsTable {

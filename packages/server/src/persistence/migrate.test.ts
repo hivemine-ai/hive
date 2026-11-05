@@ -62,8 +62,8 @@ describe('migrateToLatest', () => {
     const downResult = await migrateDown(db);
     expect(downResult.results?.[0]?.status).toBe('Success');
 
-    // `migrateDown` only rolls back the most recent migration: the rebuild of
-    // `messages` that renames `stored_at` back to `delivered_at`. All tables remain.
+    // `migrateDown` only rolls back the most recent migration: the ADR-026 enrollment
+    // delta on `agents` and `credentials`. All tables remain.
     const tables = await sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'kysely_%'
       ORDER BY name
@@ -71,12 +71,12 @@ describe('migrateToLatest', () => {
     const remaining = tables.rows.map((r) => r.name).sort();
     expect(remaining).toEqual(EXPECTED_TABLES);
 
-    const messageCols = await sql<{ name: string }>`
-      PRAGMA table_info(messages)
+    const agentCols = await sql<{ name: string }>`
+      PRAGMA table_info(agents)
     `.execute(db);
-    const messageColNames = messageCols.rows.map((r) => r.name);
-    expect(messageColNames).toContain('delivered_at');
-    expect(messageColNames).not.toContain('stored_at');
+    const agentColNames = agentCols.rows.map((r) => r.name);
+    expect(agentColNames).toContain('last_connected_at');
+    expect(agentColNames).not.toContain('origin');
   });
 
   it('inserts a default state row with CURRENT_TIMESTAMP working in SQLite', async () => {
@@ -247,8 +247,10 @@ describe('migrateToLatest', () => {
 describe('20261102120000_rename-delivered-to-stored', () => {
   const LATEST = '20261102120000_rename-delivered-to-stored';
   const V01_MIGRATIONS = Object.fromEntries(
-    Object.entries(ALL_MIGRATIONS).filter(([name]) => name !== LATEST),
+    Object.entries(ALL_MIGRATIONS).filter(([name]) => name < LATEST),
   );
+  // Later migrations are left out so `migrateDown` rolls back this one.
+  const THROUGH_LATEST = { migrations: { ...V01_MIGRATIONS, [LATEST]: renameDeliveredToStored } };
 
   let db: Kysely<Database>;
 
@@ -302,7 +304,7 @@ describe('20261102120000_rename-delivered-to-stored', () => {
   });
 
   it('rewrites delivered rows to stored and keeps read and expired on a v0.1 database', async () => {
-    await migrateToLatest(db);
+    await migrateToLatest(db, THROUGH_LATEST);
 
     expect(await messageRows('stored_at')).toEqual([
       { id: 'm-delivered', state: 'stored', at: '2026-05-01T00:00:00.000Z' },
@@ -312,7 +314,7 @@ describe('20261102120000_rename-delivered-to-stored', () => {
   });
 
   it('replaces the CHECK: stored is accepted and delivered is rejected', async () => {
-    await migrateToLatest(db);
+    await migrateToLatest(db, THROUGH_LATEST);
 
     const insert = (id: string, state: string) => sql`
       INSERT INTO messages (id, cell_id, from_participant_id, to_participant_id, type, body, state)
@@ -324,7 +326,7 @@ describe('20261102120000_rename-delivered-to-stored', () => {
   });
 
   it('defaults new rows to the stored state', async () => {
-    await migrateToLatest(db);
+    await migrateToLatest(db, THROUGH_LATEST);
 
     await sql`
       INSERT INTO messages (id, cell_id, from_participant_id, to_participant_id, type, body)
@@ -336,7 +338,7 @@ describe('20261102120000_rename-delivered-to-stored', () => {
   });
 
   it('recreates the indexes against stored_at and the partial index on stored', async () => {
-    await migrateToLatest(db);
+    await migrateToLatest(db, THROUGH_LATEST);
 
     const all = await indexes();
     expect(all.map((i) => i.name)).toEqual([
@@ -353,7 +355,7 @@ describe('20261102120000_rename-delivered-to-stored', () => {
   });
 
   it('is idempotent when up runs on an already migrated database', async () => {
-    await migrateToLatest(db);
+    await migrateToLatest(db, THROUGH_LATEST);
     const before = await messageRows('stored_at');
 
     await renameDeliveredToStored.up(db);
@@ -362,8 +364,8 @@ describe('20261102120000_rename-delivered-to-stored', () => {
   });
 
   it('is reversible: down restores delivered_at, the delivered state and the old indexes', async () => {
-    await migrateToLatest(db);
-    await migrateDown(db);
+    await migrateToLatest(db, THROUGH_LATEST);
+    await migrateDown(db, THROUGH_LATEST);
 
     expect(await messageRows('delivered_at')).toEqual([
       { id: 'm-delivered', state: 'delivered', at: '2026-05-01T00:00:00.000Z' },
@@ -372,7 +374,7 @@ describe('20261102120000_rename-delivered-to-stored', () => {
     ]);
     expect((await indexes()).map((i) => i.name)).toContain('idx_messages_cell_delivered');
 
-    await migrateToLatest(db);
+    await migrateToLatest(db, THROUGH_LATEST);
     expect((await messageRows('stored_at')).map((r) => r.state)).toEqual([
       'stored',
       'expired',
