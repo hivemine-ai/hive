@@ -16,17 +16,24 @@ export type AuthErrorCode =
   | 'LAST_ADMIN_INVARIANT'
   | 'INVALID_STATE_TRANSITION'
   | 'HIVE_ALREADY_INITIALIZED'
-  | 'INVALID_INPUT';
+  | 'INVALID_INPUT'
+  | 'NAME_IN_USE'
+  | 'NAME_TAKEN'
+  | 'AGENT_SUSPENDED'
+  | 'ENROLLMENT_QUOTA_EXCEEDED';
 
 export interface AuthErrorOptions {
   subCode?: string;
   message?: string;
   cause?: unknown;
+  // ENROLLMENT_QUOTA_EXCEEDED: the quota that was hit, for the wire `error.data`.
+  limit?: number;
 }
 
 export class AuthError extends Error {
   readonly code: AuthErrorCode;
   readonly subCode: string | undefined;
+  readonly limit: number | undefined;
 
   constructor(code: AuthErrorCode, options: AuthErrorOptions = {}) {
     const baseMessage =
@@ -35,6 +42,7 @@ export class AuthError extends Error {
     this.name = 'AuthError';
     this.code = code;
     this.subCode = options.subCode;
+    this.limit = options.limit;
   }
 }
 
