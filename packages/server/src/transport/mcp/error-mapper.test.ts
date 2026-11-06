@@ -6,7 +6,12 @@ import { CellError } from '#domain/cells/index.js';
 import { WaggleError } from '#domain/notifications/index.js';
 
 import {
+  MCP_ERR_AGENT_SUSPENDED,
+  MCP_ERR_ENROLLMENT_QUOTA_EXCEEDED,
+  MCP_ERR_ENROLLMENT_RATE_LIMITED,
   MCP_ERR_FORBIDDEN,
+  MCP_ERR_NAME_IN_USE,
+  MCP_ERR_NAME_TAKEN,
   MCP_ERR_SENDER_QUOTA_EXCEEDED,
   MCP_ERR_INTERNAL,
   MCP_ERR_INVALID_PARAMS,
@@ -100,6 +105,42 @@ describe('mapDomainError — admin-only AuthError codes (defense-in-depth)', () 
       expect(result.wire.message).toBe('internal error');
     });
   }
+});
+
+// ADR-026: the registration errors of register_session each have their own code.
+describe('mapDomainError — register_session errors', () => {
+  it.each([
+    ['NAME_IN_USE', MCP_ERR_NAME_IN_USE, -32007, 'name in use'],
+    ['NAME_TAKEN', MCP_ERR_NAME_TAKEN, -32008, 'name taken'],
+    ['AGENT_SUSPENDED', MCP_ERR_AGENT_SUSPENDED, -32009, 'agent suspended'],
+  ] as const)('maps %s → %i', (code, constant, numeric, message) => {
+    const result = mapDomainError(new AuthError(code));
+    expect(constant).toBe(numeric);
+    expect(result.wire).toEqual({ code: numeric, message });
+    expect(result.domainCode).toBe(code);
+  });
+
+  it('maps ENROLLMENT_QUOTA_EXCEEDED → -32010 with the limit in error.data', () => {
+    const result = mapDomainError(new AuthError('ENROLLMENT_QUOTA_EXCEEDED', { limit: 3 }));
+    expect(MCP_ERR_ENROLLMENT_QUOTA_EXCEEDED).toBe(-32010);
+    expect(result.wire).toEqual({
+      code: -32010,
+      message: 'enrollment quota exceeded',
+      data: { limit: 3 },
+    });
+  });
+
+  it('maps AuthError INVALID_INPUT → -32602 and keeps the subCode off the wire', () => {
+    const result = mapDomainError(
+      new AuthError('INVALID_INPUT', { subCode: 'name_prefix_mismatch' }),
+    );
+    expect(result.wire).toEqual({ code: MCP_ERR_INVALID_PARAMS, message: 'invalid input' });
+    expect(result.subCode).toBe('name_prefix_mismatch');
+  });
+
+  it('fixes -32011 as the rate-limit code of the edge', () => {
+    expect(MCP_ERR_ENROLLMENT_RATE_LIMITED).toBe(-32011);
+  });
 });
 
 // ---------------------------------------------------------------------------

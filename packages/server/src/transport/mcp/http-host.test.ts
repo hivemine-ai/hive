@@ -13,13 +13,14 @@ import { createLogger } from '#observability/logger.js';
 import type { Logger } from '#observability/logger.js';
 
 import type { LastConnectedRefresher } from './auth-binding.js';
+import { createRegisterRateLimiter, type RegisterRateLimiter } from './enrollment-guards.js';
 import {
   createHttpHost,
   type HttpHost,
   type HttpHostOptions,
   type ListenEdge,
 } from './http-host.js';
-import { createMcpTransport } from './server.js';
+import { createMcpTransport, type McpTransportDeps } from './server.js';
 
 const VERSION = '2026-07-28';
 const PARTICIPANT_ID = '01900000-0000-7000-8000-000000000001';
@@ -39,6 +40,7 @@ const IDENTITY = {
 
 interface StubOptions {
   verify?: Verifier['verify'];
+  verifyRenewalBearer?: Verifier['verifyRenewalBearer'];
   sender?: Partial<Sender>;
   reader?: Partial<Reader>;
   listenEdge?: ListenEdge;
@@ -46,6 +48,7 @@ interface StubOptions {
   host?: HttpHostOptions;
   logger?: Logger;
   cellsRepo?: Partial<CellsRepo>;
+  registerRateLimiter?: RegisterRateLimiter;
 }
 
 let current: HttpHost | undefined;
@@ -63,16 +66,27 @@ async function startHost(options: StubOptions = {}): Promise<string> {
     presenceRegistry: {} as PresenceRegistry,
     logger,
     listAgentsMaxPageSize: 100,
+    enrollment: {} as McpTransportDeps['enrollment'],
+    rebindParticipantStreams: () => 0,
+    rejectAlerts: { record: () => ({ alert: false }) },
+    rejectAlertWindowMinutes: 10,
+    auditRecorder: { recordEvent: () => Promise.resolve() },
   });
   current = createHttpHost(
     {
       mcpTransport,
-      verifier: { verify: options.verify ?? (() => Promise.resolve(IDENTITY)) },
+      verifier: {
+        verify: options.verify ?? (() => Promise.resolve(IDENTITY)),
+        verifyRenewalBearer:
+          options.verifyRenewalBearer ??
+          (() => Promise.reject(new AuthError('CREDENTIAL_EXPIRED'))),
+      },
       lastConnected: options.lastConnected ?? { refresh: () => undefined },
       db: {} as never,
       signingKeysProvider: () => [],
       logger,
       ...(options.listenEdge && { listenEdge: options.listenEdge }),
+      ...(options.registerRateLimiter && { registerRateLimiter: options.registerRateLimiter }),
     },
     { host: '127.0.0.1', port: 0, ...options.host },
   );
@@ -151,6 +165,58 @@ interface RpcError {
   error: { code: number; message: string; data?: unknown };
 }
 
+// A request without a well-formed Bearer is refused before fastify reads its body, so an
+// anonymous client cannot make the server parse up to the body limit.
+describe('Bearer pre-check before the body is read', () => {
+  function rawPost(url: string, body: string, authorization?: string): Promise<Response> {
+    return fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': VERSION,
+        ...(authorization !== undefined && { authorization }),
+      },
+      body,
+    });
+  }
+
+  it.each([undefined, 'Basic abc', 'Bearer ', 'Bearer'])(
+    'answers 401 -32001 to invalid JSON when the Authorization header is %j',
+    async (authorization) => {
+      const verify = vi.fn(() => Promise.resolve(IDENTITY));
+      const url = await startHost({ verify });
+
+      const res = await rawPost(url, '{not json', authorization);
+
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as RpcError).error).toEqual({
+        code: -32001,
+        message: 'authentication required',
+      });
+      expect(verify).not.toHaveBeenCalled();
+    },
+  );
+
+  it('answers 401 to a body over the limit without a token', async () => {
+    const url = await startHost();
+
+    const res = await rawPost(url, `{"x":"${'a'.repeat(5 * 1024 * 1024)}"}`);
+
+    expect(res.status).toBe(401);
+  });
+
+  it('keeps 400 for invalid JSON with a Bearer: the token is checked once the body is parsed', async () => {
+    const verify = vi.fn(() => Promise.reject(new AuthError('CREDENTIAL_INAUTHENTIC')));
+    const url = await startHost({ verify });
+
+    const res = await rawPost(url, '{not json', 'Bearer not-a-real-token');
+
+    expect(res.status).toBe(400);
+    expect(verify).not.toHaveBeenCalled();
+  });
+});
+
 describe('auth at the edge', () => {
   it('answers an auth failure with 401 and -32001', async () => {
     const url = await startHost({
@@ -197,8 +263,8 @@ describe('auth at the edge', () => {
   });
 });
 
-// PRY-090 (ADR-026): until the register_session binding exists (PRY-091), a credential
-// with a scope is good for nothing on the MCP surface.
+// ADR-026 (PRY-091): an enrollment credential reaches only register_session and
+// server/discover; everything else is an authentic credential out of its scope.
 describe('scoped credentials at the edge', () => {
   const ENROLLMENT_IDENTITY = {
     ...IDENTITY,
@@ -236,20 +302,146 @@ describe('scoped credentials at the edge', () => {
         event: 'mcp_auth_failed',
         domainCode: 'INSUFFICIENT_PRIVILEGE',
         subCode: 'scoped_credential',
+        operation: 'tools_call:list_agents',
       }),
       expect.any(String),
     );
   });
 
-  it('rejects it on every other method too, server/discover included', async () => {
+  it('rejects it on tools/list, resources/* and subscriptions/listen', async () => {
     const url = await startHost({ verify: () => Promise.resolve(ENROLLMENT_IDENTITY) });
-    for (const method of ['tools/list', 'server/discover', 'resources/list']) {
+    for (const method of ['tools/list', 'resources/list', 'resources/read']) {
       const res = await post(url, method);
       expect(res.status).toBe(403);
       expect(((await res.json()) as RpcError).error.code).toBe(-32006);
     }
     const listen = await fetch(url, listenInit());
     expect(listen.status).toBe(403);
+  });
+
+  it('lets it through on server/discover and register_session', async () => {
+    const refresh = vi.fn();
+    const url = await startHost({
+      verify: () => Promise.resolve(ENROLLMENT_IDENTITY),
+      lastConnected: { refresh },
+    });
+
+    expect((await post(url, 'server/discover')).status).toBe(200);
+    const register = await callTool(url, 'register_session', {});
+    expect(register.status).not.toBe(403);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe('register_session rate limit at the edge', () => {
+  const ENROLLMENT = {
+    ...IDENTITY,
+    kind: 'hivekeeper',
+    snapshot: { ...IDENTITY.snapshot, scope: 'enroll' },
+  } as unknown as IdentityContext;
+
+  it('answers 429 with Retry-After and -32011 once the key spent its window, logging no jti', async () => {
+    const warn = vi.fn();
+    const logger = createLogger({ level: 'silent' });
+    logger.warn = warn;
+    const url = await startHost({
+      verify: () => Promise.resolve(ENROLLMENT),
+      registerRateLimiter: createRegisterRateLimiter({ limit: 1, windowSeconds: 60 }),
+      logger,
+    });
+
+    const first = await callTool(url, 'register_session', {});
+    const second = await callTool(url, 'register_session', {});
+
+    expect(first.status).not.toBe(429);
+    expect(second.status).toBe(429);
+    expect(second.headers.get('retry-after')).toBe('60');
+    expect(((await second.json()) as RpcError).error).toEqual({
+      code: -32011,
+      message: 'too many registrations',
+    });
+    expect(warn).toHaveBeenCalledWith(
+      { event: 'mcp_enrollment_rate_limited', keyKind: 'enrollment_jti', retryAfterSeconds: 60 },
+      expect.any(String),
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(IDENTITY.snapshot.credentialJti);
+  });
+
+  it('keys a renewal by the Agent id and leaves other tools alone', async () => {
+    const hit = vi.fn(() => ({ allowed: true as const }));
+    const renewal = {
+      ...IDENTITY,
+      snapshot: { ...IDENTITY.snapshot, renewal: true },
+    } as unknown as IdentityContext;
+    const url = await startHost({
+      verifyRenewalBearer: () => Promise.resolve(renewal),
+      registerRateLimiter: { hit },
+    });
+    const bearer = `Bearer ${Buffer.from('{"alg":"EdDSA"}').toString('base64url')}.${Buffer.from(
+      '{"sub":"agent"}',
+    ).toString('base64url')}.c2ln`;
+
+    await post(
+      url,
+      'tools/call',
+      { name: 'register_session', arguments: {} },
+      { authorization: bearer },
+    );
+    await callTool(url, 'list_agents', {});
+
+    expect(hit.mock.calls).toEqual([[`agent_id:${PARTICIPANT_ID}`]]);
+  });
+
+  it('marks the register_session response as not cacheable', async () => {
+    const url = await startHost({ verify: () => Promise.resolve(ENROLLMENT) });
+
+    const res = await callTool(url, 'register_session', {});
+
+    expect(res.headers.get('cache-control')).toBe('no-store');
+  });
+});
+
+describe('renewal route of register_session', () => {
+  const WORKER_BEARER = `Bearer ${Buffer.from('{"alg":"EdDSA"}').toString('base64url')}.${Buffer.from(
+    '{"sub":"agent","kind":"worker"}',
+  ).toString('base64url')}.c2ln`;
+
+  it('verifies an unscoped Bearer on register_session with verifyRenewalBearer', async () => {
+    const verify = vi.fn(() => Promise.reject(new AuthError('CREDENTIAL_EXPIRED')));
+    const verifyRenewalBearer = vi.fn(() =>
+      Promise.reject(new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'holder_proof_expired' })),
+    );
+    const url = await startHost({ verify, verifyRenewalBearer });
+
+    const res = await post(
+      url,
+      'tools/call',
+      { name: 'register_session', arguments: {} },
+      { authorization: WORKER_BEARER },
+    );
+
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as RpcError).error.code).toBe(-32001);
+    expect(verifyRenewalBearer).toHaveBeenCalledWith(WORKER_BEARER);
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it('never routes another tool through the renewal variant', async () => {
+    const verifyRenewalBearer = vi.fn(() => Promise.resolve(IDENTITY));
+    const url = await startHost({
+      verify: () => Promise.reject(new AuthError('CREDENTIAL_EXPIRED')),
+      verifyRenewalBearer,
+    });
+
+    const res = await post(
+      url,
+      'tools/call',
+      { name: 'send_message', arguments: {} },
+      { authorization: WORKER_BEARER },
+    );
+
+    expect(res.status).toBe(401);
+    expect(verifyRenewalBearer).not.toHaveBeenCalled();
   });
 });
 

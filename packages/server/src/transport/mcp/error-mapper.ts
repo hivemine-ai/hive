@@ -7,14 +7,37 @@ import { WaggleError } from '#domain/notifications/index.js';
 import type { Logger } from '#observability/logger.js';
 
 import {
+  MCP_ERR_AGENT_SUSPENDED,
+  MCP_ERR_ENROLLMENT_QUOTA_EXCEEDED,
   MCP_ERR_FORBIDDEN,
+  MCP_ERR_NAME_IN_USE,
+  MCP_ERR_NAME_TAKEN,
   MCP_ERR_INTERNAL,
   MCP_ERR_INVALID_PARAMS,
   MCP_ERR_RECIPIENT_UNREACHABLE,
   MCP_ERR_SENDER_QUOTA_EXCEEDED,
   MCP_ERR_UNAUTHORIZED,
 } from './error-codes.js';
-import type { MappedError } from './types.js';
+import type { MappedError, WireError } from './types.js';
+
+type RegistrationCode =
+  | 'NAME_IN_USE'
+  | 'NAME_TAKEN'
+  | 'AGENT_SUSPENDED'
+  | 'ENROLLMENT_QUOTA_EXCEEDED'
+  | 'INVALID_INPUT';
+
+// ADR-026: the AuthError codes register_session lets through to the wire.
+const REGISTRATION_WIRE: Record<RegistrationCode, WireError> = {
+  NAME_IN_USE: { code: MCP_ERR_NAME_IN_USE, message: 'name in use' },
+  NAME_TAKEN: { code: MCP_ERR_NAME_TAKEN, message: 'name taken' },
+  AGENT_SUSPENDED: { code: MCP_ERR_AGENT_SUSPENDED, message: 'agent suspended' },
+  ENROLLMENT_QUOTA_EXCEEDED: {
+    code: MCP_ERR_ENROLLMENT_QUOTA_EXCEEDED,
+    message: 'enrollment quota exceeded',
+  },
+  INVALID_INPUT: { code: MCP_ERR_INVALID_PARAMS, message: 'invalid input' },
+};
 
 /**
  * Translates any thrown value from domain or transport into a `MappedError`.
@@ -53,6 +76,19 @@ export function mapDomainError(err: unknown): MappedError {
     if (err.code === 'INSUFFICIENT_PRIVILEGE') {
       return {
         wire: { code: MCP_ERR_FORBIDDEN, message: 'forbidden' },
+        domainCode: err.code,
+        subCode: err.subCode ?? null,
+      };
+    }
+
+    const registration = REGISTRATION_WIRE[err.code as RegistrationCode] as WireError | undefined;
+    if (registration !== undefined) {
+      return {
+        wire: {
+          ...registration,
+          ...(err.code === 'ENROLLMENT_QUOTA_EXCEEDED' &&
+            err.limit !== undefined && { data: { limit: err.limit } }),
+        },
         domainCode: err.code,
         subCode: err.subCode ?? null,
       };

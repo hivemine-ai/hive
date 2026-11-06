@@ -122,6 +122,6 @@ export function createReadMailboxHandler(deps: ReadMailboxDeps) {
     }
 
     const messages = await deps.reader.readMailbox(readInput);
-    return adaptMailbox(messages, pageLimit);
+    return adaptMailbox(messages, pageLimit, ctx.identity.hiveId);
   };
 }

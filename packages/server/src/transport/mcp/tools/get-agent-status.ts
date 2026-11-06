@@ -20,6 +20,8 @@ export interface GetAgentStatusOutput {
   participant_id: string;
   presence: 'online' | 'offline';
   last_connected_at: string | null;
+  /** ADR-026: only for an Agent target; declared by the Agent, untrusted, `""` when none. */
+  description?: string;
 }
 
 export interface GetAgentStatusDeps {
@@ -83,6 +85,7 @@ export function createGetAgentStatusHandler(deps: GetAgentStatusDeps) {
       participant_id: targetId,
       presence: effectiveOnline ? 'online' : 'offline',
       last_connected_at: agent?.lastConnectedAt?.toISOString() ?? null,
+      ...(agent && { description: agent.description ?? '' }),
     };
   };
 }

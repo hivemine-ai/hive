@@ -12,7 +12,10 @@ import type { MessageView } from '#domain/cells/index.js';
  */
 export interface MessageViewWire {
   id: string;
+  /** The opaque id of the sender, or `system` for a notification of the Hive (ADR-026). */
   from: string;
+  /** Present only on a notification of the Hive. */
+  from_kind?: 'system';
   to: string;
   type: 'request' | 'response' | 'notification';
   body: string;
@@ -30,11 +33,19 @@ export interface ReadMailboxWireOutput {
   next_cursor: { stored_at: string; message_id: string } | null;
 }
 
-/** Adapt a single MessageView to wire form (with action depth re-check). */
-export function adaptMessageView(message: MessageView): MessageViewWire {
+/** The sender label of a notification deposited by the Hive itself (`hives.id`). */
+export const SYSTEM_SENDER = 'system';
+
+/**
+ * Adapt a single MessageView to wire form (with action depth re-check). A message
+ * whose sender is `systemSenderId` (the Hive id) is rendered with the `system` label.
+ */
+export function adaptMessageView(message: MessageView, systemSenderId?: string): MessageViewWire {
+  const fromSystem = systemSenderId !== undefined && message.from === systemSenderId;
   return {
     id: message.id,
-    from: message.from,
+    from: fromSystem ? SYSTEM_SENDER : message.from,
+    ...(fromSystem && { from_kind: SYSTEM_SENDER }),
     to: message.to,
     type: message.type,
     body: message.body,
@@ -49,8 +60,12 @@ export function adaptMessageView(message: MessageView): MessageViewWire {
 }
 
 /** Adapt the full mailbox response, including next-cursor derivation. */
-export function adaptMailbox(messages: MessageView[], pageLimit: number): ReadMailboxWireOutput {
-  const wireMessages = messages.map(adaptMessageView);
+export function adaptMailbox(
+  messages: MessageView[],
+  pageLimit: number,
+  systemSenderId?: string,
+): ReadMailboxWireOutput {
+  const wireMessages = messages.map((message) => adaptMessageView(message, systemSenderId));
   const nextCursor =
     messages.length === pageLimit && messages.length > 0
       ? (() => {

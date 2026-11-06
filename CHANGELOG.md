@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **`register_session`, the tool that registers a session as a Worker** (PRY-091, second PRY of the v0.3.0 cascade for ADR-026). With an enrollment credential it creates the agent, or claims it when its previous holder has no open listen stream; with the last Worker token as Bearer it renews that token and updates `description` and `capabilities`, and the open listen stream moves to the new token instead of closing at the old `exp`. The answer is `{ agent_ref, agent_id, token, expires_at }`. See [Clients via `hivectl mcp proxy`](./docs/mcp-server.md#clients-via-hivectl-mcp-proxy).
+  - New wire codes `-32007` (name in use), `-32008` (name taken), `-32009` (agent suspended), `-32010` (enrollment quota exceeded, `data: { limit }`) and `-32011` (too many registrations, HTTP 429 with `Retry-After`).
+  - A rate limit per enrollment credential (`HIVE_ENROLLMENT_REGISTER_RATE_LIMIT`, `30` per `HIVE_ENROLLMENT_REGISTER_RATE_WINDOW_SECONDS`, `60`) and an alert to the owner after repeated rejections of one name (`HIVE_ENROLLMENT_REJECT_ALERT_THRESHOLD`, `5`, per `HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES`, `10`): an `enrollment_reject_alert` audit event plus a notice in the owner's mailbox. Each new agent is announced the same way, and audited as `agent_enrolled` (a claim as `agent_claimed`).
+  - Notices from the Hive read as sender `system` in `read_mailbox` (`from_kind: "system"`), `check_unread_messages` and push events; `reply_to` to one answers `-32004`.
+  - `get_agent_config`, `list_agents` and `get_agent_status` return the `description` an agent declared about itself (untrusted text).
+  - `HIVE_PRESENCE_CLAIM_RESERVATION_MS` (`10000`, provisional): how long a claim keeps the name until the claimant opens its stream.
+
 - **Enrollment credentials and short-lived Worker tokens in Auth** (PRY-090, first PRY of the v0.3.0 cascade for [ADR-026](https://github.com/hivemine-ai/hive-vault) — session enrollment as Workers). The tool that uses them, `register_session`, lands in PRY-091; this release line only adds the Auth side and the operator commands.
   - `hivectl credential issue --enrollment --owner <email-or-uuid> [--name-prefix <p>] [--max-agents N] [--ttl <duration>] --output-credential <path>` issues an enrollment credential (scope `enroll`, default TTL 90 days). It is written to a `0600` file only. It carries no admin authority: an admin operation presented with it fails with `INSUFFICIENT_PRIVILEGE` (`scoped_credential`), and a JWT with an unknown `scope` is rejected as `CREDENTIAL_INAUTHENTIC`.
   - `hivectl credential rotate` on an enrollment keeps its scope, name prefix and agent cap; the Worker tokens already issued through it keep renewing, while new registrations with the old credential fail. `hivectl credential revoke` on an enrollment also revokes every Worker token issued through it, and `--revoke-agents` revokes its Agents too (one `admin_agent_revoke` audit row each).
@@ -16,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **An enrollment credential now reaches `register_session` and `server/discover`** (PRY-091). Every other operation still answers HTTP 403 with `-32006` `"credential out of scope"`, `tools/list` included. `tools/list` with a Worker token returns 9 tools.
 - **Schema migration for session enrollment** (PRY-090). `agents` gains `origin` (existing agents become `manual`), `enrolled_via`, `description` (at most 280 characters), `retired_at`, `last_worker_jti` and the `retired` state; `credentials` gains `scope` and `enrolled_via`; `audit_log` accepts the new categories. SQLite rebuilds `agents` and `audit_log` inside a transaction; Postgres is migrated the same way.
 - **Revocation rows live seven days longer** (PRY-090). The purge of the revocation table now keeps a row until its credential expired more than `HIVE_HOLDER_PROOF_WINDOW_DAYS` plus the clock tolerance ago, because the last Worker token of an Agent can still prove its holder for that window.
 - `hivectl credential revoke --output json` adds `revokedTokens` and `revokedAgentIds`.

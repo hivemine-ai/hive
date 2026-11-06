@@ -102,6 +102,14 @@ export interface ClaimEnrolledAgentInput {
   enrolledVia: UUIDv7;
 }
 
+export interface RenewWorkerTokenInput {
+  agentId: UUIDv7;
+  // The `jti` of the Bearer presented as holder proof.
+  presentedJti: UUIDv7;
+  description?: string;
+  capabilities?: string[];
+}
+
 export interface RevokeWorkerTokensInput {
   agentId: UUIDv7;
   revokedBy: UUIDv7;
@@ -143,6 +151,12 @@ export interface Enrollment {
     input: ClaimEnrolledAgentInput,
     identity: IdentityContext,
   ): Promise<RegisteredAgent>;
+  /**
+   * The renewal of `register_session`: `issueWorkerToken` in renew mode (no supersede,
+   * CAS on `agents.last_worker_jti`) plus the optional update of `description` and
+   * `capabilities`, in one transaction. A lost CAS rolls the update back.
+   */
+  renewWorkerToken(input: RenewWorkerTokenInput): Promise<IssuedCredential>;
   /** Blocklists every Worker token of the Agent in the window (`hivectl agent release`). */
   revokeWorkerTokens(
     input: RevokeWorkerTokensInput,
@@ -259,6 +273,29 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
   return {
     issueWorkerToken,
 
+    async renewWorkerToken(input): Promise<IssuedCredential> {
+      if (input.description !== undefined) validateDescription(input.description);
+      return deps.db.transaction().execute(async (trx) => {
+        const token = await issueWorkerToken(
+          { agentId: input.agentId, mode: 'renew', presentedJti: input.presentedJti },
+          trx,
+        );
+        if (input.description !== undefined || input.capabilities !== undefined) {
+          await trx
+            .updateTable('agents')
+            .set({
+              ...(input.description !== undefined && { description: input.description }),
+              ...(input.capabilities !== undefined && {
+                capabilities: jsonStringify(input.capabilities),
+              }),
+            })
+            .where('id', '=', input.agentId)
+            .execute();
+        }
+        return token;
+      });
+    },
+
     async issueEnrollmentCredential(input, caller): Promise<IssuedCredential> {
       const issuedBy = authorizeIssue(input.ownerId, caller) ?? input.issuedBy ?? null;
       validateClaims(input, deps.hiveMaxAgents);
@@ -284,13 +321,7 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
 
     async createEnrolledAgent(input, identity): Promise<RegisteredAgent> {
       assertEnrollmentOwner(identity, input.ownerId, input.enrolledVia);
-      if (!AGENT_NAME_RE.test(input.name)) {
-        throw new AuthError('INVALID_INPUT', { subCode: 'name_malformed' });
-      }
-      const prefix = identity.snapshot.namePrefix;
-      if (prefix !== undefined && !input.name.startsWith(prefix)) {
-        throw new AuthError('INVALID_INPUT', { subCode: 'name_prefix_mismatch' });
-      }
+      validateEnrollmentName(input.name, identity.snapshot.namePrefix);
       validateDescription(input.description);
       const limit = identity.snapshot.maxAgents ?? deps.hiveMaxAgents;
 
@@ -419,6 +450,16 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
   };
 }
 
+/** ADR-015 name syntax, then the `name_prefix` claim of the enrollment, if any. */
+export function validateEnrollmentName(name: string, namePrefix: string | undefined): void {
+  if (!AGENT_NAME_RE.test(name)) {
+    throw new AuthError('INVALID_INPUT', { subCode: 'name_malformed' });
+  }
+  if (namePrefix !== undefined && !name.startsWith(namePrefix)) {
+    throw new AuthError('INVALID_INPUT', { subCode: 'name_prefix_mismatch' });
+  }
+}
+
 // The registration primitives run with the enrollment Bearer's identity: an enrollment
 // credential whose owner is the Agent's owner and whose jti is the `enrolledVia` given.
 function assertEnrollmentOwner(
@@ -435,7 +476,8 @@ function assertEnrollmentOwner(
   }
 }
 
-function validateDescription(description: string): void {
+/** ADR-026: one line of at most 280 characters, not blank, without control characters. */
+export function validateDescription(description: string): void {
   if (
     description.trim().length === 0 ||
     description.length > DESCRIPTION_MAX_LENGTH ||

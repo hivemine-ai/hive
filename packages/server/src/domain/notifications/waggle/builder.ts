@@ -15,7 +15,11 @@ import type { WaggleKind, WaggleNotification } from './types.js';
 
 export interface BuilderDeps {
   cellsRepo: CellsRepo;
+  /** ADR-026: the Hive id, sender of system notifications, shown as the label `system`. */
+  systemSenderId?: UUIDv7;
 }
+
+const SYSTEM_SENDER = 'system';
 
 export interface Builder {
   /** Online-mode payload — fired after the consolidator flushes a Cell window. */
@@ -62,7 +66,9 @@ export function createBuilder(deps: BuilderDeps): Builder {
       recipientId,
       unreadCount: summary.unreadCount,
       coalescedCount,
-      senderIds: summary.distinctSenderIds,
+      senderIds: summary.distinctSenderIds.map((id) =>
+        id === deps.systemSenderId ? SYSTEM_SENDER : id,
+      ),
       emittedAt: new Date(),
       waggleId: uuidv7(),
     };
