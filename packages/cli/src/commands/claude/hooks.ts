@@ -156,6 +156,13 @@ const NAMED_CONTEXT = (name: string): string =>
     COMMON_CONTEXT,
   ].join(' ');
 
+const RENAMED_CONTEXT = (current: string, earlier: string): string =>
+  [
+    `This Claude Code session is currently the Hive agent "${current}". The conversation you resumed was "${earlier}" in Hive earlier; the session keeps "${current}" unless the user asks to switch.`,
+    `Call ${TOOL_PREFIX}session_status (deferred: load it with ToolSearch first) to confirm, and tell the user which name the session has. To switch, call ${TOOL_PREFIX}register_session with the other name only after the user confirms.`,
+    COMMON_CONTEXT,
+  ].join(' ');
+
 const UNNAMED_CONTEXT = [
   'This folder is connected to Hive, the messaging hub where Claude Code sessions and other agents talk to each other, but this session has no Hive name yet.',
   `The Hive tools are named ${TOOL_PREFIX}<tool> and are deferred: load them with ToolSearch before calling them.`,
@@ -178,15 +185,27 @@ export function sessionStartHook(stdin: string, deps: HookDeps): string {
   const ctx = resolveContext(input, deps);
   if (ctx === undefined) return '';
 
+  const live = readLiveProxyEntry(ctx.paths, deps.claudePid, ctx.startTimeOf);
+  const liveName = live?.registered === true ? live.name : undefined;
   let saved = readSaved(ctx, input.sessionId);
-  if (saved === undefined) {
-    // `/clear` gives the same process a new session id; a proxy already
-    // registered keeps its identity, so the new session id inherits the name.
-    const live = readLiveProxyEntry(ctx.paths, deps.claudePid, ctx.startTimeOf);
-    if (live?.registered === true && live.name !== undefined) {
-      saved = { name: live.name, proxyHandle: live.proxyHandle };
-      writePrivateJson(ctx.paths.sessionFile(ctx.key, input.sessionId), saved);
-    }
+  let differs: string | undefined;
+  if (saved === undefined && liveName !== undefined && input.source === 'clear') {
+    // `/clear` gives the same process a new session id; the registered proxy
+    // keeps its identity, so the new session id inherits its name (and the
+    // description the previous PID-map entry carried for it).
+    const previous = readPidMapEntry(ctx.paths, deps.claudePid, ctx.startTimeOf);
+    saved = {
+      name: liveName,
+      ...(live?.proxyHandle !== undefined && { proxyHandle: live.proxyHandle }),
+      ...(previous?.name === liveName &&
+        previous.description !== undefined && { description: previous.description }),
+    };
+    writePrivateJson(ctx.paths.sessionFile(ctx.key, input.sessionId), saved);
+  } else if (saved !== undefined && liveName !== undefined && saved.name !== liveName) {
+    // A registered proxy never changes identity by itself (tech spec, auto
+    // registration rule 4): the live name wins in the PID map and the context.
+    differs = saved.name;
+    saved = { name: liveName };
   }
 
   const entry: PidMapEntry = {
@@ -201,7 +220,10 @@ export function sessionStartHook(stdin: string, deps: HookDeps): string {
   removeOrphans(ctx.paths.pidMapDir, ctx.startTimeOf, deps.claudePid);
   removeOrphans(ctx.paths.proxiesDir, ctx.startTimeOf, deps.claudePid);
 
-  return hookOutput(saved === undefined ? UNNAMED_CONTEXT : NAMED_CONTEXT(saved.name));
+  if (saved === undefined) return hookOutput(UNNAMED_CONTEXT);
+  return hookOutput(
+    differs === undefined ? NAMED_CONTEXT(saved.name) : RENAMED_CONTEXT(saved.name, differs),
+  );
 }
 
 /** The structured result of a plugin tool, whatever shape Claude Code hands it in. */

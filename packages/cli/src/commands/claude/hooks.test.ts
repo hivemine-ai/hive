@@ -105,26 +105,72 @@ describe('SessionStart hook', () => {
     expect(context).toMatch(/\/mcp/);
   });
 
-  it('on /clear keeps the identity of the registered proxy for the new session id', () => {
+  function registeredProxy(name = 'claude-api'): void {
     publishProxyEntry(paths, {
       claudePid: CLAUDE_PID,
       claudeStartTime: START,
       proxyHandle: 'handle-1',
       socketPath: '/tmp/x.sock',
       registered: true,
-      name: 'claude-api',
+      name,
     });
+  }
+
+  it('on /clear keeps the identity and the description of the registered proxy for the new session id', () => {
+    start({ session_id: 's-1', source: 'startup' });
+    writePrivateJson(paths.pidMap(CLAUDE_PID), {
+      claudePid: CLAUDE_PID,
+      claudeStartTime: START,
+      sessionId: 's-1',
+      source: 'startup',
+      name: 'claude-api',
+      description: 'Works on the API',
+    });
+    registeredProxy();
     const out = start({ session_id: 's-2', source: 'clear' });
     expect(readPrivateJson(paths.pidMap(CLAUDE_PID))).toMatchObject({
       sessionId: 's-2',
       source: 'clear',
       name: 'claude-api',
+      description: 'Works on the API',
     });
     expect(readPrivateJson(join(paths.sessionsDir(key), 's-2.json'))).toEqual({
       name: 'claude-api',
       proxyHandle: 'handle-1',
+      description: 'Works on the API',
     });
     expect(contextOf(out)).toContain('"claude-api"');
+  });
+
+  it.each(['resume', 'compact', 'startup'])(
+    'on %s of a session id without a saved name does not inherit the name of the registered proxy',
+    (source) => {
+      registeredProxy();
+      const out = start({ session_id: 's-9', source });
+      const entry = readPrivateJson(paths.pidMap(CLAUDE_PID)) as Record<string, unknown>;
+      expect(entry['name']).toBeUndefined();
+      expect(existsSync(join(paths.sessionsDir(key), 's-9.json'))).toBe(false);
+      expect(contextOf(out)).not.toContain('"claude-api"');
+    },
+  );
+
+  it('on /resume of a session saved as Y while the proxy is registered as X keeps X and says the names differ', () => {
+    saveSession('s-1', { name: 'old-name', proxyHandle: 'h0', description: 'Old work' });
+    registeredProxy('claude-api');
+    const out = start({ session_id: 's-1', source: 'resume' });
+    expect(readPrivateJson(paths.pidMap(CLAUDE_PID))).toMatchObject({
+      sessionId: 's-1',
+      source: 'resume',
+      name: 'claude-api',
+    });
+    const context = contextOf(out);
+    expect(context).toContain('"claude-api"');
+    expect(context).toContain('"old-name"');
+    expect(context).not.toMatch(/is the Hive agent "old-name"/);
+    expect(context).toContain('mcp__plugin_hive-wake_hive__session_status');
+    expect(readPrivateJson(join(paths.sessionsDir(key), 's-1.json'))).toMatchObject({
+      name: 'old-name',
+    });
   });
 
   it('removes orphan PID-map and proxy entries (dead process or reused PID)', () => {
