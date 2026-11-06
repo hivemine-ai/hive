@@ -30,7 +30,7 @@ import { attachRequestIdHook } from '#observability/request-id.js';
 import type { Database } from '#persistence/schema.js';
 
 import { toAuthInfo, verifyBearerHeader, type LastConnectedRefresher } from './auth-binding.js';
-import { MCP_ERR_INTERNAL } from './error-codes.js';
+import { MCP_ERR_FORBIDDEN, MCP_ERR_INTERNAL } from './error-codes.js';
 import { mapDomainError } from './error-mapper.js';
 import { isAllowedByOriginGuard } from './origin-guard.js';
 import type { McpTransport } from './server.js';
@@ -189,6 +189,17 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
         },
         mapped.wire.message,
       );
+      // An authentic credential outside its scope is a 403, not a 401 (ADR-026).
+      if (isAuthError(err) && err.subCode === 'scoped_credential') {
+        return reply
+          .code(403)
+          .type('application/json')
+          .send({
+            jsonrpc: '2.0',
+            error: { code: MCP_ERR_FORBIDDEN, message: 'credential out of scope' },
+            id: null,
+          });
+      }
       // Only a real auth verdict is a 401. An infrastructure failure must not tell
       // a client with a valid credential that its credential is bad.
       return reply

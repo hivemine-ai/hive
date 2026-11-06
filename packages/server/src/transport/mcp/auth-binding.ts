@@ -4,6 +4,7 @@
 
 import type { AuthInfo } from '@modelcontextprotocol/server';
 
+import { AuthError } from '#domain/auth/index.js';
 import type { IdentityContext, UUIDv7, Verifier } from '#domain/auth/index.js';
 import type { Logger } from '#observability/logger.js';
 
@@ -28,12 +29,18 @@ export interface AuthenticatedRequest {
  * - Returns `AuthenticatedRequest` on success.
  * - Throws the original `AuthError` from the verifier on failure (caller maps
  *   to the wire via `mapDomainError`). Infrastructure failures propagate as they are.
+ * - ADR-026: a credential with a `scope` (enrollment) is authentic but covers no MCP
+ *   operation yet, so it fails with INSUFFICIENT_PRIVILEGE{scoped_credential} on every
+ *   method. PRY-091 narrows this to let it reach `register_session` and `server/discover`.
  */
 export async function verifyBearerHeader(
   verifier: Pick<Verifier, 'verify'>,
   authorizationHeader: string | undefined,
 ): Promise<AuthenticatedRequest> {
   const identity = await verifier.verify(authorizationHeader);
+  if (identity.snapshot.scope !== undefined) {
+    throw new AuthError('INSUFFICIENT_PRIVILEGE', { subCode: 'scoped_credential' });
+  }
   return { identity };
 }
 
