@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import chalk from 'chalk';
 
+import { PendingMigrationsError } from '@hive/server';
 import { HIVE_DEFAULT_HTTP_PORT } from '@hive/shared';
 
 import {
@@ -375,6 +376,51 @@ describe('PRY-031 — runServe failure paths', () => {
         (l as { event?: string }).event === 'wire_boot_failed',
     );
     expect(bootEvents).toHaveLength(1);
+  });
+
+  it('PRY-096: exits with code 4 and a stderr hint when the schema has pending migrations', async () => {
+    const exits: number[] = [];
+    const fakeProc: SignalsProcess = {
+      on() {
+        return undefined;
+      },
+      exit(code) {
+        exits.push(code ?? 0);
+      },
+    };
+    const errorLogs: unknown[] = [];
+    const errLines: string[] = [];
+
+    await runServe(
+      { port: undefined, host: undefined, logLevel: undefined, logPretty: undefined },
+      {
+        proc: fakeProc,
+        createLoggerFn: ((): LoggerStub => makeLoggerStub(errorLogs)) as unknown as NonNullable<
+          RunServeDeps['createLoggerFn']
+        >,
+        buildWireFn: ((): Promise<never> =>
+          Promise.reject(
+            new PendingMigrationsError(['20261105120000_enrollment-agents-credentials']),
+          )) as unknown as NonNullable<RunServeDeps['buildWireFn']>,
+        readConfigFileFn: () => null,
+        readSnapshotFn: () => Promise.resolve(null),
+        outSink: () => undefined,
+        errSink: (line) => errLines.push(line),
+      },
+    );
+
+    expect(exits).toEqual([4]);
+    expect(errLines).toEqual([
+      'error: database schema is out of date (MIGRATIONS_PENDING): the database has 1 pending ' +
+        'migration(s): 20261105120000_enrollment-agents-credentials; back up the database and ' +
+        'run `hivectl migrate up`\n',
+    ]);
+    expect(errorLogs).toContainEqual(
+      expect.objectContaining({
+        event: 'migrations_pending',
+        pending: ['20261105120000_enrollment-agents-credentials'],
+      }),
+    );
   });
 
   it('exits with code 1 when wire.start() throws (wire_start_failed)', async () => {

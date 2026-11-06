@@ -122,16 +122,21 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # `#persistence/*` etc. resolve to `dist/`, so build before running the suite.
+      # `@hive/cli...` also builds `@hive/server` and `@hive/shared`.
       - name: Build
-        run: pnpm --filter @hive/server... build
+        run: pnpm --filter @hive/cli... build
 
       - name: Per-sender cap tests (Postgres)
         run: pnpm --filter @hive/server exec vitest run src/domain/cells/send.test.ts --reporter=verbose
 
       # Each suite recreates the `public` schema, so the files must not run in parallel.
       - name: Enrollment schema and auth tests (Postgres)
-        run: pnpm --filter @hive/server exec vitest run src/persistence/migrate.enrollment.test.ts src/domain/auth/credentials/enrollment.worker-token.test.ts src/domain/auth/credentials/enrollment.registration.test.ts src/domain/auth/credentials/enrollment.cascade.test.ts src/persistence/migrate.audit-enrollment.test.ts src/domain/auth/participants/retention.test.ts src/domain/auth/participants/revoke-hivekeeper.cascade.test.ts --no-file-parallelism --reporter=verbose
+        run: pnpm --filter @hive/server exec vitest run src/persistence/migrate.enrollment.test.ts src/persistence/migrate.pending.test.ts src/domain/auth/credentials/enrollment.worker-token.test.ts src/domain/auth/credentials/enrollment.registration.test.ts src/domain/auth/credentials/enrollment.cascade.test.ts src/persistence/migrate.audit-enrollment.test.ts src/domain/auth/participants/retention.test.ts src/domain/auth/participants/revoke-hivekeeper.cascade.test.ts --no-file-parallelism --reporter=verbose
 
       # PRY-091 / PRY-094: register_session and the retention job over the real HTTP wire, with concurrent requests.
       - name: register_session tests (Postgres)
         run: pnpm --filter @hive/server exec vitest run src/transport/mcp/register-session.smoke.test.ts src/transport/mcp/retention.smoke.test.ts --no-file-parallelism --reporter=verbose
+
+      # PRY-096 (INC-2026-010): upgrade-then-serve from the v0.2.2 schema.
+      - name: Upgrade-then-serve test (Postgres)
+        run: pnpm --filter @hive/cli exec vitest run src/commands/serve.upgrade.test.ts --reporter=verbose

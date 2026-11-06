@@ -18,11 +18,12 @@
 // Implements PRY-051 (Slice 4 of the hivectl Output Layer cascade per
 // [[hivectl Output Layer + Status Snapshot]]).
 
-import { buildWire, createLogger } from '@hive/server';
+import { buildWire, createLogger, isPendingMigrationsError } from '@hive/server';
 import type { LoggerOptions, Wire, WireConfig } from '@hive/server';
 import { HIVE_DEFAULT_HTTP_HOST, HIVE_DEFAULT_HTTP_PORT } from '@hive/shared';
 import type { DestinationStream } from 'pino';
 
+import { mapErrorToExit } from '#error/handler.js';
 import { getDefaultConfigPath } from '#platform/detect.js';
 import { c } from '#output/colors.js';
 import { compact as bannerCompact } from '#output/banner.js';
@@ -239,6 +240,8 @@ export interface RunServeDeps {
    * for assertions without polluting the test runner's stdout.
    */
   outSink?: (line: string) => void;
+  /** Test seam: replace the stderr sink for boot refusals. Defaults to `process.stderr.write`. */
+  errSink?: (line: string) => void;
 }
 
 function buildFormatterDest(
@@ -280,6 +283,11 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
     deps.outSink ??
     ((line: string): void => {
       process.stdout.write(line);
+    });
+  const errSink =
+    deps.errSink ??
+    ((line: string): void => {
+      process.stderr.write(line);
     });
 
   let configFile: PersistedConfig | null = null;
@@ -344,6 +352,19 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
   try {
     wire = await buildWireFn({ logger }, wireOverrides);
   } catch (err) {
+    if (isPendingMigrationsError(err)) {
+      // INC-2026-010: never migrate implicitly. Exit 4 (precondition) is deterministic so
+      // systemd stops restarting (`RestartPreventExitStatus=4`) and scripts can branch on it.
+      const mapped = mapErrorToExit(err);
+      logger.error(
+        { event: 'migrations_pending', pending: err.pending },
+        'database has pending migrations; refusing to start',
+      );
+      errSink(`error: ${mapped.message}\n`);
+      proc.exitCode = mapped.code;
+      proc.exit(mapped.code);
+      return;
+    }
     logger.error(
       { event: 'wire_boot_failed', err: err instanceof Error ? err.message : String(err) },
       'failed to bootstrap hive server',

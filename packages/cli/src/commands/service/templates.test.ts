@@ -22,6 +22,7 @@ describe('renderSystemdUnit', () => {
       ExecStart=/usr/local/bin/hivectl serve
       Restart=on-failure
       RestartSec=5
+      RestartPreventExitStatus=4
 
       [Install]
       WantedBy=multi-user.target
@@ -49,6 +50,15 @@ describe('renderSystemdUnit', () => {
     });
     expect(unit).toContain('Restart=on-failure');
     expect(unit).not.toContain('Restart=always');
+  });
+
+  it('PRY-096: does not restart on exit 4 (pending migrations and other preconditions)', () => {
+    const unit = renderSystemdUnit({
+      execPath: '/usr/local/bin/hivectl',
+      workingDir: '/var/lib/hive',
+      user: 'hive',
+    });
+    expect(unit).toContain('RestartPreventExitStatus=4');
   });
 });
 
