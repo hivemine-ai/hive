@@ -51,6 +51,8 @@ export interface NotificationsFactoryOptions {
   senderWakeupsPerWindow?: number;
   /** Default 60000ms (provisional). */
   senderWindowMs?: number;
+  /** Default 10000ms (provisional). */
+  claimReservationMs?: number;
 }
 
 export interface Notifications {
@@ -71,6 +73,7 @@ const DEFAULT_REPLAY_DELAY_MS = 0;
 const DEFAULT_MAX_SESSIONS = 16;
 const DEFAULT_SENDER_WAKEUPS_PER_WINDOW = 5;
 const DEFAULT_SENDER_WINDOW_MS = 60_000;
+const DEFAULT_CLAIM_RESERVATION_MS = 10_000;
 
 export function resolveNotificationsConfig(
   env: NodeJS.ProcessEnv,
@@ -81,6 +84,7 @@ export function resolveNotificationsConfig(
   maxSessionsPerParticipant: number;
   senderWakeupsPerWindow: number;
   senderWindowMs: number;
+  claimReservationMs: number;
 } {
   const quietWindowMs =
     options.quietWindowMs ??
@@ -113,6 +117,12 @@ export function resolveNotificationsConfig(
       name: 'HIVE_WAGGLE_SENDER_WINDOW_MS',
       min: 1,
     });
+  const claimReservationMs =
+    options.claimReservationMs ??
+    parseIntEnv(env['HIVE_PRESENCE_CLAIM_RESERVATION_MS'], DEFAULT_CLAIM_RESERVATION_MS, {
+      name: 'HIVE_PRESENCE_CLAIM_RESERVATION_MS',
+      min: 1,
+    });
   if (senderWindowMs < quietWindowMs) {
     throw new Error(
       `HIVE_WAGGLE_SENDER_WINDOW_MS (${String(senderWindowMs)}) must be >= HIVE_WAGGLE_QUIET_WINDOW_MS (${String(quietWindowMs)})`,
@@ -125,6 +135,7 @@ export function resolveNotificationsConfig(
     maxSessionsPerParticipant,
     senderWakeupsPerWindow,
     senderWindowMs,
+    claimReservationMs,
   };
 }
 
@@ -147,6 +158,7 @@ export function createNotificationsForProduction(
 
   const presenceRegistry = createPresenceRegistry({
     maxSessionsPerParticipant: config.maxSessionsPerParticipant,
+    claimReservationMs: config.claimReservationMs,
     logger: deps.logger,
     participantsRepo: deps.participantsRepo,
     onReady: ({ participantId, subscriptionId, handle }) => {
