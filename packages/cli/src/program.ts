@@ -46,6 +46,7 @@ import {
   listCredentialsSchema,
   listKeepersSchema,
   migrateSchema,
+  migrateStatusSchema,
   releaseAgentSchema,
   revokeAgentSchema,
   revokeCredentialSchema,
@@ -276,13 +277,13 @@ export function buildProgram(): BuildProgramResult {
     });
   migrate
     .command('status')
-    .description('List applied migrations.')
+    .description('List applied, pending and unknown migrations.')
     .action(async () => {
       const s = state();
       await runHandler(
         s,
         () => performMigrate({ globals: s.globals, action: 'status' }),
-        (value, mode) => formatOutput(value, { mode, schema: migrateSchema }),
+        (value, mode) => formatOutput(value, { mode, schema: migrateStatusSchema }),
       );
     });
 

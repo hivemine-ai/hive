@@ -19,7 +19,10 @@ import {
   uuidv7,
 } from '@hive/server';
 import type { DbConfig, Wire } from '@hive/server';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { buildProgram } from '#program.js';
+import { closeRuntime } from '#runtime/lazy-runtime.js';
 
 import { performMigrate } from './migrate.js';
 import { runServe } from './serve.js';
@@ -62,6 +65,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  await closeRuntime();
   await wire?.stop();
   for (const [k, v] of Object.entries(saved)) {
     if (v === undefined) delete process.env[k];
@@ -309,5 +314,160 @@ describe(`upgrade from the v0.2.2 schema then serve (${PG_URL ? 'postgres' : 'sq
     } finally {
       await db.destroy();
     }
+  }, 20_000);
+});
+
+const FUTURE = '29991231000000_from-a-newer-hivectl';
+const PENDING_HINT = 'back up the database and run `hivectl migrate up`';
+const UNKNOWN_MESSAGE = `the database has migrations unknown to this binary: ${FUTURE}; upgrade hivectl`;
+
+async function migrateFully(): Promise<void> {
+  await performMigrate({ globals: GLOBALS, action: 'up' });
+}
+
+async function insertUnknownMigration(): Promise<void> {
+  const db = createDb(dbConfig);
+  try {
+    await db
+      .insertInto('kysely_migration' as never)
+      .values({ name: FUTURE, timestamp: new Date().toISOString() })
+      .execute();
+  } finally {
+    await db.destroy();
+  }
+}
+
+/** Runs `hivectl <args>` in process and returns its exit code and captured streams. */
+async function hivectl(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const stdoutSpy = vi
+    .spyOn(process.stdout, 'write')
+    .mockImplementation((c: string | Uint8Array) => {
+      out.push(String(c));
+      return true;
+    });
+  const stderrSpy = vi
+    .spyOn(process.stderr, 'write')
+    .mockImplementation((c: string | Uint8Array) => {
+      err.push(String(c));
+      return true;
+    });
+  try {
+    const { program, getExitCode } = buildProgram();
+    await program.parseAsync(['node', 'hivectl', ...args]);
+    return { code: getExitCode(), stdout: out.join(''), stderr: err.join('') };
+  } finally {
+    await closeRuntime();
+    stdoutSpy.mockRestore();
+    stderrSpy.mockRestore();
+  }
+}
+
+describe(`admin commands on an out-of-date schema (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
+  it('agent list exits 4 with the migrate hint on the v0.2.2 schema', async () => {
+    await seedV02World();
+
+    const run = await hivectl(['--output', 'json', 'agent', 'list']);
+
+    expect(run.code).toBe(4);
+    expect(run.stderr).toContain('MIGRATIONS_PENDING');
+    for (const name of V03_NAMES) expect(run.stderr).toContain(name);
+    expect(run.stderr).toContain(PENDING_HINT);
+    expect(await appliedMigrations()).toEqual(Object.keys(V02_MIGRATIONS).sort());
+  });
+
+  it('credential issue --enrollment exits 4 with the migrate hint on the v0.2.2 schema', async () => {
+    await seedV02World();
+
+    const run = await hivectl([
+      'credential',
+      'issue',
+      '--enrollment',
+      '--owner',
+      'keeper@example.com',
+      '--output-credential',
+      path.join(workDir, 'enrollment.jwt'),
+    ]);
+
+    expect(run.code).toBe(4);
+    expect(run.stderr).toContain('MIGRATIONS_PENDING');
+    expect(run.stderr).toContain(PENDING_HINT);
+    expect(run.stderr).not.toContain('internal error');
+  });
+
+  it('agent list works after migrate up and reports origin manual', async () => {
+    await seedV02World();
+    await migrateFully();
+
+    const run = await hivectl(['--output', 'json', 'agent', 'list']);
+
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain('"origin": "manual"');
+  });
+});
+
+describe(`a database newer than the binary (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
+  it('serve exits 4 with the upgrade hint', async () => {
+    await seedV02World();
+    await migrateFully();
+    await insertUnknownMigration();
+    const proc = fakeProc();
+    const errLines: string[] = [];
+
+    await serveUntilExitOrBoot(proc, errLines);
+
+    expect(wire).toBeUndefined();
+    expect(proc.exits).toEqual([4]);
+    expect(errLines.join('')).toBe(
+      `error: database schema is newer than this hivectl (MIGRATIONS_UNKNOWN): ${UNKNOWN_MESSAGE}\n`,
+    );
+  });
+
+  it('agent list exits 4 with the upgrade hint', async () => {
+    await seedV02World();
+    await migrateFully();
+    await insertUnknownMigration();
+
+    const run = await hivectl(['agent', 'list']);
+
+    expect(run.code).toBe(4);
+    expect(run.stderr).toContain(UNKNOWN_MESSAGE);
+  });
+});
+
+describe(`migrate status lists pending and unknown migrations (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
+  it('reports applied, pending and unknown', async () => {
+    await seedV02World();
+    await insertUnknownMigration();
+
+    const status = await performMigrate({ globals: GLOBALS, action: 'status' });
+
+    expect(status.applied.map((m) => m.name)).toEqual([
+      ...Object.keys(V02_MIGRATIONS).sort(),
+      FUTURE,
+    ]);
+    expect(status.pending).toEqual(V03_NAMES);
+    expect(status.unknown).toEqual([FUTURE]);
+  });
+
+  it('prints pending and unknown in the table output', async () => {
+    await seedV02World();
+    await insertUnknownMigration();
+
+    const run = await hivectl(['--output', 'table', 'migrate', 'status']);
+
+    expect(run.code).toBe(0);
+    for (const name of [...V03_NAMES, FUTURE]) expect(run.stdout).toContain(name);
+  });
+
+  it('reports nothing pending once migrated', async () => {
+    await seedV02World();
+    await migrateFully();
+
+    const status = await performMigrate({ globals: GLOBALS, action: 'status' });
+
+    expect(status.pending).toEqual([]);
+    expect(status.unknown).toEqual([]);
   });
 });

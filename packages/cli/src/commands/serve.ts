@@ -18,7 +18,12 @@
 // Implements PRY-051 (Slice 4 of the hivectl Output Layer cascade per
 // [[hivectl Output Layer + Status Snapshot]]).
 
-import { buildWire, createLogger, isPendingMigrationsError } from '@hive/server';
+import {
+  buildWire,
+  createLogger,
+  isPendingMigrationsError,
+  isUnknownMigrationsError,
+} from '@hive/server';
 import type { LoggerOptions, Wire, WireConfig } from '@hive/server';
 import { HIVE_DEFAULT_HTTP_HOST, HIVE_DEFAULT_HTTP_PORT } from '@hive/shared';
 import type { DestinationStream } from 'pino';
@@ -352,13 +357,15 @@ export async function runServe(opts: ServeCommandOpts, deps: RunServeDeps = {}):
   try {
     wire = await buildWireFn({ logger }, wireOverrides);
   } catch (err) {
-    if (isPendingMigrationsError(err)) {
+    if (isPendingMigrationsError(err) || isUnknownMigrationsError(err)) {
       // INC-2026-010: never migrate implicitly. Exit 4 (precondition) is deterministic so
       // systemd stops restarting (`RestartPreventExitStatus=4`) and scripts can branch on it.
       const mapped = mapErrorToExit(err);
       logger.error(
-        { event: 'migrations_pending', pending: err.pending },
-        'database has pending migrations; refusing to start',
+        isPendingMigrationsError(err)
+          ? { event: 'migrations_pending', pending: err.pending }
+          : { event: 'migrations_unknown', unknown: err.unknown },
+        'database schema does not match this binary; refusing to start',
       );
       errSink(`error: ${mapped.message}\n`);
       proc.exitCode = mapped.code;

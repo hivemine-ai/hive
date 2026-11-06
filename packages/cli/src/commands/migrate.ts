@@ -9,7 +9,7 @@
 // This command bypasses `wire.startCli()` — the schema may not exist yet, so
 // the regular wire would fail loading hives + signing keys.
 
-import { createDb, migrateDown, migrateToLatest } from '@hive/server';
+import { createDb, getSchemaStatus, migrateDown, migrateToLatest } from '@hive/server';
 
 import { CliError } from '#error/cli-error.js';
 import type { GlobalCliOpts } from '../types.js';
@@ -24,6 +24,10 @@ export interface MigrateOpts {
 export interface MigrateResult {
   action: MigrateAction;
   applied: { name: string; status: 'success' | 'noop' }[];
+  /** `status` only: catalog migrations not applied yet. */
+  pending?: string[];
+  /** `status` only: applied migrations this binary does not know (a newer hivectl ran them). */
+  unknown?: string[];
 }
 
 export async function performMigrate(opts: MigrateOpts): Promise<MigrateResult> {
@@ -37,11 +41,14 @@ export async function performMigrate(opts: MigrateOpts): Promise<MigrateResult> 
   const db = createDb();
   try {
     if (opts.action === 'status') {
-      // Status reports applied migrations from Kysely's internal table.
-      // Each migration row has only `name` (the timestamp_label) — we report
-      // them in lexicographic order which matches application order.
-      const rows = await tryListMigrations(db);
-      return { action: 'status', applied: rows };
+      // Read-only: the migration table is read, never created (PRY-096).
+      const status = await getSchemaStatus(db);
+      return {
+        action: 'status',
+        applied: status.applied.map((name) => ({ name, status: 'success' as const })),
+        pending: status.pending,
+        unknown: status.unknown,
+      };
     }
     if (opts.action === 'up') {
       const result = await migrateToLatest(db);
@@ -67,39 +74,4 @@ export async function performMigrate(opts: MigrateOpts): Promise<MigrateResult> 
   } finally {
     await db.destroy();
   }
-}
-
-async function tryListMigrations(
-  db: ReturnType<typeof createDb>,
-): Promise<{ name: string; status: 'success' | 'noop' }[]> {
-  try {
-    const rows = await db
-      // The migration table name is owned by Kysely.Migrator; default name is
-      // `kysely_migration`. If the table does not exist, the query throws.
-      .selectFrom('kysely_migration' as never)
-      .select(['name'] as never)
-      .orderBy('name' as never, 'asc')
-      .execute();
-    return (rows as { name: string }[]).map((r) => ({ name: r.name, status: 'success' as const }));
-  } catch (err) {
-    // Distinguish "table does not exist" (expected before first migration) from
-    // other failures (perms, schema mismatch, network) — the latter must surface
-    // so the operator does not see a misleading "0 migrations" output.
-    if (isTableMissingError(err)) {
-      return [];
-    }
-    throw err;
-  }
-}
-
-function isTableMissingError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  // SQLite: "no such table: kysely_migration"
-  // Postgres: "relation \"kysely_migration\" does not exist"
-  return (
-    msg.includes('no such table') ||
-    msg.includes('does not exist') ||
-    msg.includes('undefined table')
-  );
 }

@@ -1,4 +1,4 @@
-import { AuthError, PendingMigrationsError } from '@hive/server';
+import { AuthError, PendingMigrationsError, UnknownMigrationsError } from '@hive/server';
 import { describe, expect, it } from 'vitest';
 
 import { CliError } from './cli-error.js';
@@ -13,6 +13,17 @@ import {
 } from './exit-codes.js';
 
 describe('mapErrorToExit', () => {
+  describe('UnknownMigrationsError (PRY-096)', () => {
+    it('maps to EXIT_PRECONDITION with the unknown names and the upgrade hint', () => {
+      const mapped = mapErrorToExit(new UnknownMigrationsError(['29991231000000_x']));
+      expect(mapped.code).toBe(EXIT_PRECONDITION);
+      expect(mapped.message).toBe(
+        'database schema is newer than this hivectl (MIGRATIONS_UNKNOWN): the database has ' +
+          'migrations unknown to this binary: 29991231000000_x; upgrade hivectl',
+      );
+    });
+  });
+
   describe('PendingMigrationsError (PRY-096)', () => {
     it('maps to EXIT_PRECONDITION with the pending names and the migrate hint', () => {
       const mapped = mapErrorToExit(
