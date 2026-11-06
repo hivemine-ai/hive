@@ -309,6 +309,27 @@ describe('SessionRegistration.renew / reenroll / drop', () => {
     expect(w.calls.map((c) => c.args.name)).toEqual(['claude-api', 'claude-api', 'claude-api']);
   });
 
+  it('a model registration after a retryable reenroll failure reuses the lock it already holds (no leaked slot)', async () => {
+    const w = world([
+      okResponse('t1'),
+      { ok: false, code: 'transport', message: 'down' },
+      okResponse('t2'),
+    ]);
+    const reg = new SessionRegistration(w.deps);
+    await reg.register(ARGS);
+    await reg.reenroll();
+    expect(w.held.has('claude-api')).toBe(true);
+
+    const outcome = await reg.register(ARGS);
+
+    expect(outcome).toMatchObject({ ok: true, via: 'enrolled' });
+    expect(w.calls.map((c) => c.bearer)).toEqual(['enroll-cred', 'enroll-cred', 'enroll-cred']);
+    expect([...w.held]).toEqual(['claude-api']);
+    expect(w.files['claude-api']?.token).toBe('t2');
+    reg.drop();
+    expect(w.held.size).toBe(0);
+  });
+
   it('drop releases the lock and keeps the file for the next process', async () => {
     const w = world([okResponse('t1')]);
     const reg = new SessionRegistration(w.deps);

@@ -166,6 +166,9 @@ export class SessionRegistration {
   }
 
   private async registerNew(request: RegisterRequest): Promise<RegistrationOutcome> {
+    // A slot kept by a retryable reenroll failure is released first: reopening a
+    // lock this process already holds would look like another holder.
+    this.releaseSlot();
     let slot: TokenSlot | undefined;
     let saved: PersistedToken | undefined;
     try {

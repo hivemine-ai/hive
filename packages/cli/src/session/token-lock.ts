@@ -7,8 +7,8 @@
 // an empty database file is therefore the portable equivalent of
 // `flock(LOCK_EX | LOCK_NB)`. better-sqlite3 already ships with hivectl.
 
-import { closeSync, openSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { chmodSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 
 import Database from 'better-sqlite3';
 
@@ -19,18 +19,22 @@ export interface HeldLock {
 }
 
 /**
- * Open lock handles. A handle that nobody references could be garbage collected,
- * which closes the database and silently drops the lock; this set keeps every
- * held lock alive until it is released.
+ * Locks held by this process, by path. Two reasons: a handle nobody references
+ * could be garbage collected, which closes its database and drops the lock; and
+ * POSIX drops every fcntl lock a process holds on a file as soon as the process
+ * closes any descriptor of it, so a second attempt on a held path must not open
+ * the file at all.
  */
-const held = new Set<Database.Database>();
+const held = new Map<string, Database.Database>();
 
-/** Takes the lock or returns undefined at once if someone else holds it. */
+/** Takes the lock or returns undefined at once if someone else, or this process, holds it. */
 export function tryExclusiveLock(path: string): HeldLock | undefined {
-  ensurePrivateDir(dirname(path));
-  closeSync(openSync(path, 'a', 0o600));
-  const db = new Database(path, { timeout: 0 });
+  const key = resolve(path);
+  if (held.has(key)) return undefined;
+  ensurePrivateDir(dirname(key));
+  const db = new Database(key, { timeout: 0 });
   try {
+    chmodSync(key, 0o600);
     db.pragma('journal_mode = OFF');
     db.pragma('locking_mode = EXCLUSIVE');
     db.exec('BEGIN EXCLUSIVE');
@@ -39,13 +43,13 @@ export function tryExclusiveLock(path: string): HeldLock | undefined {
     if ((err as { code?: unknown }).code === 'SQLITE_BUSY') return undefined;
     throw err;
   }
-  held.add(db);
+  held.set(key, db);
   let released = false;
   return {
     release() {
       if (released) return;
       released = true;
-      held.delete(db);
+      held.delete(key);
       db.close();
     },
   };

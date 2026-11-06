@@ -68,6 +68,26 @@ async function holdInChild(path: string): Promise<ChildProcess> {
   return child;
 }
 
+/** Tries the lock once in a fresh process and reports `held` or `busy`. */
+async function tryInChild(path: string): Promise<string> {
+  const lockModule = new URL('../../dist/session/token-lock.js', import.meta.url).href;
+  const child = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `const { tryExclusiveLock } = await import(${JSON.stringify(lockModule)});
+       process.stdout.write(tryExclusiveLock(${JSON.stringify(path)}) ? 'held' : 'busy');`,
+    ],
+    { stdio: ['ignore', 'pipe', 'inherit'] },
+  );
+  children.push(child);
+  let out = '';
+  child.stdout?.on('data', (chunk: Buffer) => (out += chunk.toString()));
+  await new Promise((resolve) => child.once('exit', resolve));
+  return out.trim();
+}
+
 describe('tryExclusiveLock', () => {
   it('creates a 0600 lock file and refuses a second holder in the same process', () => {
     const path = join(dir, 'tokens', 'a.lock');
@@ -79,6 +99,19 @@ describe('tryExclusiveLock', () => {
     const again = tryExclusiveLock(path);
     expect(again).toBeDefined();
     again?.release();
+  });
+
+  it('a refused retry in the same process does not release the lock for other processes', async () => {
+    const path = join(dir, 'tokens', 'a.lock');
+    const first = tryExclusiveLock(path);
+    expect(first).toBeDefined();
+
+    expect(tryExclusiveLock(path)).toBeUndefined();
+    expect(tryExclusiveLock(path)).toBeUndefined();
+
+    expect(await tryInChild(path)).toBe('busy');
+    first?.release();
+    expect(await tryInChild(path)).toBe('held');
   });
 
   it('refuses the lock while another live process holds it', async () => {
