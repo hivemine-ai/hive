@@ -183,7 +183,7 @@ describe('register_session — registration with the enrollment credential', () 
       },
       ctx.identity,
     );
-    expect(deps.presenceRegistry.claimHolder).not.toHaveBeenCalled();
+    expect(deps.enrollment.claimEnrolledAgent).not.toHaveBeenCalled();
     expect(result.outcome).toBe('created');
     expect(result.output).toEqual({
       agent_ref: 'claude-api@alice.acme',
@@ -508,5 +508,39 @@ describe('register_session — audit of registrations', () => {
     const recorded = JSON.stringify(created.deps.auditRecorder.recordEvent.mock.calls);
     expect(recorded).not.toContain('jwt-new-jti');
     expect(recorded).not.toContain(DESCRIPTION_TEXT);
+  });
+});
+
+// The spec answers NAME_IN_USE to the loser of two concurrent registrations of a new
+// name, also when it looks the name up after the winner committed: the creator holds the
+// claim reservation of its new Agent until its stream opens (or the reservation expires).
+describe('register_session — a created Agent is reserved for its creator', () => {
+  it('reserves the new Agent with the requestId of the create', async () => {
+    const { deps, handler } = build(null);
+
+    await handler(INPUT, enrollCtx());
+
+    expect(deps.presenceRegistry.claimHolder).toHaveBeenCalledWith(AGENT_ID, REQUEST_ID);
+  });
+
+  it('answers NAME_IN_USE to a registration that finds the Agent while its create is in flight', async () => {
+    const { deps, handler } = build(null);
+    let commit: (value: { agent: Agent; token: ReturnType<typeof token> }) => void = () =>
+      undefined;
+    deps.enrollment.createEnrolledAgent.mockReturnValue(
+      new Promise((resolve) => {
+        commit = resolve;
+      }),
+    );
+    const creating = handler(INPUT, enrollCtx());
+    // The second request sees the committed row before the creator resumes.
+    deps.participantsRepo.findAgentByName.mockResolvedValue(agent());
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await expectAuthError(handler(INPUT, enrollCtx()), 'NAME_IN_USE');
+    expect(deps.enrollment.claimEnrolledAgent).not.toHaveBeenCalled();
+
+    commit({ agent: agent(), token: token('new-jti') });
+    await expect(creating).resolves.toMatchObject({ outcome: 'created' });
   });
 });

@@ -103,6 +103,20 @@ async function connect(world: SmokeWorld, jwt: string): Promise<Client> {
   return client;
 }
 
+/**
+ * The holder opens its listen stream (which consumes the reservation of its create or
+ * claim) and then drops it: the Agent is offline and claimable from then on.
+ */
+async function goOffline(world: SmokeWorld, registered: Registered): Promise<void> {
+  const holder = await connect(world, registered.token);
+  const uri = (await holder.listResources()).resources[0]?.uri as string;
+  await holder.listen({ resourceSubscriptions: [uri] });
+  const registry = world.wire._presenceRegistry();
+  await expect.poll(() => registry.isHolderLive(registered.agent_id)).toBe(true);
+  await holder.close();
+  await expect.poll(() => registry.isHolderLive(registered.agent_id)).toBe(false);
+}
+
 describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
   let world: SmokeWorld;
   let db: Kysely<Database>;
@@ -229,10 +243,9 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
       );
     });
 
-    // The loser of the unique index gets NAME_IN_USE; a request that looks the name up
-    // after the winner committed claims it instead (creation reserves nothing). Either
-    // way there is one Agent and no request fails otherwise.
-    it('two concurrent registrations of a new name: one Agent, the other NAME_IN_USE or a claim', async () => {
+    // Spec: the loser gets NAME_IN_USE, whether it lost the unique index or looked the
+    // name up after the winner committed (the creator holds the reservation).
+    it('two concurrent registrations of a new name: exactly one created, the other NAME_IN_USE', async () => {
       const { jwt } = await issueEnrollment();
       const args = { name: 'claude-race', description: DESCRIPTION };
 
@@ -241,14 +254,31 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
         registerRaw(world, jwt, args),
       ]);
 
-      for (const outcome of outcomes) expect([undefined, -32007]).toContain(errorCode(outcome));
-      expect(outcomes.some((o) => o.error === undefined)).toBe(true);
+      expect(outcomes.map(errorCode).sort()).toEqual([-32007, undefined]);
       const rows = await db
         .selectFrom('agents')
         .select('id')
         .where('name', '=', 'claude-race')
         .execute();
       expect(rows).toHaveLength(1);
+      expect(
+        await db
+          .selectFrom('audit_log')
+          .select('id')
+          .where('category', '=', 'agent_claimed')
+          .execute(),
+      ).toHaveLength(0);
+    });
+
+    it('a registration right after a create answers NAME_IN_USE until the creator opens its stream', async () => {
+      const { jwt } = await issueEnrollment();
+      const created = await register(jwt);
+      const args = { name: 'claude-api', description: DESCRIPTION };
+
+      expect(errorCode(await registerRaw(world, jwt, args))).toBe(-32007);
+
+      await goOffline(world, created);
+      expect((await registerRaw(world, jwt, args)).error).toBeUndefined();
     });
   });
 
@@ -256,6 +286,7 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
     it('claims an offline holder and supersedes its previous token', async () => {
       const { jwt } = await issueEnrollment();
       const first = await register(jwt);
+      await goOffline(world, first);
 
       const second = await register(jwt);
 
@@ -276,7 +307,7 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
 
     it('two concurrent claims of the same offline holder: one granted, the other NAME_IN_USE', async () => {
       const { jwt } = await issueEnrollment();
-      await register(jwt);
+      await goOffline(world, await register(jwt));
 
       const args = { name: 'claude-api', description: DESCRIPTION };
 
@@ -370,6 +401,7 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
     it('leaves the retired branch failing as an internal error until revival exists', async () => {
       const { jwt } = await issueEnrollment();
       const registered = await register(jwt);
+      await goOffline(world, registered);
       await db
         .updateTable('agents')
         .set({ state: 'retired', retired_at: new Date().toISOString() })
@@ -470,6 +502,24 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
       expect(outcomes.map(errorCode).sort()).toEqual([-32001, undefined]);
     });
 
+    it('rejects the renewal of a suspended Agent with -32001', async () => {
+      const { jwt } = await issueEnrollment();
+      const first = await register(jwt);
+      await db
+        .updateTable('agents')
+        .set({ state: 'suspended' })
+        .where('id', '=', first.agent_id)
+        .execute();
+
+      const outcome = await registerRaw(world, first.token, {
+        name: 'claude-api',
+        description: DESCRIPTION,
+      });
+
+      expect(outcome.status).toBe(401);
+      expect(outcome.error?.code).toBe(-32001);
+    });
+
     it('rejects another name with -32602 (renewal_name_mismatch)', async () => {
       const { jwt } = await issueEnrollment();
       const first = await register(jwt);
@@ -538,6 +588,7 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
     it('a created Agent is announced once; the notice reads as system and cannot be answered', async () => {
       const { jwt, jti } = await issueEnrollment();
       const registered = await register(jwt);
+      await goOffline(world, registered);
       await register(jwt); // a claim: no second notice
 
       const owner = await client(world.jwtAdmin);
@@ -572,6 +623,7 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
     it('records agent_enrolled and agent_claimed with the owner as actor', async () => {
       const { jwt, jti } = await issueEnrollment();
       const registered = await register(jwt);
+      await goOffline(world, registered);
       await register(jwt);
 
       const rows = await db
@@ -774,9 +826,11 @@ describe(`register_session and the logs (${PG_URL ? 'postgres' : 'sqlite'})`, ()
       const args = { name: 'claude-api', description: DESCRIPTION };
 
       const tokens: string[] = [];
-      for (const bearer of [credential.jwt, credential.jwt]) {
-        const outcome = await registerRaw(world, bearer, args);
-        tokens.push((outcome.result as { structuredContent: Registered }).structuredContent.token);
+      for (let i = 0; i < 2; i += 1) {
+        const outcome = await registerRaw(world, credential.jwt, args);
+        const registered = (outcome.result as { structuredContent: Registered }).structuredContent;
+        tokens.push(registered.token);
+        if (i === 0) await goOffline(world, registered);
       }
       const renewal = await registerRaw(world, tokens[1] as string, args);
       tokens.push((renewal.result as { structuredContent: Registered }).structuredContent.token);

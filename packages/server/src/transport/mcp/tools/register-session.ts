@@ -101,6 +101,9 @@ function isCountedRejection(err: unknown): boolean {
 }
 
 export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
+  // Creates in flight per (owner, name); in memory, like the reservations (mono-process).
+  const creating = new Map<string, number>();
+
   async function agentRef(agent: Agent, identity: IdentityContext): Promise<string> {
     const owner = await deps.participantsRepo.findHivekeeperById(agent.ownerId);
     if (!owner) throw new Error(`DB anomaly: owner ${agent.ownerId} of Agent ${agent.id} missing`);
@@ -268,17 +271,31 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
       identity.participantId,
       input.name,
     );
+    const createKey = `${identity.participantId}\u0000${input.name}`;
     if (!existing) {
-      const created = await deps.enrollment.createEnrolledAgent(
-        {
-          ownerId: identity.participantId,
-          name: input.name,
-          description: input.description,
-          ...capabilities,
-          enrolledVia,
-        },
-        identity,
-      );
+      // From before the insert until the reservation below is in place, a registration
+      // that already sees the new row must answer NAME_IN_USE, not claim it.
+      creating.set(createKey, (creating.get(createKey) ?? 0) + 1);
+      let created: Awaited<ReturnType<RegisterSessionDeps['enrollment']['createEnrolledAgent']>>;
+      try {
+        created = await deps.enrollment.createEnrolledAgent(
+          {
+            ownerId: identity.participantId,
+            name: input.name,
+            description: input.description,
+            ...capabilities,
+            enrolledVia,
+          },
+          identity,
+        );
+        // The creator holds the name like a claimant: until its stream opens (ready()
+        // consumes the reservation) or the reservation expires.
+        deps.presenceRegistry.claimHolder(created.agent.id, requestId);
+      } finally {
+        const left = (creating.get(createKey) ?? 1) - 1;
+        if (left === 0) creating.delete(createKey);
+        else creating.set(createKey, left);
+      }
       return respond('created', created.agent, created.token, identity);
     }
 
@@ -288,6 +305,7 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
       throw new AuthError('NAME_TAKEN');
     }
     if (existing.state === 'suspended') throw new AuthError('AGENT_SUSPENDED');
+    if (creating.has(createKey)) throw new AuthError('NAME_IN_USE');
     if (deps.presenceRegistry.isHolderLive(existing.id)) throw new AuthError('NAME_IN_USE');
     if (deps.presenceRegistry.claimHolder(existing.id, requestId).outcome === 'in_use') {
       throw new AuthError('NAME_IN_USE');
