@@ -53,6 +53,11 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
     createdAt: new Date('2026-04-01T00:00:00Z'),
     revokedAt: null,
     lastConnectedAt: null,
+    origin: 'manual',
+    enrolledVia: null,
+    description: null,
+    retiredAt: null,
+    lastWorkerJti: null,
     ...overrides,
   };
 }

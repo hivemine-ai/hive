@@ -66,7 +66,19 @@ export { createRotator } from './credentials/rotator.js';
 export type { Rotator, RotatorDeps, RotateCredentialInput } from './credentials/rotator.js';
 
 export { createRevoker } from './credentials/revoker.js';
-export type { Revoker, RevokerDeps, RevokeCredentialInput } from './credentials/revoker.js';
+export type {
+  Revoker,
+  RevokerDeps,
+  RevokeCredentialInput,
+  RevokeCredentialResult,
+} from './credentials/revoker.js';
+
+export { createEnrollment } from './credentials/enrollment.js';
+export type {
+  Enrollment,
+  EnrollmentDeps,
+  IssueEnrollmentCredentialInput,
+} from './credentials/enrollment.js';
 
 export { createCredentialsReadRepo } from './credentials/repository.js';
 export type { CredentialRow, CredentialsReadRepo } from './credentials/repository.js';

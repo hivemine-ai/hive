@@ -11,7 +11,8 @@ import { dateToIso } from '#persistence/type-mappers.js';
 import type { Database } from '#persistence/schema.js';
 import type { UUIDv7 } from '../types.js';
 
-const DEFAULT_CLOCK_TOLERANCE_SECONDS = 5;
+import { DEFAULT_CLOCK_TOLERANCE_SECONDS, holderProofCutoff } from './worker-tokens.js';
+
 const DEFAULT_PURGE_BATCH_SIZE = 1000;
 
 export interface AddRevocationInput {
@@ -26,6 +27,11 @@ export interface BlocklistOptions {
   clockToleranceSeconds?: number;
   /** Rows deleted per statement by `purgeExpired`. Default 1000. */
   purgeBatchSize?: number;
+  /**
+   * HIVE_HOLDER_PROOF_WINDOW_DAYS (default 7). verifyRenewalBearer accepts a Worker token
+   * up to this long after its `exp`, so its revocation row must outlive it as well.
+   */
+  holderProofWindowDays?: number;
 }
 
 export interface Blocklist {
@@ -36,16 +42,17 @@ export interface Blocklist {
   add(input: AddRevocationInput): Promise<void>;
 
   /**
-   * Deletes rows whose credential expired more than the clock tolerance ago, in batches
-   * of `purgeBatchSize` so a large backlog never holds one long write lock, and returns
-   * how many were removed in total. The margin is what makes purging safe: every deleted row
-   * belongs to a token that verify already rejects with CREDENTIAL_EXPIRED.
+   * Deletes rows whose credential expired more than the holder-proof window plus the clock
+   * tolerance ago, in batches of `purgeBatchSize` so a large backlog never holds one long
+   * write lock, and returns how many were removed in total. The margin is what makes
+   * purging safe: every deleted row belongs to a token that both verify and
+   * verifyRenewalBearer already reject as expired.
    */
   purgeExpired(now?: Date): Promise<number>;
 }
 
 export function createBlocklist(db: Kysely<Database>, options: BlocklistOptions = {}): Blocklist {
-  const toleranceMs = (options.clockToleranceSeconds ?? DEFAULT_CLOCK_TOLERANCE_SECONDS) * 1000;
+  const toleranceSeconds = options.clockToleranceSeconds ?? DEFAULT_CLOCK_TOLERANCE_SECONDS;
   const batchSize = Math.max(1, options.purgeBatchSize ?? DEFAULT_PURGE_BATCH_SIZE);
 
   return {
@@ -70,7 +77,9 @@ export function createBlocklist(db: Kysely<Database>, options: BlocklistOptions 
         .execute();
     },
     async purgeExpired(at: Date = new Date()): Promise<number> {
-      const cutoff = dateToIso(new Date(at.getTime() - toleranceMs));
+      const cutoff = dateToIso(
+        holderProofCutoff(at, options.holderProofWindowDays, toleranceSeconds),
+      );
       let total = 0;
       for (;;) {
         const result = await db

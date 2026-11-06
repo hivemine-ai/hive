@@ -30,6 +30,12 @@ export type CallerContext =
 export function requireAdminCaller(caller: CallerContext): IdentityContext | null {
   if (caller.kind === 'system') return null;
 
+  // ADR-026 defense in depth: a scoped credential never carries admin authority, whatever
+  // `isAdmin` says.
+  if (caller.identity.snapshot.scope !== undefined) {
+    throw new AuthError('INSUFFICIENT_PRIVILEGE', { subCode: 'scoped_credential' });
+  }
+
   if (caller.identity.current.isAdmin === true) {
     return caller.identity;
   }

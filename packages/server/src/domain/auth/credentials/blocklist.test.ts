@@ -88,7 +88,7 @@ describe('blocklist', () => {
     await insertRevocation(purgeable, new Date(now.getTime() - 60_000));
     await insertRevocation(live, new Date(now.getTime() + 60_000));
 
-    const blocklist = createBlocklist(world.db);
+    const blocklist = createBlocklist(world.db, { holderProofWindowDays: 0 });
     expect(await blocklist.purgeExpired(now)).toBe(1);
 
     const remaining = await world.db.selectFrom('credential_revocations').selectAll().execute();
@@ -100,7 +100,10 @@ describe('blocklist', () => {
     const insideMargin = uuidv7();
     await insertRevocation(insideMargin, new Date(now.getTime() - 4_000));
 
-    const blocklist = createBlocklist(world.db, { clockToleranceSeconds: 5 });
+    const blocklist = createBlocklist(world.db, {
+      clockToleranceSeconds: 5,
+      holderProofWindowDays: 0,
+    });
     expect(await blocklist.purgeExpired(now)).toBe(0);
     expect(await blocklist.contains(insideMargin)).toBe(true);
   });
@@ -110,7 +113,10 @@ describe('blocklist', () => {
     const jti = uuidv7();
     await insertRevocation(jti, new Date(now.getTime() - 4_000));
 
-    const blocklist = createBlocklist(world.db, { clockToleranceSeconds: 1 });
+    const blocklist = createBlocklist(world.db, {
+      clockToleranceSeconds: 1,
+      holderProofWindowDays: 0,
+    });
     expect(await blocklist.purgeExpired(now)).toBe(1);
   });
 
@@ -120,8 +126,21 @@ describe('blocklist', () => {
     const live = uuidv7();
     await insertRevocation(live, new Date(now.getTime() + 60_000));
 
-    const blocklist = createBlocklist(world.db, { purgeBatchSize: 3 });
+    const blocklist = createBlocklist(world.db, { purgeBatchSize: 3, holderProofWindowDays: 0 });
     expect(await blocklist.purgeExpired(now)).toBe(7);
     expect(await blocklist.contains(live)).toBe(true);
+  });
+
+  it('purgeExpired keeps a revocation for the 7-day holder-proof window by default (ADR-026)', async () => {
+    const now = new Date('2026-11-02T12:00:00.000Z');
+    const insideWindow = uuidv7();
+    const beyondWindow = uuidv7();
+    await insertRevocation(insideWindow, new Date(now.getTime() - 7 * 24 * 3600_000));
+    await insertRevocation(beyondWindow, new Date(now.getTime() - 7 * 24 * 3600_000 - 6_000));
+
+    const blocklist = createBlocklist(world.db);
+    expect(await blocklist.purgeExpired(now)).toBe(1);
+    expect(await blocklist.contains(insideWindow)).toBe(true);
+    expect(await blocklist.contains(beyondWindow)).toBe(false);
   });
 });

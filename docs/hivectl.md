@@ -257,11 +257,19 @@ hivectl agent revoke <agent-ref> --yes
 ```
 hivectl credential issue   --participant-id <email-or-uuid> [--ttl <duration>]
                            [--reason <text>] [--output-credential <path>]
+hivectl credential issue   --enrollment --owner <email-or-uuid> [--name-prefix <p>]
+                           [--max-agents N] [--ttl <duration>] [--reason <text>]
+                           --output-credential <path>
 hivectl credential rotate  <jti-or-active-ref> [--ttl <duration>] [--yes]
                            [--output-credential <path>]
-hivectl credential revoke  <jti-or-active-ref> [--reason <text>] [--yes]
+hivectl credential revoke  <jti-or-active-ref> [--reason <text>] [--revoke-agents] [--yes]
 hivectl credential list    <participant-ref> [--limit N]
 ```
+
+**Enrollment credentials** (ADR-026). `credential issue --enrollment` issues a credential that registers Claude Code sessions as Workers of `--owner` (the `register_session` tool ships in v0.3.0). It is a long-lived secret, so `--output-credential` is mandatory and the JWT never goes to stdout. `--name-prefix` must follow the agent name syntax (lowercase letter, then lowercase letters, digits or `-`); every registered name must start with it. `--max-agents` caps the active Agents registered through it and cannot exceed `HIVE_ENROLLMENT_MAX_AGENTS`. Default TTL: `HIVE_ENROLLMENT_CREDENTIAL_TTL_DAYS` (90 days). Invalid values exit with `EXIT_USER_ERROR (1)` (`name_prefix_invalid`, `max_agents_invalid`, `max_agents_exceeds_hive_limit`).
+
+- `credential rotate` on an enrollment issues one with the same scope, prefix and cap (`--output-credential` is mandatory). Sessions already registered keep renewing their Worker tokens; the old credential no longer registers new ones. Installed folders keep the old credential until you install the new one.
+- `credential revoke` on an enrollment also revokes every Worker token issued through it, so those sessions stop at their next request. `--revoke-agents` also revokes its Agents (active, retired or suspended), closing their Cells. `--revoke-agents` on any other credential exits with `EXIT_USER_ERROR (1)` (`revoke_agents_requires_enrollment`).
 
 `<jti-or-active-ref>` (per ADR-020 / PRY-041) accepts:
 
@@ -402,6 +410,8 @@ Listens to one participant's mailbox and prints a metadata line per event. Unlik
 | `HIVE_AUTH_KEYS_DIR`                      | `./var/keys`                    | Directory for Ed25519 PEMs. Override with `--keys-dir` on `init`. |
 | `HIVE_AUTH_CREDENTIAL_DEFAULT_TTL_DAYS`   | `365`                           | Default TTL when `--ttl` is omitted.                              |
 | `HIVE_AUTH_SNAPSHOT_MAX_BYTES`            | `16384`                         | Cap on the credential snapshot payload.                           |
+| `HIVE_ENROLLMENT_MAX_AGENTS`              | `10`                            | Ceiling of `--max-agents`; cap of an enrollment without it.       |
+| `HIVE_ENROLLMENT_CREDENTIAL_TTL_DAYS`     | `90`                            | Default TTL of `credential issue --enrollment` (at least `1`).    |
 | `HIVE_CLI_LOG_LEVEL`                      | `warn`                          | pino log level. Override with `--verbose` for `debug`.            |
 | `HIVE_CLI_DEFAULT_OUTPUT`                 | `auto` (table if TTY else json) | Override with `--output table                                     | json | yaml`. |
 | `HIVE_CLI_AUDIT_OPERATOR_NOTE_MAX_LENGTH` | `256`                           | Truncates `--operator-note` after this many chars.                |

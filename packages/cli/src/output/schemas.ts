@@ -135,8 +135,36 @@ export const rotateCredentialSchema: TableSchema<{
   { header: 'credentialPath', accessor: (r) => r.credentialPath ?? '<stdout>' },
 ];
 
-export const revokeCredentialSchema: TableSchema<{ revokedJti: string }> = [
+export const issueEnrollmentCredentialSchema: TableSchema<{
+  jti: string;
+  ownerId: string;
+  scope: string;
+  namePrefix: string | null;
+  maxAgents: number | null;
+  expiresAt: Date;
+  kid: string;
+  credentialPath: string;
+  nextStep: string;
+}> = [
+  { header: 'jti', accessor: (r) => r.jti },
+  { header: 'ownerId', accessor: (r) => r.ownerId },
+  { header: 'scope', accessor: (r) => r.scope },
+  { header: 'namePrefix', accessor: (r) => r.namePrefix ?? '-' },
+  { header: 'maxAgents', accessor: (r) => (r.maxAgents === null ? '-' : String(r.maxAgents)) },
+  { header: 'expiresAt', accessor: (r) => r.expiresAt },
+  { header: 'kid', accessor: (r) => r.kid, maxWidth: 32 },
+  { header: 'credentialPath', accessor: (r) => r.credentialPath },
+  { header: 'nextStep', accessor: (r) => r.nextStep },
+];
+
+export const revokeCredentialSchema: TableSchema<{
+  revokedJti: string;
+  revokedTokens: number;
+  revokedAgentIds: string[];
+}> = [
   { header: 'revokedJti', accessor: (r) => r.revokedJti },
+  { header: 'revokedTokens', accessor: (r) => String(r.revokedTokens) },
+  { header: 'revokedAgents', accessor: (r) => String(r.revokedAgentIds.length) },
 ];
 
 export const revokeAgentSchema: TableSchema<{ revokedAgentId: string }> = [

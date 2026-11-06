@@ -36,7 +36,7 @@ describe('revocation purger', () => {
     await insert(live, new Date(now.getTime() + 60_000));
     for (let i = 0; i < 5; i++) await insert(uuidv7(), new Date(now.getTime() - 60_000));
     const log = logger();
-    const blocklist = createBlocklist(world.db, { purgeBatchSize: 2 });
+    const blocklist = createBlocklist(world.db, { purgeBatchSize: 2, holderProofWindowDays: 0 });
     const purger = createRevocationPurger({
       blocklist,
       logger: log,

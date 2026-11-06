@@ -25,6 +25,10 @@ import type { Agent, Hivekeeper } from './entities.js';
 import { noopCellsHook, type CellsRepoHook } from './cells-hook.js';
 import type { ParticipantStateSignal } from './state-signal.js';
 import type { AuditCursor } from './repository.js';
+import {
+  blocklistWorkerTokens,
+  holderProofCutoff,
+} from '#domain/auth/credentials/worker-tokens.js';
 
 // ---------- Shared mappers (kept local to the write module to avoid circular import) ----------
 
@@ -56,6 +60,11 @@ function rowToAgent(row: Selectable<AgentsTable>): Agent {
     createdAt: new Date(row.created_at),
     revokedAt: row.revoked_at ? new Date(row.revoked_at) : null,
     lastConnectedAt: row.last_connected_at ? new Date(row.last_connected_at) : null,
+    origin: row.origin,
+    enrolledVia: row.enrolled_via,
+    description: row.description,
+    retiredAt: row.retired_at ? new Date(row.retired_at) : null,
+    lastWorkerJti: row.last_worker_jti,
   };
 }
 
@@ -115,6 +124,13 @@ export interface ParticipantsWriteRepo {
   /** `suspended` to `active`. Any other starting state is a no-op. */
   resumeAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
   /**
+   * Promote or demote an Agent. ADR-026: making an enrollment Worker a Scout turns it into
+   * `origin = 'manual'` and, in the same transaction, blocklists its Worker tokens
+   * (reason 'origin_changed'), so the live session fails its next request. A `retired` or
+   * `revoked` Agent cannot change type.
+   */
+  changeAgentType(id: UUIDv7, newType: 'worker' | 'scout', caller: CallerContext): Promise<void>;
+  /**
    * Revoke a Hivekeeper and cascade-revoke all owned Agents + close their Cells in
    * the same transaction. Snapshots the effective retention policy on the keeper's
    * row so post-revocation reads see frozen retention semantics. Idempotent: a
@@ -135,6 +151,8 @@ export interface ParticipantsWriteRepoOptions {
   stateSignal?: ParticipantStateSignal;
   // Injectable clock for tests.
   now?: () => Date;
+  // HIVE_HOLDER_PROOF_WINDOW_DAYS: the Worker tokens revoked by a promotion to Scout.
+  holderProofWindowDays?: number;
 }
 
 export function createParticipantsWriteRepo(
@@ -263,6 +281,45 @@ export function createParticipantsWriteRepo(
     async resumeAgent(id, caller): Promise<void> {
       requireAdminCaller(caller);
       await moveAgentState(id, 'suspended', 'active');
+    },
+
+    async changeAgentType(id, newType, caller): Promise<void> {
+      const admin = requireAdminCaller(caller);
+      await db.transaction().execute(async (tx) => {
+        const row = await tx
+          .selectFrom('agents')
+          .select(['type', 'state', 'origin'])
+          .where('id', '=', id)
+          .executeTakeFirst();
+        if (!row) {
+          throw new AuthError('INVALID_STATE_TRANSITION', { subCode: 'agent_not_found' });
+        }
+        if (row.state === 'retired' || row.state === 'revoked') {
+          throw new AuthError('INVALID_STATE_TRANSITION', {
+            subCode: `agent_${row.state}_cannot_change_type`,
+          });
+        }
+        if (row.type === newType) return;
+
+        const leavesEnrollment = newType === 'scout' && row.origin === 'enrollment';
+        await tx
+          .updateTable('agents')
+          .set(
+            leavesEnrollment
+              ? { type: newType, origin: 'manual', enrolled_via: null, last_worker_jti: null }
+              : { type: newType },
+          )
+          .where('id', '=', id)
+          .execute();
+        if (leavesEnrollment) {
+          await blocklistWorkerTokens(tx, {
+            selector: { agentId: id },
+            expiresAfter: holderProofCutoff(clock(), opts.holderProofWindowDays),
+            reason: 'origin_changed',
+            revokedBy: admin?.participantId ?? null,
+          });
+        }
+      });
     },
 
     async revokeAgent(id, caller): Promise<void> {

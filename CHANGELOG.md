@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Enrollment credentials and short-lived Worker tokens in Auth** (PRY-090, first PRY of the v0.3.0 cascade for [ADR-026](https://github.com/hivemine-ai/hive-vault) — session enrollment as Workers). The tool that uses them, `register_session`, lands in PRY-091; this release line only adds the Auth side and the operator commands.
+  - `hivectl credential issue --enrollment --owner <email-or-uuid> [--name-prefix <p>] [--max-agents N] [--ttl <duration>] --output-credential <path>` issues an enrollment credential (scope `enroll`, default TTL 90 days). It is written to a `0600` file only. It carries no admin authority: an admin operation presented with it fails with `INSUFFICIENT_PRIVILEGE` (`scoped_credential`), and a JWT with an unknown `scope` is rejected as `CREDENTIAL_INAUTHENTIC`.
+  - `hivectl credential rotate` on an enrollment keeps its scope, name prefix and agent cap; the Worker tokens already issued through it keep renewing, while new registrations with the old credential fail. `hivectl credential revoke` on an enrollment also revokes every Worker token issued through it, and `--revoke-agents` revokes its Agents too (one `admin_agent_revoke` audit row each).
+  - New audit categories: `enrollment_credential_issued`, `enrollment_credential_rotated`, `enrollment_credential_revoked`, plus the ones the next PRYs of the cascade record (`agent_enrolled`, `agent_claimed`, `agent_retired`, `agent_revived`, `admin_agent_release`, `enrollment_reject_alert`).
+  - New variables `HIVE_ENROLLMENT_MAX_AGENTS` (`10`), `HIVE_ENROLLMENT_CREDENTIAL_TTL_DAYS` (`90`), `HIVE_WORKER_TOKEN_TTL_SECONDS` (`3600`) and `HIVE_HOLDER_PROOF_WINDOW_DAYS` (`7`). See [Configuration](./docs/auth.md#configuration).
+
+### Changed
+
+- **Schema migration for session enrollment** (PRY-090). `agents` gains `origin` (existing agents become `manual`), `enrolled_via`, `description` (at most 280 characters), `retired_at`, `last_worker_jti` and the `retired` state; `credentials` gains `scope` and `enrolled_via`; `audit_log` accepts the new categories. SQLite rebuilds `agents` and `audit_log` inside a transaction; Postgres is migrated the same way.
+- **Revocation rows live seven days longer** (PRY-090). The purge of the revocation table now keeps a row until its credential expired more than `HIVE_HOLDER_PROOF_WINDOW_DAYS` plus the clock tolerance ago, because the last Worker token of an Agent can still prove its holder for that window.
+- `hivectl credential revoke --output json` adds `revokedTokens` and `revokedAgentIds`.
+
 ## [0.2.2] - 2026-11-04
 
 v0.2.2. Fixes a hang of `send_message` denied by the visibility matrix on SQLite. **No breaking changes**: a v0.2.1 client works against a v0.2.2 server and the other way round.

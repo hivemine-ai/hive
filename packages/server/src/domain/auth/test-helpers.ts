@@ -2,6 +2,7 @@
 // Spins up a fresh in-memory SQLite, runs migrations, and seeds a minimal world
 // (one Hive, one Colony, one admin Hivekeeper, one Worker Agent).
 
+import { sql } from 'kysely';
 import type { Kysely } from 'kysely';
 import { v7 as uuidv7 } from 'uuid';
 
@@ -26,8 +27,22 @@ export interface SeedWorld {
   workerCapabilities: string[];
 }
 
-export async function seedWorld(): Promise<SeedWorld> {
-  const db = createDb({ dialect: 'sqlite', url: 'sqlite::memory:' });
+export interface SeedWorldOptions {
+  // Seeds a Postgres database instead of in-memory SQLite. The `public` schema is dropped
+  // and recreated, so point it at a throwaway database.
+  pgUrl?: string | undefined;
+}
+
+export async function seedWorld(options: SeedWorldOptions = {}): Promise<SeedWorld> {
+  const pgUrl = options.pgUrl !== undefined && options.pgUrl !== '' ? options.pgUrl : undefined;
+  const db =
+    pgUrl !== undefined
+      ? createDb({ dialect: 'postgres', url: pgUrl, postgresPoolSize: 10 })
+      : createDb({ dialect: 'sqlite', url: 'sqlite::memory:' });
+  if (pgUrl !== undefined) {
+    await sql`drop schema if exists public cascade`.execute(db);
+    await sql`create schema public`.execute(db);
+  }
   await migrateToLatest(db);
 
   const hiveId = uuidv7();

@@ -4,6 +4,10 @@
 // `<jti-or-active-ref>` accepts either a UUID v7 JTI (canonical) or a
 // `<participant-ref>:latest` alias resolving to that participant's currently-
 // active credential — per ADR-020 Q3=3B + PRY-041 of the cascade.
+//
+// ADR-026: an enrollment credential rotates into one with the same scope and claims; its
+// Worker tokens keep renewing, and the old credential stops registering sessions. The new
+// one must go to `--output-credential`.
 
 import { writeFileSync } from 'node:fs';
 
@@ -42,6 +46,13 @@ export async function runRotateCredential(
     });
   }
   const oldJti = await resolveCredentialRef(opts.jti, runtime);
+  const isEnrollment = await isEnrollmentCredential(runtime, oldJti);
+  if (isEnrollment && (opts.outputCredential === undefined || opts.outputCredential === '')) {
+    throw new CliError('CONFIG_INVALID', {
+      subCode: 'output_credential_required',
+      message: 'rotating an enrollment credential requires --output-credential <path>',
+    });
+  }
   const actor = await buildOperatorActor(opts.globals, runtime);
   const ttlMs = opts.ttl !== undefined ? parseDuration(opts.ttl) : undefined;
 
@@ -53,14 +64,17 @@ export async function runRotateCredential(
   const credential: IssuedCredential = await runtime.rotator.rotateCredential(rotateInput);
 
   await runtime.auditRecorder.recordEvent({
-    category: 'admin_credential_rotate',
+    category: isEnrollment ? 'enrollment_credential_rotated' : 'admin_credential_rotate',
     decision: 'success',
     actorId: actor.actorId,
     actorKind: actor.actorKind,
-    subjectId: credential.jti,
+    // The enrollment event is about the old credential (Visibility Engine + Audit Log).
+    subjectId: isEnrollment ? oldJti : credential.jti,
     subjectKind: 'credential',
     reasonCode: null,
-    detail: { ...actor.detail, oldJti, kid: credential.kid },
+    detail: isEnrollment
+      ? { ...actor.detail, newJti: credential.jti, kid: credential.kid }
+      : { ...actor.detail, oldJti, kid: credential.kid },
     hiveId: runtime.hiveStableIdentifier,
     occurredAt: new Date(),
     requestId: null,
@@ -81,4 +95,13 @@ export async function runRotateCredential(
   };
   if (credentialPath === null) out.credentialJwt = credential.jwt;
   return out;
+}
+
+export async function isEnrollmentCredential(runtime: CliRuntime, jti: UUIDv7): Promise<boolean> {
+  const row = await runtime.db
+    .selectFrom('credentials')
+    .select('scope')
+    .where('jti', '=', jti)
+    .executeTakeFirst();
+  return row?.scope === 'enroll';
 }

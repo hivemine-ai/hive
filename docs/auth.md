@@ -51,7 +51,11 @@ The Hive enforces invariant **"at least one active admin Hivekeeper exists at al
 | **Rotate** | Atomically issues a new JWT and adds the old `jti` to the revocation blocklist. Use when a credential is suspected leaked, or just to reset the clock.      |
 | **Revoke** | Adds a `jti` to the blocklist without issuing a replacement. The credential is rejected on the next verification.                                           |
 
-**Revocation cleanup.** Every verification reads the revocation table, so the server deletes a row once its credential has expired (`exp` plus the 5 s clock tolerance): from then on verification rejects the token as `CREDENTIAL_EXPIRED` before the blocklist is consulted, so the row can no longer matter. The purge runs at server start and then every hour, in batches of 1000 rows, and logs `auth_revocations_purged` with the `purged` count and `durationMs` (a failed pass logs `auth_revocations_purge_failed` and retries on the next tick). A revocation of a still-valid credential is never purged. Tune with `HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS`.
+### Enrollment credentials and Worker tokens (ADR-026)
+
+An **enrollment credential** (`hivectl credential issue --enrollment`) lets sessions register themselves as Worker Agents of its owner. It carries the scope `enroll`, an optional name prefix and an optional cap of active Agents, and grants nothing else: an admin operation presented with it fails with `INSUFFICIENT_PRIVILEGE` (`scoped_credential`). Each registered session gets a short-lived **Worker token** (one hour by default) that it renews before it expires by presenting its last token. The last token keeps working as proof of the holder for `HIVE_HOLDER_PROOF_WINDOW_DAYS` after it expires, so a laptop that slept for a few days resumes without registering again; a newer token, a new registration of the same Agent or a revocation invalidates that proof. Rotating an enrollment stops new registrations but lets registered sessions keep renewing; revoking it also revokes every Worker token issued through it.
+
+**Revocation cleanup.** Every verification reads the revocation table, so the server deletes a row once its credential has expired for longer than the holder-proof window (`exp` plus `HIVE_HOLDER_PROOF_WINDOW_DAYS`, 7 days by default, plus the 5 s clock tolerance): from then on no verification can accept the token, so the row can no longer matter. The purge runs at server start and then every hour, in batches of 1000 rows, and logs `auth_revocations_purged` with the `purged` count and `durationMs` (a failed pass logs `auth_revocations_purge_failed` and retries on the next tick). A revocation of a still-valid credential is never purged. Tune with `HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS`.
 
 ### What's NOT in v0.1
 
@@ -72,8 +76,8 @@ When a JWT is rejected by the verifier, you'll see one of:
 | `CREDENTIAL_NOT_YET_VALID`   | The `nbf` claim is in the future.                                                                                                        |
 | `CREDENTIAL_REVOKED`         | The `jti` is on the revocation blocklist (rotated or explicitly revoked).                                                                |
 | `PARTICIPANT_NOT_FOUND`      | `sub` does not match any Hivekeeper or Agent. Defense-in-depth — should not occur in normal operation.                                   |
-| `PARTICIPANT_NOT_ACTIVE`     | The participant has been suspended (Agents only) or revoked. SubCode is the current state.                                               |
-| `INSUFFICIENT_PRIVILEGE`     | The operation requires admin; the caller doesn't have it. SubCodes: `not_admin`, `not_hivekeeper`.                                       |
+| `PARTICIPANT_NOT_ACTIVE`     | The participant has been suspended or retired (Agents only) or revoked. SubCode is the current state.                                    |
+| `INSUFFICIENT_PRIVILEGE`     | The operation requires admin; the caller doesn't have it. SubCodes: `not_admin`, `not_hivekeeper`, `scoped_credential`.                  |
 | `CREDENTIAL_ALREADY_REVOKED` | Operator tried to rotate or revoke a `jti` that is already on the blocklist.                                                             |
 | `HIVE_ALREADY_INITIALIZED`   | `hivectl init` invoked against a DB that already has a Hive.                                                                             |
 
@@ -92,6 +96,10 @@ Environment variables consumed at boot:
 | `HIVE_AUTH_KEYS_DIR`                          | `./var/keys`                  | Directory for signing key PEMs. Private keys are created with mode `0600`.                    |
 | `HIVE_LOG_LEVEL`                              | `info`                        | Pino logger level.                                                                            |
 | `HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS` | `3600`                        | How often expired revocations are purged. `0` disables the purge (the table then only grows). |
+| `HIVE_ENROLLMENT_MAX_AGENTS`                  | `10`                          | Cap of active Agents per enrollment credential, and ceiling of `--max-agents`.                |
+| `HIVE_ENROLLMENT_CREDENTIAL_TTL_DAYS`         | `90`                          | Default TTL of an enrollment credential. At least `1`.                                        |
+| `HIVE_WORKER_TOKEN_TTL_SECONDS`               | `3600`                        | TTL of a Worker token issued at registration. At least `60`.                                  |
+| `HIVE_HOLDER_PROOF_WINDOW_DAYS`               | `7`                           | Days after `exp` the last Worker token can still renew. `0` = only valid tokens.              |
 
 ## See also
 

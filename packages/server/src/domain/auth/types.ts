@@ -11,9 +11,9 @@ export type Duration = number;
 
 export type ParticipantKind = 'hivekeeper' | 'worker' | 'scout';
 
-// Note: 'suspended' applies only to Agents (workers/scouts).
+// Note: 'suspended' and 'retired' (ADR-026) apply only to Agents (workers/scouts).
 // Hivekeepers transition between 'active' and 'revoked' only.
-export type ParticipantState = 'active' | 'suspended' | 'revoked';
+export type ParticipantState = 'active' | 'suspended' | 'retired' | 'revoked';
 
 /**
  * The credential snapshot that travels in the JWT payload (signed at issuance).
@@ -26,6 +26,12 @@ export interface CredentialSnapshot {
   credentialKid: string;
   /** From `exp`. A long stream closes here; every credential Hive issues carries it. */
   credentialExpiresAt?: Date;
+  /** ADR-026: present only on enrollment credentials; absent means a full credential. */
+  scope?: 'enroll';
+  namePrefix?: string;
+  maxAgents?: number;
+  /** ADR-026: set by `verifyRenewalBearer`; the Bearer is a holder proof, maybe expired. */
+  renewal?: true;
 }
 
 /**

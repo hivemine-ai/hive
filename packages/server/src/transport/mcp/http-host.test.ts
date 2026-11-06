@@ -30,6 +30,11 @@ const IDENTITY = {
   hiveId: '01900000-0000-7000-8000-000000000002',
   hiveName: 'test-hive',
   colonyId: '01900000-0000-7000-8000-000000000003',
+  snapshot: {
+    issuedAt: new Date(),
+    credentialJti: '01900000-0000-7000-8000-000000000008',
+    credentialKid: 'kid',
+  },
 } as unknown as IdentityContext;
 
 interface StubOptions {
@@ -189,6 +194,62 @@ describe('auth at the edge', () => {
     await post(url, 'tools/list');
 
     expect(refresh).not.toHaveBeenCalled();
+  });
+});
+
+// PRY-090 (ADR-026): until the register_session binding exists (PRY-091), a credential
+// with a scope is good for nothing on the MCP surface.
+describe('scoped credentials at the edge', () => {
+  const ENROLLMENT_IDENTITY = {
+    ...IDENTITY,
+    kind: 'hivekeeper',
+    snapshot: {
+      issuedAt: new Date(),
+      credentialJti: '01900000-0000-7000-8000-000000000009',
+      credentialKid: 'kid',
+      scope: 'enroll',
+    },
+    current: { state: 'active' },
+  } as unknown as IdentityContext;
+
+  it('rejects an enrollment credential calling list_agents with 403 and -32006', async () => {
+    const refresh = vi.fn();
+    const warn = vi.fn();
+    const logger = createLogger({ level: 'silent' });
+    logger.warn = warn;
+    const url = await startHost({
+      verify: () => Promise.resolve(ENROLLMENT_IDENTITY),
+      lastConnected: { refresh },
+      logger,
+    });
+
+    const res = await callTool(url, 'list_agents', {});
+
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as RpcError).error).toEqual({
+      code: -32006,
+      message: 'credential out of scope',
+    });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'mcp_auth_failed',
+        domainCode: 'INSUFFICIENT_PRIVILEGE',
+        subCode: 'scoped_credential',
+      }),
+      expect.any(String),
+    );
+  });
+
+  it('rejects it on every other method too, server/discover included', async () => {
+    const url = await startHost({ verify: () => Promise.resolve(ENROLLMENT_IDENTITY) });
+    for (const method of ['tools/list', 'server/discover', 'resources/list']) {
+      const res = await post(url, method);
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as RpcError).error.code).toBe(-32006);
+    }
+    const listen = await fetch(url, listenInit());
+    expect(listen.status).toBe(403);
   });
 });
 

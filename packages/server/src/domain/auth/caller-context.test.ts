@@ -83,4 +83,17 @@ describe('requireAdminCaller', () => {
       expect(e.subCode).toBe('not_hivekeeper');
     }
   });
+
+  it('throws INSUFFICIENT_PRIVILEGE{scoped_credential} for a scoped credential, even if isAdmin were set', () => {
+    const base = makeIdentity({ kind: 'hivekeeper', isAdmin: true });
+    const identity: IdentityContext = { ...base, snapshot: { ...base.snapshot, scope: 'enroll' } };
+    try {
+      requireAdminCaller({ kind: 'authenticated', identity });
+      expect.fail('expected INSUFFICIENT_PRIVILEGE');
+    } catch (err) {
+      expect(isAuthError(err)).toBe(true);
+      expect((err as AuthError).code).toBe('INSUFFICIENT_PRIVILEGE');
+      expect((err as AuthError).subCode).toBe('scoped_credential');
+    }
+  });
 });

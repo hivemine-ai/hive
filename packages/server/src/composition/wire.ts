@@ -34,12 +34,14 @@ import {
   createRotator,
   loadAllKeypairs,
   createBlocklist,
+  createEnrollment,
   createRevocationPurger,
   createVerifier,
 } from '#domain/auth/index.js';
 import type {
   Blocklist,
   CredentialsReadRepo,
+  Enrollment,
   Issuer,
   ParticipantsReadRepo,
   ParticipantsWriteRepo,
@@ -49,6 +51,8 @@ import type {
   UUIDv7,
 } from '#domain/auth/index.js';
 import { createAuditRecorder, createAuditRepo } from '#domain/audit/index.js';
+import { resolveEnrollmentConfigFromEnv } from './enrollment-config.js';
+import type { EnrollmentConfig } from './enrollment-config.js';
 import type { AuditRecorder } from '#domain/audit/index.js';
 import {
   createCellsRepo,
@@ -285,7 +289,9 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       `No signing keypairs found in ${cfg.keysDir}. Run 'hivectl init' first to bootstrap the Hive.`,
     );
   }
-  const blocklist = createBlocklist(db);
+  // ADR-026: revocation rows outlive their token by the holder-proof window.
+  const { holderProofWindowDays } = resolveEnrollmentConfigFromEnv(process.env);
+  const blocklist = createBlocklist(db, { holderProofWindowDays });
   const revocationPurger = createRevocationPurger({
     blocklist,
     logger,
@@ -608,6 +614,7 @@ export interface CliResolvedConfig {
   keysDir: string;
   snapshotMaxBytes: number;
   defaultCredentialTtlMs: number;
+  enrollment: EnrollmentConfig;
 }
 
 export function resolveCliConfigFromEnv(
@@ -627,6 +634,7 @@ export function resolveCliConfigFromEnv(
         min: 1,
       }),
     defaultCredentialTtlMs: overrides.defaultCredentialTtlMs ?? days * 24 * 60 * 60 * 1000,
+    enrollment: resolveEnrollmentConfigFromEnv(env),
   };
 }
 
@@ -652,6 +660,8 @@ export interface CliRuntime {
   issuer: Issuer;
   rotator: Rotator;
   revoker: Revoker;
+  // ADR-026: issue enrollment credentials (`credential issue --enrollment`).
+  enrollment: Enrollment;
   auditRecorder: AuditRecorder;
   signingKeys: Map<string, SigningKey>;
   hiveStableIdentifier: UUIDv7;
@@ -689,7 +699,8 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   // lands (Slice 1+), the active selection happens here.
   const activeSigningKey = signingKeys.values().next().value as SigningKey;
 
-  const blocklist = createBlocklist(db);
+  const { holderProofWindowDays } = config.enrollment;
+  const blocklist = createBlocklist(db, { holderProofWindowDays });
 
   const hiveRow = await db.selectFrom('hives').select(['id', 'name']).executeTakeFirst();
   if (!hiveRow) {
@@ -708,7 +719,10 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   const credentialsRepo = createCredentialsReadRepo(db);
   const cellsRepo = createCellsRepo(db);
   const cellsHook = createCellsHookAdapter(cellsRepo);
-  const participantsWriteRepo = createParticipantsWriteRepo(db, { cellsHook });
+  const participantsWriteRepo = createParticipantsWriteRepo(db, {
+    cellsHook,
+    holderProofWindowDays,
+  });
 
   const issuer = createIssuer({
     signingKey: activeSigningKey,
@@ -724,11 +738,26 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     blocklist,
     hiveStableIdentifier: hiveRow.id,
     defaultTtlMs: config.defaultCredentialTtlMs,
+    enrollmentTtlMs: config.enrollment.enrollmentTtlMs,
     snapshotMaxBytes: config.snapshotMaxBytes,
     db,
     logger,
   });
-  const revoker = createRevoker({ db, logger });
+  const revoker = createRevoker({ db, logger, cellsHook, holderProofWindowDays });
+  const enrollment = createEnrollment({
+    signingKey: activeSigningKey,
+    participantsRepo,
+    hiveStableIdentifier: hiveRow.id,
+    snapshotMaxBytes: config.snapshotMaxBytes,
+    db,
+    logger,
+    dialect: dbConfig.dialect,
+    cellsHook,
+    enrollmentTtlMs: config.enrollment.enrollmentTtlMs,
+    hiveMaxAgents: config.enrollment.hiveMaxAgents,
+    workerTokenTtlMs: config.enrollment.workerTokenTtlMs,
+    holderProofWindowDays,
+  });
 
   const snapshotWriter = createSnapshotWriter({
     db,
@@ -755,6 +784,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     issuer,
     rotator,
     revoker,
+    enrollment,
     auditRecorder,
     signingKeys,
     hiveStableIdentifier: hiveRow.id,

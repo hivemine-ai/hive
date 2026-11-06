@@ -21,6 +21,8 @@ import type { Database, JsonText } from '#persistence/schema.js';
 import { dateToIso, jsonStringify, validateJsonText } from '#persistence/type-mappers.js';
 import { AuthError } from '../errors.js';
 import type { SigningKey } from '#domain/auth/keys/keypair-store.js';
+import type { DbExecutor } from '#domain/auth/participants/cells-hook.js';
+import type { Participant } from '#domain/auth/participants/entities.js';
 import type { ParticipantsReadRepo } from '#domain/auth/participants/repository.js';
 import type { Logger } from '#observability/logger.js';
 
@@ -54,8 +56,6 @@ export interface Issuer {
 }
 
 export function createIssuer(deps: IssuerDeps): Issuer {
-  const snapshotMaxBytes = deps.snapshotMaxBytes ?? 16 * 1024;
-
   return {
     async issueCredential(input): Promise<IssuedCredential> {
       const participant = await deps.participantsRepo.findById(input.participantId);
@@ -68,93 +68,135 @@ export function createIssuer(deps: IssuerDeps): Issuer {
         throw new AuthError('PARTICIPANT_NOT_ACTIVE', { subCode: state });
       }
 
-      const now = deps.now ? deps.now() : new Date();
-      const jti = uuidv7();
-      const ttlMs = input.ttl ?? deps.defaultTtlMs;
-      const notBefore = input.notBefore ?? now;
-      const expiresAt = new Date(now.getTime() + ttlMs);
-      const iat = Math.floor(now.getTime() / 1000);
-      const nbf = Math.floor(notBefore.getTime() / 1000);
-      const exp = Math.floor(expiresAt.getTime() / 1000);
-
-      const kind: ParticipantKind =
-        participant.kind === 'hivekeeper' ? 'hivekeeper' : participant.agent.type;
-      const hiveId =
-        participant.kind === 'hivekeeper'
-          ? participant.hivekeeper.hiveId
-          : participant.agent.hiveId;
-      const colonyId =
-        participant.kind === 'hivekeeper'
-          ? participant.hivekeeper.colonyId
-          : participant.agent.colonyId;
-
-      const payload: jose.JWTPayload & {
-        kind: ParticipantKind;
-        hive_id: UUIDv7;
-        colony_id: UUIDv7;
-        owner_id?: UUIDv7;
-        capabilities?: string[];
-      } = {
-        sub: input.participantId,
-        iss: deps.hiveStableIdentifier,
-        aud: deps.hiveStableIdentifier,
-        iat,
-        nbf,
-        exp,
-        jti,
-        kind,
-        hive_id: hiveId,
-        colony_id: colonyId,
-      };
-      if (participant.kind === 'agent') {
-        payload.owner_id = participant.agent.ownerId;
-        payload.capabilities = participant.agent.capabilities;
-      }
-
-      const snapshotJson: JsonText = jsonStringify(payload);
-      validateJsonText(snapshotJson, { maxBytes: snapshotMaxBytes });
-
-      const jwt = await new jose.SignJWT(payload)
-        .setProtectedHeader({ alg: 'EdDSA', kid: deps.signingKey.kid, typ: 'JWT' })
-        .sign(deps.signingKey.privateKey);
-
-      await deps.db
-        .insertInto('credentials')
-        .values({
-          jti,
-          participant_id: input.participantId,
-          participant_kind: kind,
-          kid: deps.signingKey.kid,
-          issued_at: dateToIso(now),
-          not_before: dateToIso(notBefore),
-          expires_at: dateToIso(expiresAt),
-          snapshot: snapshotJson,
-          issued_by: input.issuedBy ?? null,
-          revoked_at: null,
-        })
-        .execute();
-
-      if (deps.logger) {
-        deps.logger.info(
-          {
-            event: 'auth_credential_issued',
-            participantId: input.participantId,
-            kind,
-            jti,
-            kid: deps.signingKey.kid,
-            expiresAt: dateToIso(expiresAt),
-          },
-          'auth credential issued',
-        );
-      }
-
-      return {
-        jti,
-        jwt,
-        expiresAt,
-        participantId: input.participantId,
-        kid: deps.signingKey.kid,
-      };
+      return mintCredential(deps, {
+        participant,
+        ttlMs: input.ttl ?? deps.defaultTtlMs,
+        ...(input.notBefore !== undefined ? { notBefore: input.notBefore } : {}),
+        issuedBy: input.issuedBy ?? null,
+      });
     },
   };
+}
+
+export type MintDeps = Pick<
+  IssuerDeps,
+  'signingKey' | 'hiveStableIdentifier' | 'snapshotMaxBytes' | 'db' | 'now' | 'logger'
+>;
+
+export interface MintInput {
+  // Pre-conditions (existence, state, authorization) are the caller's job.
+  participant: Participant;
+  ttlMs: Duration;
+  notBefore?: Date;
+  issuedBy: UUIDv7 | null;
+  // ADR-026 enrollment profile: signs `scope: "enroll"` and the optional claims.
+  enrollment?: { namePrefix?: string; maxAgents?: number };
+  // ADR-026 Worker token profile: the enrollment `jti` that originated the token.
+  enrolledVia?: UUIDv7;
+}
+
+/**
+ * Signs and persists one credential. Every credential profile (full, enrollment, Worker
+ * token) goes through here, so they share the signer, the wire format and the row shape.
+ */
+export async function mintCredential(
+  deps: MintDeps,
+  input: MintInput,
+  executor: DbExecutor = deps.db,
+): Promise<IssuedCredential> {
+  const { participant } = input;
+  const participantId =
+    participant.kind === 'hivekeeper' ? participant.hivekeeper.id : participant.agent.id;
+  const now = deps.now ? deps.now() : new Date();
+  const jti = uuidv7();
+  const notBefore = input.notBefore ?? now;
+  const expiresAt = new Date(now.getTime() + input.ttlMs);
+  const iat = Math.floor(now.getTime() / 1000);
+  const nbf = Math.floor(notBefore.getTime() / 1000);
+  const exp = Math.floor(expiresAt.getTime() / 1000);
+
+  const kind: ParticipantKind =
+    participant.kind === 'hivekeeper' ? 'hivekeeper' : participant.agent.type;
+  const hiveId =
+    participant.kind === 'hivekeeper' ? participant.hivekeeper.hiveId : participant.agent.hiveId;
+  const colonyId =
+    participant.kind === 'hivekeeper'
+      ? participant.hivekeeper.colonyId
+      : participant.agent.colonyId;
+
+  const payload: jose.JWTPayload & {
+    kind: ParticipantKind;
+    hive_id: UUIDv7;
+    colony_id: UUIDv7;
+    owner_id?: UUIDv7;
+    capabilities?: string[];
+    scope?: 'enroll';
+    name_prefix?: string;
+    max_agents?: number;
+  } = {
+    sub: participantId,
+    iss: deps.hiveStableIdentifier,
+    aud: deps.hiveStableIdentifier,
+    iat,
+    nbf,
+    exp,
+    jti,
+    kind,
+    hive_id: hiveId,
+    colony_id: colonyId,
+  };
+  if (participant.kind === 'agent') {
+    payload.owner_id = participant.agent.ownerId;
+    payload.capabilities = participant.agent.capabilities;
+  }
+  if (input.enrollment) {
+    payload.scope = 'enroll';
+    if (input.enrollment.namePrefix !== undefined) {
+      payload.name_prefix = input.enrollment.namePrefix;
+    }
+    if (input.enrollment.maxAgents !== undefined) {
+      payload.max_agents = input.enrollment.maxAgents;
+    }
+  }
+
+  const snapshotJson: JsonText = jsonStringify(payload);
+  validateJsonText(snapshotJson, { maxBytes: deps.snapshotMaxBytes ?? 16 * 1024 });
+
+  const jwt = await new jose.SignJWT(payload)
+    .setProtectedHeader({ alg: 'EdDSA', kid: deps.signingKey.kid, typ: 'JWT' })
+    .sign(deps.signingKey.privateKey);
+
+  await executor
+    .insertInto('credentials')
+    .values({
+      jti,
+      participant_id: participantId,
+      participant_kind: kind,
+      kid: deps.signingKey.kid,
+      issued_at: dateToIso(now),
+      not_before: dateToIso(notBefore),
+      expires_at: dateToIso(expiresAt),
+      snapshot: snapshotJson,
+      issued_by: input.issuedBy,
+      revoked_at: null,
+      scope: input.enrollment ? 'enroll' : null,
+      enrolled_via: input.enrolledVia ?? null,
+    })
+    .execute();
+
+  if (deps.logger) {
+    deps.logger.info(
+      {
+        event: 'auth_credential_issued',
+        participantId,
+        kind,
+        jti,
+        kid: deps.signingKey.kid,
+        expiresAt: dateToIso(expiresAt),
+      },
+      'auth credential issued',
+    );
+  }
+
+  return { jti, jwt, expiresAt, participantId, kid: deps.signingKey.kid };
 }
