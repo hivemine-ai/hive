@@ -307,7 +307,7 @@ jobs:
           ln -s "$SQLITE_DIR" packages/cli/dist-sea/node_modules/better-sqlite3
           packages/cli/dist-sea/hivectl --version
 
-      - name: Run the SEA watch test (not skipped)
+      - name: Run the SEA watch and mcp proxy tests (not skipped)
         shell: bash
         env:
           HIVECTL_SEA_BINARY: ${{ github.workspace }}/packages/cli/dist-sea/hivectl
@@ -315,18 +315,18 @@ jobs:
           NO_COLOR: '1'
         run: |
           set -euo pipefail
-          pnpm --filter @hive/cli exec vitest run src/commands/watch/sea.test.ts --reporter=verbose | tee "${{ runner.temp }}/sea-test.log"
+          pnpm --filter @hive/cli exec vitest run src/commands/watch/sea.test.ts src/commands/mcp/sea.test.ts --reporter=verbose | tee "${{ runner.temp }}/sea-test.log"
           # Strip ANSI escapes in case the runner still colors the summary.
           LOG="${{ runner.temp }}/sea-test.log"
           LC_ALL=C sed $'s/\x1b\\[[0-9;]*m//g' "$LOG" > "$LOG.plain"
           # `describe.skipIf` turns a missing binary into a green, empty run, so
           # require passed tests and no skipped ones.
           if grep -qE '[0-9]+ skipped' "$LOG.plain"; then
-            echo "::error::the SEA watch test was skipped"
+            echo "::error::an SEA test was skipped"
             exit 1
           fi
           if ! grep -qE 'Tests +[0-9]+ passed' "$LOG.plain"; then
-            echo "::error::the SEA watch test reported no passed tests"
+            echo "::error::the SEA tests reported no passed tests"
             exit 1
           fi
 
