@@ -213,7 +213,7 @@ hivectl migrate down --yes  # roll back the most recent migration (destructive)
 hivectl migrate status      # list applied migrations
 ```
 
-Wraps `Kysely.Migrator` (portable SQLite/PG). `init` runs migrations automatically — only invoke `migrate` directly when you need to inspect or roll back.
+Wraps `Kysely.Migrator` (portable SQLite/PG). `init` runs migrations automatically. `serve` never does: after upgrading `hivectl`, back up the database (SQLite file or Postgres dump) and run `hivectl migrate up` before `serve`, which refuses to start while migrations are pending (see [`serve`](#serve)).
 
 ### `hive`
 
@@ -319,6 +319,14 @@ hivectl serve [--port N] [--host <addr>] [--log-level <level>] [--log-pretty]
 ```
 
 Runs the Hive MCP server in the foreground (PRY-031). Blocks until SIGINT/SIGTERM. Reuses the server `buildWire` directly — no daemonize, no PID file (delegate-to-OS supervision via `service install`).
+
+**Pending migrations (PRY-096).** Before binding, `serve` checks the database schema (read-only). If any migration of this `hivectl` version is not applied, it writes nothing, logs `migrations_pending` and exits with code `4`:
+
+```
+error: database schema is out of date (MIGRATIONS_PENDING): the database has 2 pending migration(s): 20261105120000_enrollment-agents-credentials, 20261105130000_audit-enrollment-categories; back up the database and run `hivectl migrate up`
+```
+
+The systemd unit written by `service install` sets `RestartPreventExitStatus=4`, so systemd does not restart into the same refusal; launchd retries after its throttle interval until the migrations are applied.
 
 Bind-address precedence (highest wins): `--host` flag → `HIVE_MCP_HTTP_HOST` env → `<workingDir>/config.json`'s `httpHost` (set by `config network`) → default `127.0.0.1`.
 
