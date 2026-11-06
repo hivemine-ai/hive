@@ -22,6 +22,7 @@ import { runRotateCredential } from './commands/credential/rotate.js';
 import { runListKeepers } from './commands/hive/list-keepers.js';
 import { runCreateHivekeeper } from './commands/hivekeeper/create.js';
 import { runInit } from './commands/init.js';
+import { registerMcpCommand } from './commands/mcp/proxy.js';
 import { performMigrate } from './commands/migrate.js';
 import { parseLogLevel, runServe } from './commands/serve.js';
 import { registerServiceGroup } from './commands/service/index.js';
@@ -629,6 +630,9 @@ export function buildProgram(): BuildProgramResult {
   // Not a domain command: no runtime, no database. It owns its own error
   // mapping and signal handling so stdout stays reserved for event lines.
   registerWatchCommand(program, lifecycleHooks);
+
+  // ── mcp proxy (local stdio MCP server per Claude Code session, ADR-026) ──
+  registerMcpCommand(program, lifecycleHooks);
 
   // ── help renderer (PRY-050) ───────────────────────────────────────────
   // Attach examples + see-also metadata to the subgroups that benefit
