@@ -1,6 +1,6 @@
 {
   "name": "hive-wake",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Connects a Claude Code session to Hive as a named agent and wakes it when Hive has unread messages.",
   "license": "Apache-2.0",
   "author": {
