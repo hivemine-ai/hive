@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-06
+
+v0.3.0. Claude Code sessions join Hive as named Workers through an enrollment credential ([ADR-026](https://github.com/hivemine-ai/hive-vault) — session enrollment as Workers): a schema migration, the `register_session` tool, the local `hivectl mcp proxy`, `hivectl claude install`, the `watch` harness and the retirement and revival of session agents. A v0.2.x client keeps working against a v0.3.0 server: the new surface is additive on the wire.
+
+**Upgrading from v0.2.x**
+
+- **The schema migrates on first start** (PRY-090): `agents` gains `origin` (every existing agent becomes `manual`), `enrolled_via`, `description`, `retired_at`, `last_worker_jti` and the `retired` state; `credentials` gains `scope` and `enrolled_via`. Back up the database before upgrading (SQLite file or Postgres dump).
+- **New environment variables**, all optional with the defaults shown: `HIVE_ENROLLMENT_MAX_AGENTS` (`10`), `HIVE_ENROLLMENT_CREDENTIAL_TTL_DAYS` (`90`), `HIVE_WORKER_TOKEN_TTL_SECONDS` (`3600`), `HIVE_HOLDER_PROOF_WINDOW_DAYS` (`7`), `HIVE_ENROLLMENT_REGISTER_RATE_LIMIT` (`30`), `HIVE_ENROLLMENT_REGISTER_RATE_WINDOW_SECONDS` (`60`), `HIVE_ENROLLMENT_REJECT_ALERT_THRESHOLD` (`5`), `HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES` (`10`), `HIVE_PRESENCE_CLAIM_RESERVATION_MS` (`10000`), `HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS` (`3600`), `HIVE_ENROLLMENT_RETENTION_DAYS` (`30`), `HIVE_ENROLLMENT_GRACE_DAYS` (`60`); on the client side `HIVE_CONFIG_DIR` and `HIVE_PROXY_LOG_LEVEL`.
+- **New commands and flags**: `hivectl credential issue --enrollment`, enrollment-aware `credential rotate` and `credential revoke --revoke-agents`, `hivectl agent release`, `origin` in `hivectl agent list`, `hivectl mcp proxy`, `hivectl claude install` / `uninstall`, and `hivectl watch --session-name`, `--attach-session` and `--inline-mcp-config`.
+- **The `hive-wake` plugin is installed with `hivectl claude install`**; the `--plugin-dir` setup of v0.2.x and its `server_url`, `credential_file` and `hivectl_path` options are gone (see Changed).
+
 ### Added
 
 - **Claude Code sessions join Hive end to end: `watch` harness mode, the waker on `--attach-session` and the full `hive-wake` plugin** (PRY-093, fourth PRY of the v0.3.0 cascade for ADR-026). Validated against Claude Code 2.1.319 (minimum 2.1.318). Guide: [Connecting Claude Code sessions](./docs/claude-code-sessions.md).
@@ -36,7 +47,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `get_agent_config`, `list_agents` and `get_agent_status` return the `description` an agent declared about itself (untrusted text).
   - `HIVE_PRESENCE_CLAIM_RESERVATION_MS` (`10000`, provisional): how long a claim keeps the name until the claimant opens its stream.
 
-- **Enrollment credentials and short-lived Worker tokens in Auth** (PRY-090, first PRY of the v0.3.0 cascade for [ADR-026](https://github.com/hivemine-ai/hive-vault) — session enrollment as Workers). The tool that uses them, `register_session`, lands in PRY-091; this release line only adds the Auth side and the operator commands.
+- **Enrollment credentials and short-lived Worker tokens in Auth** (PRY-090, first PRY of the v0.3.0 cascade for [ADR-026](https://github.com/hivemine-ai/hive-vault) — session enrollment as Workers). The tool that uses them, `register_session`, is described below (PRY-091).
   - `hivectl credential issue --enrollment --owner <email-or-uuid> [--name-prefix <p>] [--max-agents N] [--ttl <duration>] --output-credential <path>` issues an enrollment credential (scope `enroll`, default TTL 90 days). It is written to a `0600` file only. It carries no admin authority: an admin operation presented with it fails with `INSUFFICIENT_PRIVILEGE` (`scoped_credential`), and a JWT with an unknown `scope` is rejected as `CREDENTIAL_INAUTHENTIC`.
   - `hivectl credential rotate` on an enrollment keeps its scope, name prefix and agent cap; the Worker tokens already issued through it keep renewing, while new registrations with the old credential fail. `hivectl credential revoke` on an enrollment also revokes every Worker token issued through it, and `--revoke-agents` revokes its Agents too (one `admin_agent_revoke` audit row each).
   - New audit categories: `enrollment_credential_issued`, `enrollment_credential_rotated`, `enrollment_credential_revoked`, plus the ones the next PRYs of the cascade record (`agent_enrolled`, `agent_claimed`, `agent_retired`, `agent_revived`, `admin_agent_release`, `enrollment_reject_alert`).
