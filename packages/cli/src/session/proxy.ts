@@ -49,6 +49,8 @@ export interface ProxyTimings {
   authRetryMaxMs: number;
   /** Lower bound of the delay before a renewal. */
   renewFloorMs: number;
+  /** How long a shutdown waits for the upstream (stream close, client close). */
+  shutdownTimeoutMs: number;
   backoff: BackoffOptions;
 }
 
@@ -57,6 +59,7 @@ const DEFAULT_TIMINGS: ProxyTimings = {
   silenceTimeoutMs: 45_000,
   authRetryMaxMs: 300_000,
   renewFloorMs: 1_000,
+  shutdownTimeoutMs: 3_000,
   backoff: DEFAULT_BACKOFF,
 };
 
@@ -333,6 +336,7 @@ export function startProxy(config: ProxyConfig): RunningProxy {
     probeTimeoutMs: timings.probeTimeoutMs,
     silenceTimeoutMs: timings.silenceTimeoutMs,
     backoff: timings.backoff,
+    ...(config.fetch && { fetch: config.fetch }),
     token: () => registration.current?.token,
     onEvent: (event) => {
       for (const listener of streamListeners) listener(event);
@@ -491,19 +495,27 @@ export function startProxy(config: ProxyConfig): RunningProxy {
   };
 
   // ── downstream (Claude Code) ──
-  let workerClient: Client | undefined;
+  // One connection per identity, shared by concurrent requests (memoised promise).
+  let workerConnecting: Promise<Client> | undefined;
   let workerClientFor: string | undefined;
-  const worker = async (): Promise<Client> => {
+  const worker = (): Promise<Client> => {
     const current = registration.current;
     if (current === undefined || upstream === undefined) {
-      throw new ProtocolError(-32001, 'the session is not registered in Hive');
+      return Promise.reject(new ProtocolError(-32001, 'the session is not registered in Hive'));
     }
-    if (workerClient === undefined || workerClientFor !== current.agentId) {
-      await workerClient?.close().catch(() => undefined);
-      workerClient = await upstream.connect(() => registration.current?.token ?? '');
+    if (workerConnecting === undefined || workerClientFor !== current.agentId) {
+      const previous = workerConnecting;
       workerClientFor = current.agentId;
+      const connecting = (async () => {
+        await (await previous?.catch(() => undefined))?.close().catch(() => undefined);
+        return upstream.connect(() => registration.current?.token ?? '');
+      })();
+      workerConnecting = connecting;
+      connecting.catch(() => {
+        if (workerConnecting === connecting) workerConnecting = undefined;
+      });
     }
-    return workerClient;
+    return workerConnecting;
   };
 
   /** Runs a request against Hive; on -32001 renews (or registers again) and retries once. */
@@ -660,14 +672,24 @@ export function startProxy(config: ProxyConfig): RunningProxy {
       diag.log('info', 'proxy.shutdown', { reason });
       shutdownSignal.abort();
       clearRenewal();
-      await stream.stop().catch(() => undefined);
-      registration.drop();
+      // Local state first: it must go even if Hive or the network never answer.
       try {
         removeProxyEntry(paths, config.claudePid);
       } catch {
         // Best effort: an orphan entry is ignored by its start time anyway.
       }
-      await workerClient?.close().catch(() => undefined);
+      const upstreamDone = (async () => {
+        await stream.stop().catch(() => undefined);
+        const client = await workerConnecting?.catch(() => undefined);
+        await client?.close().catch(() => undefined);
+      })();
+      const deadline = new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), timings.shutdownTimeoutMs).unref();
+      });
+      if ((await Promise.race([upstreamDone, deadline])) === 'timeout') {
+        diag.log('warn', 'proxy.shutdown_timeout', { timeoutMs: timings.shutdownTimeoutMs });
+      }
+      registration.drop();
       await handle.close().catch(() => undefined);
       for (const server of servers) await server.close().catch(() => undefined);
       resolveClosed();

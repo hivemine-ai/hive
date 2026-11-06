@@ -10,12 +10,15 @@
 import { createRuntimeDeps, createSdkConnector, isListenError, runListenLoop } from '@hive/client';
 import type { BackoffOptions, LogEntry, WatchEvent } from '@hive/client';
 
+import type { FetchLike } from './upstream.js';
+
 export interface StreamOptions {
   url: string;
   clientVersion: string;
   probeTimeoutMs: number;
   silenceTimeoutMs: number;
   backoff?: BackoffOptions;
+  fetch?: FetchLike;
   token(): string | undefined;
   onEvent(event: WatchEvent): void;
   onConnected(): void;
@@ -50,6 +53,7 @@ export function createSessionStream(options: StreamOptions): SessionStream {
       silenceTimeoutMs: options.silenceTimeoutMs,
       clientName: 'hivectl-mcp-proxy',
       clientVersion: options.clientVersion,
+      ...(options.fetch && { fetch: options.fetch }),
     })(handlers, signal);
   };
 

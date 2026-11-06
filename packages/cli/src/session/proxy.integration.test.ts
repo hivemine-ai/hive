@@ -3,7 +3,7 @@
 // process-level behaviour (signals, stdin EOF, kill -9, a second process) lives
 // in proxy.process.test.ts.
 
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -347,6 +347,36 @@ describe('mcp proxy against a real Hive', () => {
 
     expect(await upstreamAborted).toBe(true);
     await pending;
+  }, 30_000);
+
+  it('shuts down within its deadline even when the upstream hangs, cleaning local state first', async () => {
+    const w = await bootWorld();
+    install(w);
+    let discovers = 0;
+    const session = await openSession({
+      claudePid: process.pid,
+      startTimeOf: () => 'start-of-claude',
+      timings: { backoff: FAST_BACKOFF, shutdownTimeoutMs: 500 },
+      fetch: (input, init) => {
+        const body = typeof init?.body === 'string' ? init.body : '';
+        // After the two start-up discovers (probe + discover), every probe of the stream hangs and ignores aborts.
+        if (body.includes('"server/discover"') && (discovers += 1) > 2) {
+          return new Promise<Response>(() => undefined);
+        }
+        return fetch(input, init);
+      },
+    });
+    await expect.poll(() => discovers).toBeGreaterThanOrEqual(2);
+    await registerAs(session);
+    await expect.poll(() => discovers).toBeGreaterThanOrEqual(3);
+    const entry = statePaths(configDir).proxy(process.pid);
+    expect(existsSync(entry)).toBe(true);
+
+    const started = Date.now();
+    await session.proxy.shutdown('test');
+
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(existsSync(entry)).toBe(false);
   }, 30_000);
 
   it('detects a server that does not expose resource subscriptions and reports it in session_status', async () => {
