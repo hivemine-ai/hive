@@ -86,6 +86,12 @@ const COUNTED_REJECTIONS: ReadonlySet<string> = new Set([
   'ENROLLMENT_QUOTA_EXCEEDED',
 ]);
 
+/** What the registration learned about an existing Agent before it failed or claimed. */
+interface Seen {
+  agentId: UUIDv7 | null;
+  previousEnrolledVia: UUIDv7 | null;
+}
+
 function isCountedRejection(err: unknown): boolean {
   if (!(err instanceof AuthError)) return false;
   return (
@@ -191,30 +197,65 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
     );
   }
 
+  // Actor is the owner, operating through its enrollment credential (decision 9.14).
+  async function auditRegistration(
+    ctx: RequestContext,
+    category: 'agent_enrolled' | 'agent_claimed',
+    agentId: UUIDv7,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    const { identity } = ctx;
+    await deps.auditRecorder.recordEvent({
+      category,
+      decision: 'success',
+      actorId: identity.participantId,
+      actorKind: 'hivekeeper',
+      subjectId: agentId,
+      subjectKind: 'participant',
+      reasonCode: null,
+      detail: { ...detail, viaEnrollmentJti: identity.snapshot.credentialJti },
+      requestId: ctx.requestId,
+      hiveId: identity.hiveId,
+      occurredAt: new Date(),
+    });
+  }
+
   async function register(input: RegisterSessionInput, ctx: RequestContext) {
-    const seen: { agentId: UUIDv7 | null } = { agentId: null };
+    const seen: Seen = { agentId: null, previousEnrolledVia: null };
+    let result: RegisterSessionResult;
     try {
-      const result = await registerOrReject(input, ctx, seen);
-      if (result.outcome === 'created') {
-        const enrolledVia = ctx.identity.snapshot.credentialJti;
-        await notifyOwner(
-          'agent_enrolled',
-          ctx.identity.participantId,
-          `Hive: new session agent ${result.output.agent_ref} registered via enrollment credential ${enrolledVia}.`,
-          { kind: 'agent_enrolled', agentRef: result.output.agent_ref, enrolledVia },
-        );
-      }
-      return result;
+      result = await registerOrReject(input, ctx, seen);
     } catch (err) {
       if (isCountedRejection(err)) await onRejected(input, ctx, seen.agentId);
       throw err;
     }
+
+    const enrolledVia = ctx.identity.snapshot.credentialJti;
+    const agentRef = result.output.agent_ref;
+    if (result.outcome === 'created') {
+      await auditRegistration(ctx, 'agent_enrolled', result.output.agent_id, {
+        agentRef,
+        enrolledVia,
+      });
+      await notifyOwner(
+        'agent_enrolled',
+        ctx.identity.participantId,
+        `Hive: new session agent ${agentRef} registered via enrollment credential ${enrolledVia}.`,
+        { kind: 'agent_enrolled', agentRef, enrolledVia },
+      );
+    } else {
+      await auditRegistration(ctx, 'agent_claimed', result.output.agent_id, {
+        enrolledVia,
+        previousEnrolledVia: seen.previousEnrolledVia,
+      });
+    }
+    return result;
   }
 
   async function registerOrReject(
     input: RegisterSessionInput,
     ctx: RequestContext,
-    seen: { agentId: UUIDv7 | null },
+    seen: Seen,
   ): Promise<RegisterSessionResult> {
     const { identity, requestId } = ctx;
     const enrolledVia = identity.snapshot.credentialJti;
@@ -242,6 +283,7 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
     }
 
     seen.agentId = existing.id;
+    seen.previousEnrolledVia = existing.enrolledVia;
     if (existing.origin === 'manual' || existing.type === 'scout') {
       throw new AuthError('NAME_TAKEN');
     }

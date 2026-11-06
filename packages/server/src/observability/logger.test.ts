@@ -66,6 +66,31 @@ describe('createLogger — redact concatenation', () => {
   });
 });
 
+describe('createLogger — register_session token (ADR-026)', () => {
+  it('masks the token of a tool result and of its structuredContent', () => {
+    const chunks: Buffer[] = [];
+    const dest = new Writable({
+      write(chunk: Buffer, _enc: BufferEncoding, cb: () => void) {
+        chunks.push(chunk);
+        cb();
+      },
+    });
+    const log = createLogger({ level: 'info', pretty: false }, dest);
+
+    log.info(
+      {
+        response: { result: { token: 'worker.jwt.value', agent_id: 'a' } },
+        tool: { structuredContent: { token: 'worker.jwt.value' } },
+      },
+      'test',
+    );
+
+    const output = Buffer.concat(chunks).toString();
+    expect(output).not.toContain('worker.jwt.value');
+    expect(output).toContain('"agent_id":"a"');
+  });
+});
+
 describe('createLogger — bindings option', () => {
   it('applies bindings to the root logger so every log line carries them', () => {
     const chunks: Buffer[] = [];

@@ -3,6 +3,8 @@
 // to run the same suite against Postgres (CI `postgres` job), where the concurrent
 // requests race real transactions.
 
+import { Writable } from 'node:stream';
+
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client, ProtocolError, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import type { Kysely } from 'kysely';
@@ -14,6 +16,7 @@ import {
   type Enrollment,
   type UUIDv7,
 } from '#domain/auth/index.js';
+import { createLogger } from '#observability/logger.js';
 import { createDb } from '#persistence/db.js';
 import type { Database } from '#persistence/schema.js';
 
@@ -564,6 +567,55 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
     });
   });
 
+  describe('audit and discovery', () => {
+    it('records agent_enrolled and agent_claimed with the owner as actor', async () => {
+      const { jwt, jti } = await issueEnrollment();
+      const registered = await register(jwt);
+      await register(jwt);
+
+      const rows = await db
+        .selectFrom('audit_log')
+        .selectAll()
+        .where('category', 'in', ['agent_enrolled', 'agent_claimed'])
+        .orderBy('id')
+        .execute();
+      expect(rows.map((r) => [r.category, r.actor_id, r.actor_kind, r.subject_id])).toEqual([
+        ['agent_enrolled', world.adminId, 'hivekeeper', registered.agent_id],
+        ['agent_claimed', world.adminId, 'hivekeeper', registered.agent_id],
+      ]);
+      expect(JSON.parse(rows[0]?.detail as string)).toEqual({
+        agentRef: registered.agent_ref,
+        enrolledVia: jti,
+        viaEnrollmentJti: jti,
+      });
+      expect(JSON.parse(rows[1]?.detail as string)).toEqual({
+        enrolledVia: jti,
+        previousEnrolledVia: jti,
+        viaEnrollmentJti: jti,
+      });
+    });
+
+    it('shows the description in get_agent_config, list_agents and get_agent_status', async () => {
+      const { jwt } = await issueEnrollment();
+      const registered = await register(jwt);
+      const worker = await client(registered.token);
+      const owner = await client(world.jwtAdmin);
+
+      const config = await worker.callTool({ name: 'get_agent_config', arguments: {} });
+      expect((config.structuredContent as { description: string }).description).toBe(DESCRIPTION);
+      const listed = await owner.callTool({ name: 'list_agents', arguments: {} });
+      const agents = (listed.structuredContent as { agents: { id: string; description: string }[] })
+        .agents;
+      expect(agents.find((a) => a.id === registered.agent_id)?.description).toBe(DESCRIPTION);
+      expect(agents.find((a) => a.id === world.workerAId)?.description).toBe('');
+      const status = await owner.callTool({
+        name: 'get_agent_status',
+        arguments: { participant: registered.agent_id },
+      });
+      expect((status.structuredContent as { description: string }).description).toBe(DESCRIPTION);
+    });
+  });
+
   it('is caught by ProtocolError in the SDK client with the wire code', async () => {
     const { jwt } = await issueEnrollment();
     const enrolled = await client(jwt);
@@ -690,5 +742,55 @@ describe(`register_session rate limit (${PG_URL ? 'postgres' : 'sqlite'})`, () =
     expect(limited.status).toBe(429);
     expect(Number(limited.headers.get('retry-after'))).toBeGreaterThan(0);
     expect(limited.error).toEqual({ code: -32011, message: 'too many registrations' });
+  });
+});
+
+// The token in the response of register_session must never reach the logs, whatever
+// the level: the whole log stream of the wire is captured at trace.
+describe(`register_session and the logs (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
+  it('never writes the token of a create, a claim or a renewal to any log line', async () => {
+    const lines: string[] = [];
+    const sink = new Writable({
+      write(chunk: Buffer, _enc: BufferEncoding, cb: () => void) {
+        lines.push(chunk.toString());
+        cb();
+      },
+    });
+    const world = await seedSmokeWorld({
+      ...(PG_URL !== undefined && { pgUrl: PG_URL }),
+      logger: createLogger({ level: 'trace', pretty: false }, sink),
+    });
+    const db = createDb(world.dbConfig);
+    try {
+      const credential = await createEnrollment({
+        signingKey: world.signingKey,
+        participantsRepo: createParticipantsReadRepo(db, world.dbConfig.dialect),
+        hiveStableIdentifier: world.hiveId,
+        db,
+        enrollmentTtlMs: 90 * DAY_MS,
+        hiveMaxAgents: 10,
+      }).issueEnrollmentCredential({ ownerId: world.adminId }, { kind: 'system' });
+      const args = { name: 'claude-api', description: DESCRIPTION };
+
+      const tokens: string[] = [];
+      for (const bearer of [credential.jwt, credential.jwt]) {
+        const outcome = await registerRaw(world, bearer, args);
+        tokens.push((outcome.result as { structuredContent: Registered }).structuredContent.token);
+      }
+      const renewal = await registerRaw(world, tokens[1] as string, args);
+      tokens.push((renewal.result as { structuredContent: Registered }).structuredContent.token);
+
+      const logs = lines.join('');
+      expect(logs).toContain('mcp_register_session_succeeded');
+      for (const token of tokens) {
+        expect(token.length).toBeGreaterThan(20);
+        expect(logs).not.toContain(token);
+        // Nor its signature alone.
+        expect(logs).not.toContain(token.split('.')[2] as string);
+      }
+    } finally {
+      await db.destroy();
+      await world.cleanup();
+    }
   });
 });

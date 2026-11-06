@@ -11,6 +11,8 @@ export interface AgentSummary {
   owner_id: string;
   state: 'active' | 'suspended';
   capabilities: string[];
+  /** ADR-026: declared by the Agent itself; untrusted text, `""` when it has none. */
+  description: string;
 }
 
 export interface AgentListView {
@@ -85,6 +87,7 @@ function projectAgent(agent: Agent): AgentSummary {
     // resolution: replaces the prior `as 'active' | 'suspended'` escape hatch).
     state: assertWireState(agent.state),
     capabilities: agent.capabilities,
+    description: agent.description ?? '',
   };
 }
 

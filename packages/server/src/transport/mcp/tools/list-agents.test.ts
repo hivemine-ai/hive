@@ -541,7 +541,7 @@ describe('createListAgentsHandler', () => {
   // ─── AC-9: output shape ───
 
   describe('AC-9 — output shape exact field set', () => {
-    it('each AgentSummary has exactly: capabilities, id, name, owner_id, state, type', async () => {
+    it('each AgentSummary has exactly: capabilities, description, id, name, owner_id, state, type', async () => {
       const { repo } = buildStubRepo({
         agents: [buildAgent(AGENT_A_ID)],
         nextCursor: null,
@@ -554,6 +554,7 @@ describe('createListAgentsHandler', () => {
       if (!summary) return;
       expect(Object.keys(summary).sort()).toEqual([
         'capabilities',
+        'description',
         'id',
         'name',
         'owner_id',

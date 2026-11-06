@@ -509,6 +509,7 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     for (const agent of listView.agents) {
       expect(Object.keys(agent).sort()).toEqual([
         'capabilities',
+        'description',
         'id',
         'name',
         'owner_id',

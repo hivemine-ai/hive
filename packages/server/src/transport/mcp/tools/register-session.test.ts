@@ -139,7 +139,8 @@ function build(existing: Agent | null = null, live = false) {
   return { deps, handler };
 }
 
-const INPUT = { name: 'claude-api', description: 'Works on the API' };
+const DESCRIPTION_TEXT = 'Works on the API';
+const INPUT = { name: 'claude-api', description: DESCRIPTION_TEXT };
 
 async function expectAuthError(promise: Promise<unknown>, code: string, subCode?: string) {
   const err = await promise.then(
@@ -449,5 +450,63 @@ describe('register_session — repeated rejections and owner notices', () => {
       { event: 'mcp_enrollment_notify_failed', kind: 'agent_enrolled' },
       expect.any(String),
     );
+  });
+});
+
+describe('register_session — audit of registrations', () => {
+  it('records agent_enrolled for a created Agent, with the owner as actor', async () => {
+    const { deps, handler } = build(null);
+
+    await handler(INPUT, enrollCtx());
+
+    expect(deps.auditRecorder.recordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: 'agent_enrolled',
+        decision: 'success',
+        actorId: OWNER_ID,
+        actorKind: 'hivekeeper',
+        subjectId: AGENT_ID,
+        subjectKind: 'participant',
+        detail: {
+          agentRef: 'claude-api@alice.acme',
+          enrolledVia: ENROLLMENT_JTI,
+          viaEnrollmentJti: ENROLLMENT_JTI,
+        },
+        requestId: REQUEST_ID,
+        hiveId: HIVE_ID,
+      }),
+    );
+  });
+
+  it('records agent_claimed with the previous enrollment of the Agent', async () => {
+    const PREVIOUS = '01900000-0000-7000-8000-0000000000aa' as UUIDv7;
+    const { deps, handler } = build(agent({ enrolledVia: PREVIOUS }));
+
+    await handler(INPUT, enrollCtx());
+
+    expect(deps.auditRecorder.recordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: 'agent_claimed',
+        actorId: OWNER_ID,
+        subjectId: AGENT_ID,
+        detail: {
+          enrolledVia: ENROLLMENT_JTI,
+          previousEnrolledVia: PREVIOUS,
+          viaEnrollmentJti: ENROLLMENT_JTI,
+        },
+      }),
+    );
+  });
+
+  it('records nothing for a renewal, and never puts the token or the description in detail', async () => {
+    const renewal = build(agent());
+    await renewal.handler(INPUT, renewalCtx());
+    expect(renewal.deps.auditRecorder.recordEvent).not.toHaveBeenCalled();
+
+    const created = build(null);
+    await created.handler(INPUT, enrollCtx());
+    const recorded = JSON.stringify(created.deps.auditRecorder.recordEvent.mock.calls);
+    expect(recorded).not.toContain('jwt-new-jti');
+    expect(recorded).not.toContain(DESCRIPTION_TEXT);
   });
 });
