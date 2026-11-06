@@ -277,7 +277,14 @@ describe('watch harness mode', () => {
       .toBe(true);
     const second = stateOf(statePath).token;
     await expect.poll(() => stateOf(statePath).token !== second, { timeout: 10_000 }).toBe(true);
-    await expect.poll(() => Date.now() > Date.parse(first.expiresAt) + 1_000).toBe(true);
+    // The child must retry with a first token that is past its exp plus 1 s of leeway. The
+    // second renewal lands anywhere from about 1 s before that instant to after it, so a
+    // poll bounded by its 1 s default raced it. Wait for the instant itself.
+    const firstTokenDeadMs = Date.parse(first.expiresAt) + 1_000 - Date.now();
+    if (firstTokenDeadMs >= 0) {
+      await new Promise((resolve) => setTimeout(resolve, firstTokenDeadMs + 50));
+    }
+    expect(Date.now()).toBeGreaterThan(Date.parse(first.expiresAt) + 1_000);
     expect(w.isOnline(first.agentId)).toBe(true);
     expect(w.streamCount(first.agentId)).toBe(1);
 
