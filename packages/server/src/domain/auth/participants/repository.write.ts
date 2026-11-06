@@ -137,7 +137,8 @@ export interface ParticipantsWriteRepo {
    */
   changeAgentType(id: UUIDv7, newType: 'worker' | 'scout', caller: CallerContext): Promise<void>;
   /**
-   * Revoke a Hivekeeper and cascade-revoke all owned Agents + close their Cells in
+   * Revoke a Hivekeeper and cascade-revoke all owned Agents (active, suspended and
+   * retired) + close their Cells in
    * the same transaction. Snapshots the effective retention policy on the keeper's
    * row so post-revocation reads see frozen retention semantics. Idempotent: a
    * second invocation on an already-revoked keeper returns empty counts without
@@ -423,12 +424,13 @@ export function createParticipantsWriteRepo(
         }
         const hiveId = keeperRow.hive_id;
 
-        // Cascade-revoke owned agents that are still active.
+        // Cascade-revoke every owned agent not revoked yet: active, suspended and retired
+        // (ADR-026). retired_at is cleared in the same UPDATE, as the agents CHECK requires.
         const revokedAgents = await tx
           .updateTable('agents')
-          .set({ state: 'revoked', revoked_at: dateToIso(now) })
+          .set({ state: 'revoked', revoked_at: dateToIso(now), retired_at: null })
           .where('owner_id', '=', id)
-          .where('state', '=', 'active')
+          .where('state', 'in', ['active', 'suspended', 'retired'])
           .returning('id')
           .execute();
         const revokedAgentIds = revokedAgents.map((r) => r.id);
