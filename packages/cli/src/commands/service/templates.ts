@@ -29,7 +29,9 @@ export interface LaunchdPlistInput {
  * Returns the contents of the systemd unit file for the Hive MCP server.
  *
  * `Restart=on-failure` keeps the server alive across crashes. `RestartSec=5`
- * avoids hot-loops during a deterministic crash. `User=hive` runs the server
+ * avoids hot-loops during a deterministic crash. `RestartPreventExitStatus=4` stops the
+ * restarts when `serve` refuses a precondition, such as pending migrations (INC-2026-010),
+ * which a restart cannot fix. `User=hive` runs the server
  * under the dedicated system user (closes INC-2026-001 FLAG-002).
  */
 export function renderSystemdUnit(input: SystemdUnitInput): string {
@@ -46,6 +48,7 @@ export function renderSystemdUnit(input: SystemdUnitInput): string {
     `ExecStart=${input.execPath} serve`,
     'Restart=on-failure',
     'RestartSec=5',
+    'RestartPreventExitStatus=4',
     '',
     '[Install]',
     'WantedBy=multi-user.target',

@@ -1,4 +1,4 @@
-import { AuthError } from '@hive/server';
+import { AuthError, PendingMigrationsError, UnknownMigrationsError } from '@hive/server';
 import { describe, expect, it } from 'vitest';
 
 import { CliError } from './cli-error.js';
@@ -13,6 +13,31 @@ import {
 } from './exit-codes.js';
 
 describe('mapErrorToExit', () => {
+  describe('UnknownMigrationsError (PRY-096)', () => {
+    it('maps to EXIT_PRECONDITION with the unknown names and the upgrade hint', () => {
+      const mapped = mapErrorToExit(new UnknownMigrationsError(['29991231000000_x']));
+      expect(mapped.code).toBe(EXIT_PRECONDITION);
+      expect(mapped.message).toBe(
+        'database schema is newer than this hivectl (MIGRATIONS_UNKNOWN): the database has ' +
+          'migrations unknown to this binary: 29991231000000_x; upgrade hivectl',
+      );
+    });
+  });
+
+  describe('PendingMigrationsError (PRY-096)', () => {
+    it('maps to EXIT_PRECONDITION with the pending names and the migrate hint', () => {
+      const mapped = mapErrorToExit(
+        new PendingMigrationsError(['20261105120000_a', '20261105130000_b']),
+      );
+      expect(mapped.code).toBe(EXIT_PRECONDITION);
+      expect(mapped.message).toBe(
+        'database schema is out of date (MIGRATIONS_PENDING): the database has 2 pending ' +
+          'migration(s): 20261105120000_a, 20261105130000_b; back up the database and run ' +
+          '`hivectl migrate up`',
+      );
+    });
+  });
+
   describe('CliError', () => {
     it('HIVE_NOT_INITIALIZED → EXIT_PRECONDITION', () => {
       expect(mapErrorToExit(new CliError('HIVE_NOT_INITIALIZED')).code).toBe(EXIT_PRECONDITION);

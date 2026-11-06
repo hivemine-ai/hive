@@ -37,6 +37,27 @@ export const migrateSchema: TableSchema<{
   },
 ];
 
+export const migrateStatusSchema: TableSchema<{
+  action: string;
+  applied: { name: string; status: string }[];
+  pending?: string[];
+  unknown?: string[];
+}> = [
+  { header: 'action', accessor: (r) => r.action },
+  { header: 'applied', accessor: (r) => `${String(r.applied.length)} migrations` },
+  {
+    header: 'pending',
+    // Migration names are the fix the operator acts on: never truncate them.
+    maxWidth: Number.MAX_SAFE_INTEGER,
+    accessor: (r) => (r.pending?.length ? r.pending.join(', ') : 'none'),
+  },
+  {
+    header: 'unknown',
+    maxWidth: Number.MAX_SAFE_INTEGER,
+    accessor: (r) => (r.unknown?.length ? r.unknown.join(', ') : 'none'),
+  },
+];
+
 export const listKeepersSchema: TableSchema<{
   id: string;
   email: string;

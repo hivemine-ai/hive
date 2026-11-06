@@ -66,6 +66,7 @@ import type { CellsRepo } from '#domain/cells/index.js';
 import { parseIntEnv } from '#observability/env.js';
 import type { Logger } from '#observability/logger.js';
 import { createDb, resolveDbConfigFromEnv } from '#persistence/db.js';
+import { assertSchemaUpToDate } from '#persistence/migrate.js';
 import type { Database } from '#persistence/schema.js';
 
 import { createCellsHookAdapter } from './cells-hook-adapter.js';
@@ -363,6 +364,14 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     throw new Error(
       `No signing keypairs found in ${cfg.keysDir}. Run 'hivectl init' first to bootstrap the Hive.`,
     );
+  }
+  // INC-2026-010: refuse a schema older or newer than this binary. Read-only check; the
+  // operator backs up and runs `hivectl migrate up` (serve never migrates implicitly).
+  try {
+    await assertSchemaUpToDate(db);
+  } catch (err) {
+    await db.destroy();
+    throw err;
   }
   // ADR-026: revocation rows outlive their token by the holder-proof window.
   const enrollmentConfig = resolveEnrollmentConfigFromEnv(process.env);
@@ -854,6 +863,14 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     throw new Error(
       `No signing keypairs found in ${config.keysDir}. Run 'hivectl init' to bootstrap the Hive.`,
     );
+  }
+  // PRY-096: admin commands refuse an out-of-date schema like `serve` does, instead of
+  // failing later with an internal error. `init` and `migrate` bypass startCli.
+  try {
+    await assertSchemaUpToDate(db);
+  } catch (err) {
+    await db.destroy();
+    throw err;
   }
   // Pick any key as the active signing key for newly issued credentials. In
   // Slice 0 there is exactly one key (no rotation yet). When key rotation

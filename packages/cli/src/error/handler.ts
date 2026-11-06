@@ -2,7 +2,13 @@
 // hivectl is `caller trusted` per [[Auth + Identity]] — the human-readable
 // message includes the semantic `code` AND the `subCode` when available.
 
-import { isAuditError, isAuthError, isCellError } from '@hive/server';
+import {
+  isAuditError,
+  isAuthError,
+  isCellError,
+  isPendingMigrationsError,
+  isUnknownMigrationsError,
+} from '@hive/server';
 
 import { isCliError } from './cli-error.js';
 import type { CliError } from './cli-error.js';
@@ -26,6 +32,18 @@ export function mapErrorToExit(err: unknown): MappedExit {
   if (isAuthError(err)) return mapAuthError(err);
   if (isCellError(err)) return mapCellError(err);
   if (isAuditError(err)) return mapAuditError(err);
+  if (isPendingMigrationsError(err)) {
+    return {
+      code: EXIT_PRECONDITION,
+      message: `database schema is out of date (MIGRATIONS_PENDING): ${err.message}`,
+    };
+  }
+  if (isUnknownMigrationsError(err)) {
+    return {
+      code: EXIT_PRECONDITION,
+      message: `database schema is newer than this hivectl (MIGRATIONS_UNKNOWN): ${err.message}`,
+    };
+  }
   if (err instanceof Error) {
     return { code: EXIT_INTERNAL, message: `internal error: ${err.message}` };
   }
