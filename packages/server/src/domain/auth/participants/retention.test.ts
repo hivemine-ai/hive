@@ -2,10 +2,11 @@
 // with a fake clock. SQLite by default; set HIVE_TEST_PG_URL to run the same suite against
 // Postgres (CI `postgres` job), where the concurrency tests race real transactions.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { v7 as uuidv7 } from 'uuid';
 
 import type { NewAuditEvent } from '#domain/audit/index.js';
+import type { Logger } from '#observability/logger.js';
 import { dateToIso, jsonStringify } from '#persistence/type-mappers.js';
 import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
 import type { CallerContext } from '../caller-context.js';
@@ -391,6 +392,37 @@ describe(`runEnrollmentRetention (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
       expect(jtis).not.toContain(dead);
       expect(jtis).toEqual(expect.arrayContaining([inWindow, manual]));
     });
+  });
+
+  it.each([
+    ['negative', -1],
+    ['NaN', Number.NaN],
+  ])('warns on a %s retention or grace and treats it as disabled', async (_label, value) => {
+    const stale = await insertAgent({ name: 'stale', lastConnectedAt: daysAgo(400) });
+    const expired = await insertAgent({
+      name: 'expired',
+      state: 'retired',
+      lastConnectedAt: daysAgo(900),
+      retiredAt: daysAgo(800),
+    });
+    const warn = vi.fn();
+    retention = build({
+      retentionDays: value,
+      graceDays: value,
+      logger: { warn } as unknown as Pick<Logger, 'warn'>,
+    });
+
+    const result = await retention.runEnrollmentRetention(NOW, SYSTEM, NOBODY_LIVE);
+
+    expect(result).toMatchObject({ retiredAgentIds: [], revokedAgentIds: [] });
+    expect((await agentRow(stale)).state).toBe('active');
+    expect((await agentRow(expired)).state).toBe('retired');
+    for (const name of ['HIVE_ENROLLMENT_RETENTION_DAYS', 'HIVE_ENROLLMENT_GRACE_DAYS']) {
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'auth_enrollment_retention_config_invalid', name }),
+        expect.any(String),
+      );
+    }
   });
 
   it('refuses an authenticated caller that is not an admin', async () => {

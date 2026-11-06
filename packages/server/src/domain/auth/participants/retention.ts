@@ -13,6 +13,7 @@
 import type { ExpressionBuilder, Kysely } from 'kysely';
 
 import type { AuditRecorder } from '#domain/audit/index.js';
+import type { Logger } from '#observability/logger.js';
 import type { Database } from '#persistence/schema.js';
 import { dateToIso } from '#persistence/type-mappers.js';
 import { requireAdminCaller } from '../caller-context.js';
@@ -54,6 +55,8 @@ export interface EnrollmentRetentionDeps {
   cellsHook?: CellsRepoHook;
   stateSignal?: ParticipantStateSignal;
   auditRecorder?: Pick<AuditRecorder, 'recordEvent'>;
+  // Warns about a negative or non-numeric retention or grace, treated as disabled.
+  logger?: Pick<Logger, 'warn'>;
 }
 
 export interface EnrollmentRetentionResult {
@@ -73,10 +76,12 @@ export interface EnrollmentRetention {
 export function createEnrollmentRetention(deps: EnrollmentRetentionDeps): EnrollmentRetention {
   const { db } = deps;
   const cellsHook = deps.cellsHook ?? noopCellsHook;
+  const retentionDays = enabledDays('HIVE_ENROLLMENT_RETENTION_DAYS', deps.retentionDays, deps);
+  const graceDays = enabledDays('HIVE_ENROLLMENT_GRACE_DAYS', deps.graceDays, deps);
 
   async function retire(now: Date, isHolderLive: (agentId: UUIDv7) => boolean): Promise<UUIDv7[]> {
-    if (deps.retentionDays <= 0) return [];
-    const threshold = dateToIso(new Date(now.getTime() - deps.retentionDays * DAY_MS));
+    if (retentionDays === 0) return [];
+    const threshold = dateToIso(new Date(now.getTime() - retentionDays * DAY_MS));
     const candidates = await db
       .selectFrom('agents')
       .select('id')
@@ -109,7 +114,7 @@ export function createEnrollmentRetention(deps: EnrollmentRetentionDeps): Enroll
         reasonCode: null,
         detail: {
           lastConnectedAt: toIso(row.last_connected_at),
-          retentionDays: deps.retentionDays,
+          retentionDays,
         },
         requestId: null,
         hiveId: row.hive_id,
@@ -120,8 +125,8 @@ export function createEnrollmentRetention(deps: EnrollmentRetentionDeps): Enroll
   }
 
   async function endGrace(now: Date): Promise<UUIDv7[]> {
-    if (deps.graceDays <= 0) return [];
-    const cutoff = dateToIso(new Date(now.getTime() - deps.graceDays * DAY_MS));
+    if (graceDays === 0) return [];
+    const cutoff = dateToIso(new Date(now.getTime() - graceDays * DAY_MS));
     const expired = await db
       .selectFrom('agents')
       .select(['id', 'retired_at'])
@@ -155,7 +160,7 @@ export function createEnrollmentRetention(deps: EnrollmentRetentionDeps): Enroll
         subjectId: id,
         subjectKind: 'participant',
         reasonCode: 'enrollment_grace_expired',
-        detail: { retiredAt: toIso(retiredAt), graceDays: deps.graceDays },
+        detail: { retiredAt: toIso(retiredAt), graceDays },
         requestId: null,
         hiveId: row.hive_id,
         occurredAt: now,
@@ -182,6 +187,21 @@ export function createEnrollmentRetention(deps: EnrollmentRetentionDeps): Enroll
       return { retiredAgentIds, revokedAgentIds, purgedTokenRows };
     },
   };
+}
+
+// A positive day count, or 0 (disabled). The env resolver already rejects negatives and
+// non-integers at boot; a programmatic caller that passes one gets a warning instead.
+function enabledDays(
+  name: string,
+  value: number,
+  deps: Pick<EnrollmentRetentionDeps, 'logger'>,
+): number {
+  if (value >= 0 && Number.isFinite(value)) return value;
+  deps.logger?.warn(
+    { event: 'auth_enrollment_retention_config_invalid', name, value: String(value) },
+    `${name} is negative or not a number; the pass is disabled`,
+  );
+  return 0;
 }
 
 // `last_connected_at` older than the threshold, or never connected and created before it.

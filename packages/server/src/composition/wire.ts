@@ -522,6 +522,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     cellsHook: createCellsHookAdapter(cellsRepo),
     stateSignal: participantStateSignal,
     auditRecorder,
+    logger,
   });
   const enrollmentRetentionJob = createEnrollmentRetentionJob({
     run: (now) =>
