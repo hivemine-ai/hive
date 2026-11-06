@@ -119,9 +119,15 @@ export interface ParticipantsWriteRepo {
   createHivekeeper(input: CreateHivekeeperInput, caller: CallerContext): Promise<Hivekeeper>;
   createAgent(input: CreateAgentInput, caller: CallerContext): Promise<Agent>;
   revokeAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
-  /** `active` to `suspended`. Any other starting state is a no-op. Agents only. */
+  /**
+   * `active` to `suspended`. A `retired` Agent throws INVALID_STATE_TRANSITION
+   * (`agent_retired_cannot_suspend`); any other starting state is a no-op. Agents only.
+   */
   suspendAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
-  /** `suspended` to `active`. Any other starting state is a no-op. */
+  /**
+   * `suspended` to `active`. A `retired` Agent throws INVALID_STATE_TRANSITION
+   * (`agent_retired_cannot_resume`): only a revival reactivates it. Otherwise a no-op.
+   */
   resumeAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
   /**
    * Promote or demote an Agent. ADR-026: making an enrollment Worker a Scout turns it into
@@ -175,7 +181,22 @@ export function createParticipantsWriteRepo(
       .where('state', '=', from)
       .returning('id')
       .executeTakeFirst();
-    if (moved) opts.stateSignal?.emit({ participantId: id, newState: to });
+    if (moved) {
+      opts.stateSignal?.emit({ participantId: id, newState: to });
+      return;
+    }
+    // ADR-026: a retired Agent is only revived or revoked; other states stay a no-op.
+    const row = await db
+      .selectFrom('agents')
+      .select('state')
+      .where('id', '=', id)
+      .executeTakeFirst();
+    if (row?.state === 'retired') {
+      throw new AuthError('INVALID_STATE_TRANSITION', {
+        subCode:
+          to === 'suspended' ? 'agent_retired_cannot_suspend' : 'agent_retired_cannot_resume',
+      });
+    }
   }
 
   return {
@@ -356,7 +377,7 @@ export function createParticipantsWriteRepo(
         const now = clock();
         await tx
           .updateTable('agents')
-          .set({ state: 'revoked', revoked_at: dateToIso(now) })
+          .set({ state: 'revoked', revoked_at: dateToIso(now), retired_at: null })
           .where('id', '=', id)
           .execute();
 

@@ -291,6 +291,76 @@ describe('participants write repository', () => {
       expect(changes).toEqual([{ participantId: world.workerAgentId, newState: 'revoked' }]);
     });
 
+    // PRY-094 (ADR-026): a retired Agent is only revived or revoked.
+    describe('a retired Agent', () => {
+      const retire = async (): Promise<void> => {
+        await world.db
+          .updateTable('agents')
+          .set({ state: 'retired', retired_at: new Date().toISOString() })
+          .where('id', '=', world.workerAgentId)
+          .execute();
+      };
+      const expectTransitionError = async (
+        promise: Promise<unknown>,
+        subCode: string,
+      ): Promise<void> => {
+        const err = await promise.then(
+          () => expect.fail('expected INVALID_STATE_TRANSITION'),
+          (e: unknown) => e,
+        );
+        expect(isAuthError(err)).toBe(true);
+        expect([(err as AuthError).code, (err as AuthError).subCode]).toEqual([
+          'INVALID_STATE_TRANSITION',
+          subCode,
+        ]);
+      };
+
+      it('cannot be suspended: agent_retired_cannot_suspend, state and signal untouched', async () => {
+        const { repo, changes } = build();
+        await retire();
+        await expectTransitionError(
+          repo.suspendAgent(world.workerAgentId, SYSTEM_CALLER),
+          'agent_retired_cannot_suspend',
+        );
+        expect(await stateOf(world.workerAgentId)).toBe('retired');
+        expect(changes).toEqual([]);
+      });
+
+      it('cannot be resumed: agent_retired_cannot_resume', async () => {
+        const { repo, changes } = build();
+        await retire();
+        await expectTransitionError(
+          repo.resumeAgent(world.workerAgentId, SYSTEM_CALLER),
+          'agent_retired_cannot_resume',
+        );
+        expect(await stateOf(world.workerAgentId)).toBe('retired');
+        expect(changes).toEqual([]);
+      });
+
+      it('can be revoked: retired_at is cleared, the Cell closes and the signal fires', async () => {
+        const hook = makeSpyHook();
+        const signal = createParticipantStateSignal();
+        const changes: ParticipantStateChange[] = [];
+        signal.onParticipantStateChanged((change) => changes.push(change));
+        const repo = createParticipantsWriteRepo(world.db, {
+          cellsHook: hook,
+          stateSignal: signal,
+        });
+        await retire();
+
+        await repo.revokeAgent(world.workerAgentId, SYSTEM_CALLER);
+
+        const row = await world.db
+          .selectFrom('agents')
+          .select(['state', 'retired_at'])
+          .where('id', '=', world.workerAgentId)
+          .executeTakeFirstOrThrow();
+        expect(row).toEqual({ state: 'revoked', retired_at: null });
+        expect(hook.closeCalls).toEqual([{ ownerId: world.workerAgentId }]);
+        expect(changes).toEqual([{ participantId: world.workerAgentId, newState: 'revoked' }]);
+      });
+    });
+
     it('suspendAgent and resumeAgent require an admin caller', async () => {
       const { repo } = build();
       const caller = { kind: 'identity', identity: { kind: 'worker' } } as unknown as CallerContext;
