@@ -112,7 +112,7 @@ function fixHookCommands(text: string, hivectl: HivectlCommand): HooksManifest {
     for (const matcher of matchers) {
       for (const hook of matcher.hooks ?? []) {
         if (typeof hook.command === 'string') {
-          hook.command = hook.command.replace(HOOK_COMMAND, prefix);
+          hook.command = hook.command.replace(HOOK_COMMAND, () => prefix);
         }
       }
     }

@@ -227,6 +227,23 @@ describe('hivectl claude install', () => {
     );
   });
 
+  it("keeps $& and $' in the hivectl path literal in the hook commands", async () => {
+    await runClaudeInstall(
+      { server: SERVER, enrollmentCredential: credentialFile(), project: undefined },
+      { ...deps(), hivectl: { command: "/opt/a$&b/c$'d/hivectl", args: [] } },
+    );
+    const hooks = readFileSync(
+      join(config, 'marketplace', 'plugins', 'hive-wake', 'hooks', 'hooks.json'),
+      'utf8',
+    );
+    const commands = (
+      JSON.parse(hooks) as { hooks: Record<string, { hooks: { command: string }[] }[]> }
+    ).hooks;
+    expect(commands['SessionStart']?.[0]?.hooks[0]?.command).toBe(
+      `'/opt/a$&b/c$'\\''d/hivectl' claude hook session-start`,
+    );
+  });
+
   it('is idempotent: refreshes the credential, tolerates "already installed" and never duplicates the .gitignore line', async () => {
     await runClaudeInstall(
       { server: SERVER, enrollmentCredential: credentialFile(), project: undefined },
