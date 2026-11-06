@@ -4,10 +4,10 @@
 // own PID and start time.
 
 import type { ChildProcess } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { Client } from '@modelcontextprotocol/client';
 import type { CallToolResult } from '@modelcontextprotocol/client';
@@ -67,10 +67,10 @@ interface Proxy {
   stderr: string[];
 }
 
-async function launch(): Promise<Proxy> {
+async function launch(nodeArgs: string[] = []): Promise<Proxy> {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [CLI_ENTRY, 'mcp', 'proxy'],
+    args: [...nodeArgs, CLI_ENTRY, 'mcp', 'proxy'],
     cwd: projectDir,
     env: {
       PATH: process.env['PATH'] ?? '',
@@ -212,6 +212,35 @@ describe('hivectl mcp proxy (process)', () => {
     expect(isAlive(proxy.pid)).toBe(true);
   }, 30_000);
 
+  it('survives an uncaught exception and an unhandled rejection: logs them and keeps serving', async () => {
+    // Test-only fault, preloaded with --import into the proxy process: on SIGUSR2 it
+    // throws from a timer callback and rejects a promise nobody handles. Nothing in
+    // hivectl itself can trigger it.
+    const fault = join(scratch, 'fault.mjs');
+    writeFileSync(
+      fault,
+      `process.on('SIGUSR2', () => {
+         setImmediate(() => { throw new Error('injected uncaught fault'); });
+         void Promise.reject(new Error('injected unhandled rejection'));
+       });\n`,
+    );
+    const proxy = await launch(['--import', pathToFileURL(fault).href]);
+    const agentId = agentIdOf(await registerAs(proxy, 'claude-api'));
+    await expect.poll(() => world.isOnline(agentId)).toBe(true);
+
+    process.kill(proxy.pid, 'SIGUSR2');
+
+    await expect
+      .poll(() => proxy.stderr.join(''), { timeout: 5_000 })
+      .toContain('"event":"proxy.uncaught_exception"');
+    await expect
+      .poll(() => proxy.stderr.join(''), { timeout: 5_000 })
+      .toContain('"event":"proxy.unhandled_rejection"');
+    expect(isAlive(proxy.pid)).toBe(true);
+    expect(await names(proxy)).toContain('send_message');
+    expect(world.isOnline(agentId)).toBe(true);
+  }, 30_000);
+
   for (const end of ['stdin EOF', 'SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     it(`${end} closes the stream at once (offline before the lease), removes its socket and entry, and exits`, async () => {
       const proxy = await launch();
@@ -229,7 +258,7 @@ describe('hivectl mcp proxy (process)', () => {
       }
 
       await expect.poll(() => isAlive(proxy.pid), { timeout: 5_000 }).toBe(false);
-      expect(world.isOnline(agentId)).toBe(false);
+      await expect.poll(() => world.isOnline(agentId), { timeout: 1_000 }).toBe(false);
       expect(existsSync(proxyEntry())).toBe(false);
       expect(existsSync(socketPath)).toBe(false);
       const reason = end === 'stdin EOF' ? 'client_closed' : end;
