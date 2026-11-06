@@ -2,7 +2,7 @@
 
 A local MCP server, one process per Claude Code session, that registers the session in Hive as a named Worker agent and forwards its tools. Claude Code launches it over stdio through the `hive-wake` plugin; you do not run it by hand. The server side of the contract (`register_session`, the `enroll` scope, renewal) is in [Clients via `hivectl mcp proxy`](./mcp-server.md#clients-via-hivectl-mcp-proxy).
 
-> **Status (v0.3.0 line, in progress).** The plugin hooks that write the PID map, the waker mod that reads the local channel (`hivectl watch --attach-session`) and `watch` in harness mode come next in the same release line; until then a session registers through the `register_session` tool.
+The three ways to connect sessions (interactive, a `watch` harness, a generated `--mcp-config`) are walked through in [Connecting Claude Code sessions](./claude-code-sessions.md).
 
 ## Quick start
 
@@ -37,7 +37,7 @@ stdout of the proxy carries only the MCP protocol. Diagnostics go to stderr as J
 | Tool               | What it does                                                                                                                                                                                                                                      |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `register_session` | `name`, `description` (one line, at most 280 characters), optional `capabilities`. Registers the session in Hive. Again with the same name it updates the description; with another name it leaves the previous one (which goes `offline`) first. |
-| `session_status`   | Local and read-only, never calls Hive: `registered`, `name`, `agent_ref`, `hive`, `project`, `mode` and `last_error`. Never the token.                                                                                                            |
+| `session_status`   | Local and read-only, never calls Hive: `registered`, `name`, `agent_ref`, `hive`, `project`, `mode`, `proxy_handle` and `last_error`. Never the token.                                                                                            |
 
 The answer carries no cache, so Claude Code does not keep the short list. After a successful registration the proxy sends `notifications/tools/list_changed`, and `tools/list` returns Hive's catalog as the server publishes it (without the server's own `register_session`) plus the two local tools. In Claude Code they show as `mcp__plugin_hive-wake_hive__<tool>`, deferred behind ToolSearch.
 
@@ -49,7 +49,7 @@ The answer carries no cache, so Claude Code does not keep the short list. After 
 
 **Restart without claiming.** The last token of each name is kept in `~/.config/hive/state/tokens/<project-key>/<name>.json`, under an exclusive lock that the operating system holds for as long as the process lives (and drops when it dies, even with `kill -9`). A restarted proxy takes the lock and renews with that token instead of claiming the name again. A second session of the same folder that asks for a name another live session holds does not get the lock and receives `name_in_use`.
 
-**Resumed sessions.** On start, and on every `tools/list` while unregistered, the proxy reads the entry its parent `claude` process left in `~/.config/hive/state/pid-map/` (written by the plugin's SessionStart hook). If the start time of the process matches and the entry carries a name, the proxy registers by itself, before the first turn. It publishes its own entry in `~/.config/hive/state/proxies/<claudePid>.json`.
+**Resumed sessions.** On start, and on every `tools/list` while unregistered, the proxy reads the entry its parent `claude` process left in `~/.config/hive/state/pid-map/` (written by the plugin's SessionStart hook, `hivectl claude hook session-start`, and named by its PostToolUse hook after a registration). If the start time of the process matches and the entry carries a name, the proxy registers by itself, before the first turn. It publishes its own entry in `~/.config/hive/state/proxies/<claudePid>.json`.
 
 **Local channel for the waker.** In an interactive session the proxy listens on a user socket (`0600`, published in its `proxies/` entry) with a JSON-lines protocol. The first line of a connection is the request: `{"op":"listen"}` receives one metadata line per stream event (`eventId`, `senders`, `count`, never a body), one listener at a time; `{"op":"once"}` answers one line if something is unread, or nothing, and closes. The waker reads the session's single stream this way instead of opening its own.
 

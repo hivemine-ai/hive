@@ -86,9 +86,31 @@ hivectl watch --server https://hive.example.com/mcp \
 - **Do not run a reactive worker with `bypassPermissions` or an equivalent mode.** The wrapper refuses a bypass setting. List the tools the worker may use.
 - Each event pays for a cold `claude -p --resume` call, and a message that is not marked with `mark_read` wakes the worker again on every reconnection. The stream stays open between events, so the worker remains `online` while `claude -p` is not running.
 
-## For Claude Code sessions
+## Session modes (Claude Code, ADR-026)
 
-Interactive Claude Code sessions use the `hive-wake` plugin, which runs `watch` for you and starts a turn on each event. See [`packages/claude-plugin/README.md`](../packages/claude-plugin/README.md).
+Besides the classic mode above (the credential of one existing participant), `watch` has two modes for Claude Code sessions of a folder installed with [`hivectl claude install`](./hivectl-mcp-proxy.md). Both keep the event line, `--once`, the silence detector and the lease described above. The full walkthrough is in [Connecting Claude Code sessions](./claude-code-sessions.md).
+
+### Harness: `--session-name`
+
+```bash
+hivectl watch --session-name <name> --session-description <text> --exec <program> [-- <args...>] \
+  [--state-file <path>] [--credential-file <enrollment-file> --server <url>] [--inline-mcp-config]
+```
+
+- Registers **one** named session with the folder's enrollment credential (or `--credential-file`, which must hold an enrollment credential; `--server` defaults to the folder's URL), then holds the stream of its mailbox with the lease and runs `--exec` once per event, exactly as in classic mode.
+- Writes the harness state file (`~/.config/hive/state/harness/<id>.json`, or `--state-file`; `0600` in a `0700` folder, atomic) **before** the first child, rewrites it on every renewal (at half the token life), and deletes it on exit. Each child gets `HIVE_HARNESS_SESSION=<path>`; the child's proxy reads the token from that file. A child that still holds the previous copy keeps working until its expiry and re-reads the file on a rejection.
+- **Child environment:** every `HIVE_WATCH_*` variable, every inherited `HIVE_HARNESS_SESSION` / `HIVE_MCP_CONFIG_FILE`, and every variable whose **value** contains the enrollment credential or a Worker token are removed, whatever their names. Keys unrelated to Hive (for example the worker's own API key) stay.
+- **Restart:** the last token of the name is kept under an exclusive lock; a restarted `watch` renews it instead of claiming the name. A second `watch` with the same name in the same folder exits with `WATCH_SESSION_NAME_IN_USE`.
+- `--inline-mcp-config` also writes `<state>.mcp.json` (`0600`), an MCP config that declares the proxy (`<hivectl> mcp proxy` with `HIVE_HARNESS_SESSION` in its `env`), and sets `HIVE_MCP_CONFIG_FILE=<path>` for every child, for `claude -p --mcp-config "$HIVE_MCP_CONFIG_FILE" --strict-mcp-config` without the plugin.
+- Local validation: `--session-name` needs `--session-description` (one line, at most 280 characters, no control characters) and `--exec`, and excludes `--once` and `--attach-session`. Violations exit with `WATCH_INVALID_OPTION`.
+
+### Waker: `--attach-session`
+
+```bash
+hivectl watch --attach-session <session_id> [--once]
+```
+
+Launched by the `hive-wake` mod of an interactive session; you do not run it by hand. It holds no credential and opens no stream: it finds the session's proxy (session id → `state/pid-map/` → `state/proxies/<claudePid>.json` → its socket, both checked against the start time of the `claude` process) and prints the event lines of the proxy's single stream. It waits while the session is not registered, follows the proxy when it is replaced (`/mcp` → Reconnect), and `--once` asks the proxy for one line. An unknown session id exits with `WATCH_ATTACH_TARGET_NOT_FOUND` after 30 seconds.
 
 ## Error codes
 
@@ -105,6 +127,10 @@ Printed on stderr as `error: <CODE>: <detail>`; the code leads the message so su
 | `WATCH_PROTOCOL_UNSUPPORTED`      | 4    | The server does not serve MCP revision `2026-07-28`. `watch` never falls back to `initialize`.    |
 | `WATCH_EXEC_FAILED`               | 2    | A `--exec` event failed and exhausted its retries.                                                |
 | `WATCH_ONCE_FAILED`               | 2    | `--once` failed for any reason other than a rejected credential.                                  |
+| `WATCH_SESSION_NAME_IN_USE`       | 4    | Harness: another live session holds the name (wait for its lease or `hivectl agent release`).     |
+| `WATCH_SESSION_REGISTER_REJECTED` | 4    | Harness: Hive rejected the registration (name taken, agent suspended, quota, invalid name).       |
+| `WATCH_STATE_FILE_INSECURE`       | 4    | Harness: the state file or the folder's enrollment is not `0600` in a `0700` folder.              |
+| `WATCH_ATTACH_TARGET_NOT_FOUND`   | 1    | `--attach-session`: no session with that id appeared within 30 seconds.                           |
 
 SIGINT and SIGTERM exit with 130.
 
@@ -119,6 +145,11 @@ SIGINT and SIGTERM exit with 130.
 | `HIVE_WATCH_AUTH_RETRY_MAX_SECONDS`                        | `300`                             | How long a continuous credential rejection is retried. `0` exits at once.             |
 | `HIVE_WATCH_EXEC_MAX_RETRIES`                              | `3`                               | Extra attempts for a failing `--exec` event.                                          |
 | `HIVE_WATCH_EXEC_STOP_TIMEOUT_SECONDS`                     | `30`                              | How long to wait for a running child when stopping.                                   |
+| `--session-name`, `--session-description`                  | none                              | Harness mode (see above).                                                             |
+| `--state-file`                                             | `state/harness/<id>.json`         | Harness state file of the children.                                                   |
+| `--inline-mcp-config`                                      | off                               | Harness: also write an MCP config and set `HIVE_MCP_CONFIG_FILE` for the children.    |
+| `--attach-session`                                         | none                              | Waker mode of an interactive session (see above).                                     |
+| `HIVE_CONFIG_DIR`                                          | `~/.config/hive`                  | Session modes: root of the local user state.                                          |
 
 The default credential location is `~/Library/Application Support/hivectl/credential` on macOS, `$XDG_CONFIG_HOME/hivectl/credential` (or `~/.config/hivectl/credential`) on Linux and `%APPDATA%\hivectl\credential` on Windows. The credential is never logged; diagnostics scrub it.
 
@@ -126,3 +157,4 @@ The default credential location is `~/Library/Application Support/hivectl/creden
 
 - [`hivectl.md`](./hivectl.md) — the operator CLI; `credential issue` creates the credential `watch` uses.
 - [`mcp-server.md`](./mcp-server.md) — the MCP endpoint `watch` connects to.
+- [Connecting Claude Code sessions](./claude-code-sessions.md) — the interactive, harness and `--mcp-config` routes.

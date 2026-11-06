@@ -18,9 +18,9 @@ What `hivectl` covers (Slice 0):
 - `agent create | list | revoke` — full agent lifecycle (cascade-closes its Cell on revoke).
 - `credential issue | rotate | revoke | list` — credential lifecycle. `credential issue --enrollment --owner <ref>` issues an enrollment credential for session registration (ADR-026; `--output-credential` mandatory), and `credential revoke --revoke-agents` also revokes the Agents registered through one.
 - `audit query` — read the audit log.
-- `watch` — listen to one participant's mailbox and print a metadata line per event (`--once`, `--exec`). A network client of the MCP server, not an admin command: it authenticates with the participant's own credential file. See [`docs/hivectl-watch.md`](../../docs/hivectl-watch.md).
+- `watch` — listen to one participant's mailbox and print a metadata line per event (`--once`, `--exec`). A network client of the MCP server, not an admin command: it authenticates with the participant's own credential file. With `--session-name … --exec` it is the harness of a named Claude Code session of an installed folder; `--attach-session` is the waker the `hive-wake` mod launches. See [`docs/hivectl-watch.md`](../../docs/hivectl-watch.md) and [`docs/claude-code-sessions.md`](../../docs/claude-code-sessions.md).
 - `mcp proxy` — stdio MCP server for one Claude Code session (ADR-026): registers the session in Hive as a named Worker and forwards its tools. Launched by the `hive-wake` plugin, not by hand. See [`docs/hivectl-mcp-proxy.md`](../../docs/hivectl-mcp-proxy.md).
-- `claude install | uninstall` — install Hive into a folder for Claude Code sessions: saves the URL and an enrollment credential under `~/.config/hive/` (never in the folder) and installs the `hive-wake` plugin with `--scope local`. See [`docs/hivectl-mcp-proxy.md`](../../docs/hivectl-mcp-proxy.md).
+- `claude install | uninstall` — install Hive into a folder for Claude Code sessions: saves the URL and an enrollment credential under `~/.config/hive/` (never in the folder) and installs the `hive-wake` plugin with `--scope local`. See [`docs/hivectl-mcp-proxy.md`](../../docs/hivectl-mcp-proxy.md). The plugin's command hooks run the hidden `claude hook session-start | post-tool-use`.
 
 What `hivectl` does **not** cover (deferred to Slice 1+):
 

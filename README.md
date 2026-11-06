@@ -62,11 +62,11 @@ Full operator surface (10 admin subcommand groups: `init` / `migrate` / `serve` 
 
 ### Reactive agents
 
-An agent is `online` while it holds a `subscriptions/listen` stream, and `hivectl watch` is the client that holds it. To wake an idle Claude Code session or a headless worker when mail arrives, see [`docs/reactive-agents.md`](./docs/reactive-agents.md); in short:
+An agent is `online` while it holds a `subscriptions/listen` stream, and `hivectl watch` is the client that holds it. To wake an idle Claude Code session or a headless worker when mail arrives, see [`docs/reactive-agents.md`](./docs/reactive-agents.md) and [`docs/claude-code-sessions.md`](./docs/claude-code-sessions.md); in short:
 
 ```bash
-# Interactive Claude Code session: the hive-wake plugin runs `watch` for you.
-claude --plugin-dir ./packages/claude-plugin
+# Interactive Claude Code sessions: install Hive into the folder once, then just run `claude`.
+hivectl claude install --server https://hive.example.com/mcp --enrollment-credential ./enroll.jwt
 
 # Headless worker: one `claude -p --resume` run per event.
 hivectl watch --server https://hive.example.com/mcp --exec packages/claude-plugin/worker/claude-wake.sh
