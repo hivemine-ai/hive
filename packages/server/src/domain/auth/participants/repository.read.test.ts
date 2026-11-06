@@ -225,6 +225,31 @@ describe('participants read repository', () => {
       expect(result.nextCursor).toBeNull();
     });
 
+    it('filters by a set of states (ADR-026: list_agents hides retired by default)', async () => {
+      const readRepo = createParticipantsReadRepo(world.db);
+      await world.db
+        .updateTable('agents')
+        .set({ state: 'retired', retired_at: new Date().toISOString() })
+        .where('id', '=', world.workerAgentId)
+        .execute();
+
+      const visible = await readRepo.listAgents({
+        hiveId: world.hiveId,
+        states: ['active', 'suspended'],
+        pagination: { cursor: null, limit: 100 },
+      });
+      const all = await readRepo.listAgents({
+        hiveId: world.hiveId,
+        states: ['active', 'suspended', 'retired'],
+        pagination: { cursor: null, limit: 100 },
+      });
+
+      expect(visible.agents.map((a) => a.id)).toEqual([world.scoutAgentId]);
+      expect(new Set(all.agents.map((a) => a.id))).toEqual(
+        new Set([world.scoutAgentId, world.workerAgentId]),
+      );
+    });
+
     it('paginates deterministically across multiple pages with >limit rows', async () => {
       const writeRepo = createParticipantsWriteRepo(world.db);
       const readRepo = createParticipantsReadRepo(world.db);

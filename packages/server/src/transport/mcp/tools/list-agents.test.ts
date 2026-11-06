@@ -202,6 +202,15 @@ describe('ListAgentsInputSchema', () => {
     expect(result.pagination?.limit ?? 50).toBe(50);
   });
 
+  it('accepts a boolean include_retired only (ADR-026)', () => {
+    expect(ListAgentsInputSchema.safeParse({ filter: { include_retired: true } }).success).toBe(
+      true,
+    );
+    expect(ListAgentsInputSchema.safeParse({ filter: { include_retired: 'yes' } }).success).toBe(
+      false,
+    );
+  });
+
   it('accepts type worker or scout only', () => {
     expect(() => ListAgentsInputSchema.parse({ filter: { type: 'hivekeeper' } })).toThrow();
   });
@@ -226,6 +235,39 @@ describe('createListAgentsHandler', () => {
       const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
       const result = await invoke(handler, {}, buildCtx());
       expect(result.agents).toHaveLength(2);
+    });
+  });
+
+  // ─── PRY-094: retired Agents only with include_retired ───
+
+  describe('include_retired (ADR-026)', () => {
+    it('asks the repo for active and suspended Agents by default', async () => {
+      const { repo, capturedFilter } = buildStubRepo();
+      const handler = createListAgentsHandler(buildDeps({ participantsRepo: repo }));
+      await invoke(handler, {}, buildCtx());
+      expect(capturedFilter[0]?.states).toEqual(['active', 'suspended']);
+    });
+
+    it('adds retired Agents with include_retired: true, still under canSee', async () => {
+      const retired = buildAgent(AGENT_B_ID, { state: 'retired', retiredAt: new Date() });
+      const { repo, capturedFilter } = buildStubRepo({
+        agents: [buildAgent(AGENT_A_ID), retired],
+        nextCursor: null,
+      });
+      const visibility: VisibilityEngine = {
+        canSend: vi.fn(),
+        canSee: vi.fn(({ targetId }: { targetId: string }) =>
+          Promise.resolve(targetId === AGENT_B_ID),
+        ),
+      };
+      const handler = createListAgentsHandler(
+        buildDeps({ participantsRepo: repo, visibilityEngine: visibility }),
+      );
+
+      const result = await invoke(handler, { filter: { include_retired: true } }, buildCtx());
+
+      expect(capturedFilter[0]?.states).toEqual(['active', 'suspended', 'retired']);
+      expect(result.agents.map((a) => [a.id, a.state])).toEqual([[AGENT_B_ID, 'retired']]);
     });
   });
 

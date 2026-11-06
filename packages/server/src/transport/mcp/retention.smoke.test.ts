@@ -424,6 +424,22 @@ describe(`retired Agents over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
       });
     });
 
+    it('list_agents hides retired Agents unless include_retired is set', async () => {
+      await start();
+      const { jwt } = await issueEnrollment();
+      const retired = await retireOffline(jwt);
+      const owner = await client(world.jwtAdmin);
+      const ids = async (filter: Record<string, unknown>) => {
+        const listed = await owner.callTool({ name: 'list_agents', arguments: { filter } });
+        return (listed.structuredContent as { agents: { id: string; state: string }[] }).agents;
+      };
+
+      expect((await ids({})).map((a) => a.id)).not.toContain(retired.agent_id);
+      expect(await ids({ include_retired: true })).toContainEqual(
+        expect.objectContaining({ id: retired.agent_id, state: 'retired' }),
+      );
+    });
+
     // A claim racing the job: either the claim refreshes the row first and the job loses,
     // or the job retires first and the registration revives. Exactly one of the two.
     it('a registration racing the job always ends active, through exactly one path', async () => {
