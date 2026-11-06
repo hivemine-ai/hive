@@ -95,6 +95,28 @@ function mapCliError(err: CliError): MappedExit {
         code: EXIT_PRECONDITION,
         message: `service not installed${suffix}: ${err.message}`,
       };
+    case 'INVALID_INPUT':
+      return { code: EXIT_USER_ERROR, message: `invalid input${suffix}: ${err.message}` };
+    case 'NOT_AN_ENROLLMENT_CREDENTIAL':
+      return {
+        code: EXIT_USER_ERROR,
+        message: `not an enrollment credential (NOT_AN_ENROLLMENT_CREDENTIAL): ${err.message}`,
+      };
+    case 'SESSION_STATE_INSECURE_PERMS':
+      return {
+        code: EXIT_PRECONDITION,
+        message: `insecure file permissions (SESSION_STATE_INSECURE_PERMS): ${err.message}`,
+      };
+    case 'CLAUDE_CLI_NOT_FOUND':
+      return {
+        code: EXIT_PRECONDITION,
+        message: `claude CLI not found (CLAUDE_CLI_NOT_FOUND): ${err.message}`,
+      };
+    case 'CLAUDE_PLUGIN_COMMAND_FAILED':
+      return {
+        code: EXIT_PRECONDITION,
+        message: `claude plugin command failed (CLAUDE_PLUGIN_COMMAND_FAILED): ${err.message}`,
+      };
     default: {
       const exhaustive: never = err.code;
       return {

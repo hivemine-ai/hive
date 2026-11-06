@@ -12,11 +12,22 @@
 //
 // It never exits because of Hive or the network: failures degrade into the
 // last error of session_status. It ends on stdin EOF or a signal (see the command).
+//
+// Harness mode (HIVE_HARNESS_SESSION set by `hivectl watch` for its children):
+// no registration and no stream (the presence belongs to watch). The token comes
+// from the harness state file; every Hive tool is listed from the first
+// tools/list, and a -32001 re-reads the file and retries once.
 
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
-import { DEFAULT_BACKOFF, abortableSleep, backoffDelay } from '@hive/client';
+import {
+  DEFAULT_BACKOFF,
+  abortableSleep,
+  backoffDelay,
+  buildQueryEvent,
+  parseUnreadSummary,
+} from '@hive/client';
 import type { BackoffOptions, LogEntry, WatchEvent } from '@hive/client';
 import { McpServer, ProtocolError } from '@modelcontextprotocol/server';
 import type { CallToolResult, ServerContext, Tool, Transport } from '@modelcontextprotocol/server';
@@ -40,6 +51,8 @@ import type { StatePaths } from './state-dir.js';
 import { createSessionStream } from './stream.js';
 import { openTokenSlot } from './token-store.js';
 import { Upstream, toSessionFailure } from './upstream.js';
+import { openWakerChannel, wakerSocketPath } from './waker-channel.js';
+import type { WakerChannel } from './waker-channel.js';
 import type { FetchLike, SessionErrorCode, SessionFailure } from './upstream.js';
 
 export interface ProxyTimings {
@@ -83,7 +96,7 @@ export type SessionStatus = {
   agent_ref: string | null;
   hive: string | null;
   project: string;
-  mode: 'interactive';
+  mode: 'interactive' | 'harness';
   last_error: { code: SessionErrorCode; message: string; at: string } | null;
 };
 
@@ -99,6 +112,27 @@ export interface RunningProxy {
 interface EnrollmentRecord {
   serverUrl: string;
   credential: string;
+}
+
+/** `state/harness/<id>.json`, written by `hivectl watch` in harness mode. */
+interface HarnessState {
+  serverUrl: string;
+  agentRef: string;
+  agentId: string;
+  token: string;
+}
+
+function parseHarnessState(raw: unknown): HarnessState | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const fields = ['serverUrl', 'agentRef', 'agentId', 'token'] as const;
+  if (!fields.every((f) => typeof r[f] === 'string' && r[f] !== '')) return undefined;
+  return {
+    serverUrl: r['serverUrl'] as string,
+    agentRef: r['agentRef'] as string,
+    agentId: r['agentId'] as string,
+    token: r['token'] as string,
+  };
 }
 
 const LOCAL_TOOL_NAMES = new Set(['register_session', 'session_status']);
@@ -258,28 +292,74 @@ export function startProxy(config: ProxyConfig): RunningProxy {
     }
   };
 
-  const enrollment = readEnrollment();
-  if (enrollment === undefined && lastError === null) {
+  const harnessPath = config.env['HIVE_HARNESS_SESSION'];
+  const mode: SessionStatus['mode'] =
+    harnessPath !== undefined && harnessPath !== '' ? 'harness' : 'interactive';
+
+  let harness: HarnessState | undefined;
+  /**
+   * Re-reads the harness state file; true when it now holds another token. A
+   * failed read keeps the previous state: its token may still be valid.
+   */
+  const reloadHarness = (): boolean => {
+    const before = harness?.token;
+    let read: HarnessState | undefined;
+    try {
+      read = parseHarnessState(readPrivateJson(harnessPath ?? ''));
+    } catch (err) {
+      setError(toStateFailure(err));
+    }
+    if (read === undefined) {
+      setError({
+        code: 'harness_state_unavailable',
+        message: `cannot read the harness state file ${harnessPath ?? ''}`,
+      });
+      return false;
+    }
+    harness = read;
+    diag.secret(read.token);
+    if (lastError?.code === 'harness_state_unavailable') lastError = null;
+    return read.token !== before;
+  };
+
+  const enrollment = mode === 'interactive' ? readEnrollment() : undefined;
+  if (mode === 'harness') {
+    reloadHarness();
+  } else if (enrollment === undefined && lastError === null) {
     setError({
       code: 'not_installed',
       message: `no Hive enrollment for ${projectDir}; run \`hivectl claude install\` in this folder`,
     });
   }
 
-  const upstream = enrollment
-    ? new Upstream({
-        url: enrollment.serverUrl,
+  const serverUrlNow = (): string | undefined =>
+    mode === 'harness' ? harness?.serverUrl : enrollment?.serverUrl;
+  // Created once the server URL is known; a harness file may only appear later.
+  let upstreamClient: Upstream | undefined;
+  const getUpstream = (): Upstream | undefined => {
+    const url = serverUrlNow();
+    if (upstreamClient === undefined && url !== undefined) {
+      upstreamClient = new Upstream({
+        url,
         clientVersion: HIVE_VERSION,
         probeTimeoutMs: timings.probeTimeoutMs,
         ...(config.fetch && { fetch: config.fetch }),
-      })
-    : undefined;
+      });
+    }
+    return upstreamClient;
+  };
+  const serverUrl = serverUrlNow();
 
   // ── upstream discovery (single flight) ──
   let discovering: Promise<SessionFailure | undefined> | undefined;
   const ensureDiscovered = (bearer: string): Promise<SessionFailure | undefined> => {
+    const upstream = getUpstream();
     if (upstream === undefined) {
-      return Promise.resolve({ code: 'not_installed', message: 'no Hive enrollment' });
+      return Promise.resolve(
+        mode === 'harness'
+          ? { code: 'harness_state_unavailable', message: 'no harness state' }
+          : { code: 'not_installed', message: 'no Hive enrollment' },
+      );
     }
     if (upstream.isDiscovered) return Promise.resolve(undefined);
     discovering ??= upstream
@@ -319,6 +399,7 @@ export function startProxy(config: ProxyConfig): RunningProxy {
     callRegister: async (bearer, args) => {
       const missing = await ensureDiscovered(readEnrollment()?.credential ?? bearer);
       if (missing !== undefined) return { ok: false, ...missing };
+      const upstream = getUpstream();
       if (upstream === undefined)
         return { ok: false, code: 'not_installed', message: 'no Hive enrollment' };
       return upstream.registerSession(bearer, args);
@@ -331,7 +412,7 @@ export function startProxy(config: ProxyConfig): RunningProxy {
   });
 
   const stream = createSessionStream({
-    url: enrollment?.serverUrl ?? 'http://invalid',
+    url: serverUrl ?? 'http://invalid',
     clientVersion: HIVE_VERSION,
     probeTimeoutMs: timings.probeTimeoutMs,
     silenceTimeoutMs: timings.silenceTimeoutMs,
@@ -357,8 +438,10 @@ export function startProxy(config: ProxyConfig): RunningProxy {
     },
   });
 
-  const claudeStartTime = startTimeOf(config.claudePid);
+  const claudeStartTime = mode === 'interactive' ? startTimeOf(config.claudePid) : undefined;
   const proxyHandle = randomBytes(16).toString('hex');
+  const socketPath = wakerSocketPath(paths.root, proxyHandle, tmpdir(), process.getuid?.() ?? 0);
+  let channel: WakerChannel | undefined;
   const publishProxy = (): void => {
     if (claudeStartTime === undefined) return;
     const current = registration.current;
@@ -367,7 +450,7 @@ export function startProxy(config: ProxyConfig): RunningProxy {
         claudePid: config.claudePid,
         claudeStartTime,
         proxyHandle,
-        socketPath: join(paths.root, 'run', `${proxyHandle}.sock`),
+        socketPath,
         registered: current !== undefined,
         ...(current && { name: current.name }),
       });
@@ -475,7 +558,7 @@ export function startProxy(config: ProxyConfig): RunningProxy {
   // ── auto-registration from the PID map ──
   const attempted = new Set<string>();
   const autoRegister = async (): Promise<void> => {
-    if (registration.current !== undefined || upstream === undefined) return;
+    if (registration.current !== undefined || getUpstream() === undefined) return;
     let entry;
     try {
       entry = readPidMapEntry(paths, config.claudePid, startTimeOf);
@@ -498,8 +581,15 @@ export function startProxy(config: ProxyConfig): RunningProxy {
   // One connection per identity, shared by concurrent requests (memoised promise).
   let workerConnecting: Promise<Client> | undefined;
   let workerClientFor: string | undefined;
+  const identity = (): { agentId: string; agentRef: string; token: string } | undefined => {
+    if (mode !== 'harness') return registration.current;
+    if (harness === undefined) reloadHarness();
+    return harness;
+  };
+
   const worker = (): Promise<Client> => {
-    const current = registration.current;
+    const current = identity();
+    const upstream = getUpstream();
     if (current === undefined || upstream === undefined) {
       return Promise.reject(new ProtocolError(-32001, 'the session is not registered in Hive'));
     }
@@ -508,7 +598,7 @@ export function startProxy(config: ProxyConfig): RunningProxy {
       workerClientFor = current.agentId;
       const connecting = (async () => {
         await (await previous?.catch(() => undefined))?.close().catch(() => undefined);
-        return upstream.connect(() => registration.current?.token ?? '');
+        return upstream.connect(() => identity()?.token ?? '');
       })();
       workerConnecting = connecting;
       connecting.catch(() => {
@@ -518,26 +608,37 @@ export function startProxy(config: ProxyConfig): RunningProxy {
     return workerConnecting;
   };
 
-  /** Runs a request against Hive; on -32001 renews (or registers again) and retries once. */
+  /**
+   * Runs a request against Hive. On -32001 an interactive session renews (or
+   * registers again) and a harness child re-reads the state file; either retries once.
+   */
   const withWorker = async <T>(step: (client: Client) => Promise<T>): Promise<T> => {
     try {
       return await step(await worker());
     } catch (err) {
-      if (toSessionFailure(err).code !== 'auth_rejected' || registration.current === undefined) {
-        throw err;
-      }
-      if (!(await recoverAuth())) throw err;
+      if (toSessionFailure(err).code !== 'auth_rejected' || identity() === undefined) throw err;
+      const recovered = mode === 'harness' ? reloadHarness() : await recoverAuth();
+      if (!recovered) throw err;
       return step(await worker());
     }
   };
 
+  const unreadEvent = async (): Promise<WatchEvent | undefined> => {
+    if (identity() === undefined) return undefined;
+    const result = await withWorker((client) =>
+      client.callTool({ name: 'check_unread_messages', arguments: {} }),
+    );
+    const summary = parseUnreadSummary(result.structuredContent);
+    return (summary && buildQueryEvent(summary)) ?? undefined;
+  };
+
   let lastCatalog: Tool[] | undefined;
   const listTools = async (): Promise<{ tools: Tool[] }> => {
-    const local = [REGISTER_TOOL, STATUS_TOOL];
-    if (registration.current === undefined) {
+    const local = mode === 'harness' ? [STATUS_TOOL] : [REGISTER_TOOL, STATUS_TOOL];
+    if (mode === 'interactive' && registration.current === undefined) {
       await autoRegister();
     }
-    if (registration.current === undefined) return { tools: local };
+    if (identity() === undefined) return { tools: local };
     try {
       const listed = await withWorker((client) =>
         client.listTools(undefined, { cacheMode: 'bypass' }),
@@ -555,14 +656,14 @@ export function startProxy(config: ProxyConfig): RunningProxy {
   };
 
   const status = (): SessionStatus => {
-    const current = registration.current;
+    const current = identity();
     return {
       registered: current !== undefined,
-      name: current?.name ?? null,
+      name: current?.agentRef.split('@')[0] ?? null,
       agent_ref: current?.agentRef ?? null,
-      hive: enrollment?.serverUrl ?? null,
+      hive: serverUrlNow() ?? null,
       project: projectDir,
-      mode: 'interactive',
+      mode,
       last_error: lastError,
     };
   };
@@ -572,6 +673,17 @@ export function startProxy(config: ProxyConfig): RunningProxy {
     ctx: ServerContext,
   ): Promise<CallToolResult> => {
     if (params.name === 'session_status') return toolResult(status());
+    if (params.name === 'register_session' && mode === 'harness') {
+      return toolResult(
+        {
+          error: {
+            code: 'harness_mode',
+            message: 'a harness child does not register: the session belongs to hivectl watch',
+          },
+        },
+        true,
+      );
+    }
     if (params.name === 'register_session') {
       const request = parseRegisterArguments(params.arguments);
       if (request === undefined) {
@@ -592,13 +704,19 @@ export function startProxy(config: ProxyConfig): RunningProxy {
         expires_at: outcome.registered.expiresAt.toISOString(),
       });
     }
-    if (registration.current === undefined) {
+    if (identity() === undefined) {
       return toolResult(
         {
-          error: {
-            code: 'not_registered',
-            message: 'this session is not registered in Hive; call register_session first',
-          },
+          error:
+            mode === 'harness'
+              ? {
+                  code: 'harness_state_unavailable',
+                  message: 'the harness state file is unavailable',
+                }
+              : {
+                  code: 'not_registered',
+                  message: 'this session is not registered in Hive; call register_session first',
+                },
         },
         true,
       );
@@ -646,7 +764,7 @@ export function startProxy(config: ProxyConfig): RunningProxy {
       low.projectCallToolResult(await callTool(request.params, ctx), undefined),
     );
     low.setRequestHandler('resources/list', async (request, ctx) => {
-      if (registration.current === undefined) return { resources: [] };
+      if (identity() === undefined) return { resources: [] };
       return withWorker((client) =>
         client.listResources(request.params, { signal: ctx.mcpReq.signal, cacheMode: 'bypass' }),
       );
@@ -673,6 +791,7 @@ export function startProxy(config: ProxyConfig): RunningProxy {
       shutdownSignal.abort();
       clearRenewal();
       // Local state first: it must go even if Hive or the network never answer.
+      await channel?.close().catch(() => undefined);
       try {
         removeProxyEntry(paths, config.claudePid);
       } catch {
@@ -702,9 +821,26 @@ export function startProxy(config: ProxyConfig): RunningProxy {
     onerror: (error) => diag.log('debug', 'proxy.downstream_error', { message: error.message }),
   });
 
-  publishProxy();
-  if (enrollment !== undefined) {
-    void ensureDiscovered(enrollment.credential).then(() => autoRegister());
+  if (mode === 'harness') {
+    if (harness !== undefined) void ensureDiscovered(harness.token);
+    else diag.log('warn', 'proxy.harness_waiting', { path: harnessPath });
+  } else {
+    publishProxy();
+    streamListeners.push((event) => channel?.push(event));
+    openWakerChannel({
+      path: socketPath,
+      once: unreadEvent,
+      log: (event, fields) => diag.log('warn', event, fields),
+    }).then(
+      (opened) => {
+        if (shutdownSignal.signal.aborted) void opened.close();
+        else channel = opened;
+      },
+      (err: unknown) => diag.log('warn', 'waker.open_failed', { message: String(err) }),
+    );
+    if (enrollment !== undefined) {
+      void ensureDiscovered(enrollment.credential).then(() => autoRegister());
+    }
   }
 
   return {

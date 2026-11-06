@@ -87,6 +87,8 @@ describe('statePaths', () => {
     expect(paths.tokenFile('k', 'claude-api')).toBe('/r/state/tokens/k/claude-api.json');
     expect(paths.tokenLock('k', 'claude-api')).toBe('/r/state/tokens/k/claude-api.lock');
     expect(paths.tokensDir('k')).toBe('/r/state/tokens/k');
+    expect(paths.sessionsDir('k')).toBe('/r/state/sessions/k');
+    expect(paths.enrollmentDir).toBe('/r/enrollment');
   });
 });
 

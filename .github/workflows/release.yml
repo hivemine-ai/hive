@@ -790,6 +790,9 @@ jobs:
           fi
           echo "OK: OIDC token endpoint available"
 
+      - name: Stage the Claude Code plugin into the wrapper (ADR-026)
+        run: node npm/hivectl/stage-plugin.js
+
       - name: Pin wrapper version + optionalDependencies
         run: |
           cd npm/hivectl

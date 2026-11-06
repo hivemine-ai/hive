@@ -4,6 +4,7 @@
 // in proxy.process.test.ts.
 
 import { chmodSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import * as net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,7 +16,8 @@ import { startProxy } from './proxy.js';
 import type { ProxyConfig, RunningProxy, SessionStatus } from './proxy.js';
 import { configRoot, projectKey, statePaths, writePrivateJson } from './state-dir.js';
 import { parsePersistedToken } from './token-store.js';
-import { readPrivateJson } from './state-dir.js';
+import { readPrivateJson, removePrivateFile } from './state-dir.js';
+import { Upstream } from './upstream.js';
 import { startHiveWorld } from './test-hive.js';
 import type { HiveWorld, HiveWorldOptions } from './test-hive.js';
 
@@ -423,5 +425,269 @@ describe('mcp proxy against a real Hive', () => {
     expect((await status(session)).last_error?.code).toBe('not_installed');
     const rejected = await registerAs(session);
     expect(structured<{ error: { code: string } }>(rejected).error.code).toBe('not_installed');
+  }, 30_000);
+});
+
+async function readLines(
+  socketPath: string,
+  request: string,
+): Promise<{ lines: string[]; socket: net.Socket; ended: Promise<void> }> {
+  const socket = net.createConnection(socketPath);
+  await new Promise<void>((resolve) => socket.once('connect', () => resolve()));
+  const lines: string[] = [];
+  let buffer = '';
+  socket.on('data', (chunk: Buffer) => {
+    buffer += chunk.toString();
+    for (let i = buffer.indexOf('\n'); i >= 0; i = buffer.indexOf('\n')) {
+      lines.push(buffer.slice(0, i));
+      buffer = buffer.slice(i + 1);
+    }
+  });
+  const ended = new Promise<void>((resolve) => socket.once('close', () => resolve()));
+  socket.write(`${request}\n`);
+  return { lines, socket, ended };
+}
+
+describe('local waker channel', () => {
+  it('pushes one metadata line per incoming message (no body) and answers once with one line', async () => {
+    const w = await bootWorld();
+    install(w);
+    const receiver = await openSession();
+    await registerAs(receiver, 'claude-api');
+    const sender = await openSession({ claudePid: CLAUDE_PID + 1 });
+    await registerAs(sender, 'docs-bot');
+    const entry = readPrivateJson(statePaths(configDir).proxy(CLAUDE_PID)) as {
+      socketPath: string;
+    };
+    await expect.poll(() => existsSync(entry.socketPath)).toBe(true);
+    const listener = await readLines(entry.socketPath, '{"op":"listen"}');
+
+    await sender.client.callTool({
+      name: 'send_message',
+      arguments: {
+        recipient: 'claude-api@leo.proxyhive',
+        type: 'notification',
+        body: 'secret-body-text',
+      },
+    });
+
+    await expect.poll(() => listener.lines.length, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    const line = JSON.parse(listener.lines[0] ?? '') as Record<string, unknown>;
+    expect(Object.keys(line).sort()).toEqual(['count', 'eventId', 'senders']);
+    expect(line['count']).toBe(1);
+    expect(listener.lines.join('')).not.toContain('secret-body-text');
+
+    const once = await readLines(entry.socketPath, '{"op":"once"}');
+    await once.ended;
+    expect(once.lines).toHaveLength(1);
+    expect(JSON.parse(once.lines[0] ?? '')).toMatchObject({ count: 1 });
+    listener.socket.destroy();
+
+    await receiver.proxy.shutdown('test');
+    expect(existsSync(entry.socketPath)).toBe(false);
+  }, 30_000);
+});
+
+describe('harness mode (HIVE_HARNESS_SESSION)', () => {
+  async function workerToken(w: HiveWorld, name: string) {
+    const upstream = new Upstream({ url: w.url, clientVersion: '0', probeTimeoutMs: 2_000 });
+    await upstream.discover(w.enrollmentCredential);
+    const first = await upstream.registerSession(w.enrollmentCredential, {
+      name,
+      description: 'Harness',
+    });
+    if (!first.ok) throw new Error(first.message);
+    return { upstream, first };
+  }
+
+  function writeHarness(
+    path: string,
+    w: HiveWorld,
+    reg: { agentRef: string; agentId: string; token: string; expiresAt: string },
+  ) {
+    writePrivateJson(path, {
+      version: 1,
+      serverUrl: w.url,
+      agentRef: reg.agentRef,
+      agentId: reg.agentId,
+      token: reg.token,
+      expiresAt: reg.expiresAt,
+      watchPid: process.pid,
+    });
+  }
+
+  it('lists every Hive tool from the first tools/list, without registering or opening a stream', async () => {
+    const w = await bootWorld();
+    const { first } = await workerToken(w, 'harness-bot');
+    const harnessFile = join(configDir, 'state', 'harness', 'h1.json');
+    writeHarness(harnessFile, w, first);
+    const session = await openSession({
+      env: {
+        HIVE_CONFIG_DIR: configDir,
+        HIVE_HARNESS_SESSION: harnessFile,
+        CLAUDE_PROJECT_DIR: projectDir,
+      },
+    });
+
+    expect(await toolNames(session)).toEqual([...HIVE_TOOLS, 'session_status'].sort());
+    expect(await status(session)).toMatchObject({
+      registered: true,
+      mode: 'harness',
+      name: 'harness-bot',
+      agent_ref: 'harness-bot@leo.proxyhive',
+    });
+    const call = await session.client.callTool({
+      name: 'get_agent_config',
+      arguments: {},
+    });
+    expect(call.isError).not.toBe(true);
+    const refused = await registerAs(session, 'other');
+    expect(structured<{ error: { code: string } }>(refused).error.code).toBe('harness_mode');
+    expect(w.isOnline(first.ok ? first.agentId : '')).toBe(false);
+    expect(existsSync(statePaths(configDir).proxy(CLAUDE_PID))).toBe(false);
+  }, 30_000);
+
+  it('after the file is rewritten with a new token, a -32001 is solved by re-reading it and retrying once', async () => {
+    const w = await bootWorld();
+    const { upstream, first } = await workerToken(w, 'harness-bot');
+    if (!first.ok) throw new Error('register failed');
+    const harnessFile = join(configDir, 'state', 'harness', 'h1.json');
+    writeHarness(harnessFile, w, first);
+    const rejected = new Set<string>();
+    const attempts: string[] = [];
+    const session = await openSession({
+      env: {
+        HIVE_CONFIG_DIR: configDir,
+        HIVE_HARNESS_SESSION: harnessFile,
+        CLAUDE_PROJECT_DIR: projectDir,
+      },
+      fetch: (input, init) => {
+        const bearer =
+          new Headers(init?.headers).get('authorization')?.slice('Bearer '.length) ?? '';
+        const body = typeof init?.body === 'string' ? init.body : '';
+        if (body.includes('"get_agent_config"')) attempts.push(bearer);
+        if (rejected.has(bearer) && body.includes('"tools/call"')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: (JSON.parse(body) as { id: unknown }).id,
+                error: { code: -32001, message: 'unauthorized' },
+              }),
+              { status: 401, headers: { 'content-type': 'application/json' } },
+            ),
+          );
+        }
+        return fetch(input, init);
+      },
+    });
+    expect((await status(session)).registered).toBe(true);
+
+    const renewed = await upstream.registerSession(first.token, {
+      name: 'harness-bot',
+      description: 'Harness',
+    });
+    if (!renewed.ok) throw new Error(renewed.message);
+    writeHarness(harnessFile, w, renewed);
+    rejected.add(first.token);
+
+    const call = await session.client.callTool({
+      name: 'get_agent_config',
+      arguments: {},
+    });
+
+    expect(call.isError).not.toBe(true);
+    expect(attempts).toEqual([first.token, renewed.token]);
+  }, 30_000);
+
+  it('recovers without a restart once a missing harness file appears', async () => {
+    const w = await bootWorld();
+    const { first } = await workerToken(w, 'harness-bot');
+    if (!first.ok) throw new Error('register failed');
+    const harnessFile = join(configDir, 'state', 'harness', 'late.json');
+    writePrivateJson(harnessFile, { not: 'a harness state' });
+    const session = await openSession({
+      env: {
+        HIVE_CONFIG_DIR: configDir,
+        HIVE_HARNESS_SESSION: harnessFile,
+        CLAUDE_PROJECT_DIR: projectDir,
+      },
+    });
+    expect(await toolNames(session)).toEqual(['session_status']);
+
+    writeHarness(harnessFile, w, first);
+
+    expect(await toolNames(session)).toEqual([...HIVE_TOOLS, 'session_status'].sort());
+    const call = await session.client.callTool({ name: 'get_agent_config', arguments: {} });
+    expect(call.isError).not.toBe(true);
+    expect((await status(session)).registered).toBe(true);
+  }, 30_000);
+
+  it('keeps the previous harness token when a reload finds a broken file', async () => {
+    const w = await bootWorld();
+    const { first } = await workerToken(w, 'harness-bot');
+    if (!first.ok) throw new Error('register failed');
+    const harnessFile = join(configDir, 'state', 'harness', 'h2.json');
+    writeHarness(harnessFile, w, first);
+    let rejectOnce = false;
+    const session = await openSession({
+      env: {
+        HIVE_CONFIG_DIR: configDir,
+        HIVE_HARNESS_SESSION: harnessFile,
+        CLAUDE_PROJECT_DIR: projectDir,
+      },
+      fetch: (input, init) => {
+        const body = typeof init?.body === 'string' ? init.body : '';
+        if (rejectOnce && body.includes('"tools/call"')) {
+          rejectOnce = false;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: (JSON.parse(body) as { id: unknown }).id,
+                error: { code: -32001, message: 'unauthorized' },
+              }),
+              { status: 401, headers: { 'content-type': 'application/json' } },
+            ),
+          );
+        }
+        return fetch(input, init);
+      },
+    });
+    expect((await status(session)).registered).toBe(true);
+    writePrivateJson(harnessFile, { broken: true });
+    rejectOnce = true;
+
+    await session.client
+      .callTool({ name: 'get_agent_config', arguments: {} })
+      .catch(() => undefined);
+
+    expect((await status(session)).registered).toBe(true);
+    const call = await session.client.callTool({ name: 'get_agent_config', arguments: {} });
+    expect(call.isError).not.toBe(true);
+  }, 30_000);
+
+  it('a missing harness file does not kill the proxy: session_status reports harness_state_unavailable', async () => {
+    await bootWorld();
+    const harnessFile = join(configDir, 'state', 'harness', 'gone.json');
+    writePrivateJson(harnessFile, {});
+    removePrivateFile(harnessFile);
+    const session = await openSession({
+      env: {
+        HIVE_CONFIG_DIR: configDir,
+        HIVE_HARNESS_SESSION: harnessFile,
+        CLAUDE_PROJECT_DIR: projectDir,
+      },
+    });
+
+    expect(await toolNames(session)).toEqual(['session_status']);
+    expect((await status(session)).last_error?.code).toBe('harness_state_unavailable');
+    const call = await session.client.callTool({
+      name: 'send_message',
+      arguments: {},
+    });
+    expect(structured<{ error: { code: string } }>(call).error.code).toBe(
+      'harness_state_unavailable',
+    );
   }, 30_000);
 });

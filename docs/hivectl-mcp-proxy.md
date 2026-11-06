@@ -2,18 +2,31 @@
 
 A local MCP server, one process per Claude Code session, that registers the session in Hive as a named Worker agent and forwards its tools. Claude Code launches it over stdio through the `hive-wake` plugin; you do not run it by hand. The server side of the contract (`register_session`, the `enroll` scope, renewal) is in [Clients via `hivectl mcp proxy`](./mcp-server.md#clients-via-hivectl-mcp-proxy).
 
-> **Status (v0.3.0 line, in progress).** The proxy itself ships now. The command that installs it into a folder (`hivectl claude install`), the local channel for the waker and the harness mode come next in the same release line.
+> **Status (v0.3.0 line, in progress).** The plugin hooks that write the PID map, the waker mod that reads the local channel (`hivectl watch --attach-session`) and `watch` in harness mode come next in the same release line; until then a session registers through the `register_session` tool.
 
 ## Quick start
 
-The proxy resolves the project from `CLAUDE_PROJECT_DIR` (or its working directory) and looks for the enrollment saved for that exact folder under `~/.config/hive/enrollment/`. To try it by hand against a Hive, with a client that speaks MCP over stdio:
+Install Hive into a folder once, with an enrollment credential issued by an admin (`hivectl credential issue --enrollment`, see [Auth](./auth.md)):
 
 ```bash
-cd ~/notes                      # a folder with an enrollment saved for it
-hivectl mcp proxy               # stdin/stdout: MCP; stderr: JSON diagnostics
+cd ~/notes
+hivectl claude install --server https://hive.example.com/mcp --enrollment-credential ~/hive-enroll.jwt
+claude                          # the session starts its own `hivectl mcp proxy`
 ```
 
-stdout carries only the MCP protocol. Diagnostics go to stderr as JSON lines, never with a token or a credential in them.
+`claude install` saves the URL and the credential in `~/.config/hive/enrollment/` (never in the folder), copies the `hive-wake` plugin to `~/.config/hive/marketplace/`, registers it as the `directory` marketplace `hive` and installs it with `claude plugin install hive-wake@hive --scope local -y`. The plugin declares the stdio server `hive` as the absolute path of this `hivectl` with `mcp proxy`.
+
+Claude Code then writes `<folder>/.claude/settings.local.json` (`enabledPlugins` and the marketplace, no secret). In a git repository `install` adds that file to `.gitignore`; in a folder that looks synchronized (iCloud, Dropbox, OneDrive, an Obsidian vault) it warns that the file will show there. Running `install` again refreshes the credential (for example after `hivectl credential rotate`) and the plugin copy, and tolerates an already installed plugin.
+
+```bash
+hivectl claude uninstall --yes  # in the same folder
+```
+
+`uninstall` removes the plugin and the marketplace from the folder's local scope, the enrollment of the folder and its `state/sessions/` and `state/tokens/`, and the plugin copy once no folder uses it. It does not revoke the credential or the agents (use `hivectl credential revoke`), does not remove the `.gitignore` line, and does not stop running sessions.
+
+Requirements: Claude Code 2.1.318 or newer (an older one only warns), `claude` on the `PATH`, and a credential file of mode `0600`.
+
+stdout of the proxy carries only the MCP protocol. Diagnostics go to stderr as JSON lines, never with a token or a credential in them.
 
 ## Concepts
 
@@ -38,7 +51,11 @@ The answer carries no cache, so Claude Code does not keep the short list. After 
 
 **Resumed sessions.** On start, and on every `tools/list` while unregistered, the proxy reads the entry its parent `claude` process left in `~/.config/hive/state/pid-map/` (written by the plugin's SessionStart hook). If the start time of the process matches and the entry carries a name, the proxy registers by itself, before the first turn. It publishes its own entry in `~/.config/hive/state/proxies/<claudePid>.json`.
 
-**Ending.** stdin EOF (Claude Code exited, even after `kill -9`), `SIGINT` (`/exit`), `SIGTERM` (end of `claude -p`) and `SIGHUP` close the stream (the agent goes `offline` at once, without waiting for the lease), remove the proxy entry and end the process. Nothing else ends it: when Hive or the network fail, the proxy keeps running, reconnects with backoff and reports the last error in `session_status`.
+**Local channel for the waker.** In an interactive session the proxy listens on a user socket (`0600`, published in its `proxies/` entry) with a JSON-lines protocol. The first line of a connection is the request: `{"op":"listen"}` receives one metadata line per stream event (`eventId`, `senders`, `count`, never a body), one listener at a time; `{"op":"once"}` answers one line if something is unread, or nothing, and closes. The waker reads the session's single stream this way instead of opening its own.
+
+**Harness mode.** With `HIVE_HARNESS_SESSION` set to the path of a harness state file (what `hivectl watch` gives the children it launches), the proxy neither registers nor opens a stream: it takes the Worker token from that file, lists every Hive tool plus `session_status` from the first `tools/list`, and on `-32001` re-reads the file and retries once. A missing or unreadable file leaves it running with `harness_state_unavailable`.
+
+**Ending.** stdin EOF (Claude Code exited, even after `kill -9`), `SIGINT` (`/exit`), `SIGTERM` (end of `claude -p`) and `SIGHUP` close the stream (the agent goes `offline` at once, without waiting for the lease), remove the socket and the proxy entry, and end the process. Nothing else ends it: when Hive or the network fail, the proxy keeps running, reconnects with backoff and reports the last error in `session_status`.
 
 ## Local state
 
@@ -71,9 +88,19 @@ The lock on `state/tokens/` is an advisory POSIX lock taken through SQLite. It i
 | `protocol_unsupported`         | The server does not serve MCP `2026-07-28`.                                                    | Upgrade the Hive server.                          |
 | `server_mismatch`              | The server does not expose tools and resource subscriptions.                                   | Point the folder at a Hive server.                |
 | `session_state_insecure_perms` | A state file or directory is readable by others.                                               | `chmod 600` the file, `chmod 700` the directory.  |
+| `harness_state_unavailable`    | Harness mode: the state file is missing or unreadable.                                         | Check the `watch` that launched the session.      |
 | `transport`                    | Hive is unreachable.                                                                           | None: the proxy retries by itself.                |
 
-The proxy never uses exit codes for Hive failures.
+The proxy never uses exit codes for Hive failures. `claude install` / `uninstall` exit with:
+
+| Code                           | Exit | Meaning                                                                               |
+| ------------------------------ | ---- | ------------------------------------------------------------------------------------- |
+| `CLAUDE_CLI_NOT_FOUND`         | 4    | `claude` is not on the `PATH`.                                                        |
+| `CLAUDE_PLUGIN_COMMAND_FAILED` | 4    | A `claude plugin …` command failed; its stderr is shown. Safe to run `install` again. |
+| `SESSION_STATE_INSECURE_PERMS` | 4    | The credential file (or a state file) is readable by others.                          |
+| `NOT_AN_ENROLLMENT_CREDENTIAL` | 1    | The credential file does not hold a credential with scope `enroll`.                   |
+| `INVALID_INPUT`                | 1    | `--server` is not an http(s) URL, a file is unreadable, or the folder does not exist. |
+| `CONFIRMATION_DECLINED`        | 1    | `uninstall` without `--yes`.                                                          |
 
 ## Configuration
 
@@ -81,7 +108,12 @@ The proxy never uses exit codes for Hive failures.
 | ---------------------- | -------------------- | -------------------------------------------------------------------- |
 | `HIVE_CONFIG_DIR`      | `~/.config/hive`     | Root of the local user state.                                        |
 | `HIVE_PROXY_LOG_LEVEL` | `warn`               | `debug`, `info`, `warn`, `error` or `silent` for stderr diagnostics. |
+| `HIVE_HARNESS_SESSION` | (set by `watch`)     | Harness mode: path of the harness state file, never a token.         |
 | `CLAUDE_PROJECT_DIR`   | (set by Claude Code) | Project folder; the working directory when absent.                   |
+
+## Packaging (contributors)
+
+The npm wrapper `@hivemine/hivectl` carries the plugin in `claude-plugin/`; the release workflow stages it with `node npm/hivectl/stage-plugin.js`, which copies the files listed in `packages/claude-plugin/distribution.json`. Run that script before a local `npm pack` of `npm/hivectl`, otherwise the tarball has no plugin and `claude install` cannot find one. From a checkout, `claude install` uses `packages/claude-plugin/` directly.
 
 ## See also
 

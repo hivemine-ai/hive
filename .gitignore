@@ -42,4 +42,5 @@ Thumbs.db
 .stylelintcache
 
 # Misc
+npm/hivectl/claude-plugin/
 .husky/_/

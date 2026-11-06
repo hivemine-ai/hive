@@ -15,7 +15,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { processStartTime } from './pid-map.js';
-import { projectKey, statePaths, writePrivateJson } from './state-dir.js';
+import { projectKey, readPrivateJson, statePaths, writePrivateJson } from './state-dir.js';
 import { startHiveWorld } from './test-hive.js';
 import type { HiveWorld } from './test-hive.js';
 
@@ -213,11 +213,13 @@ describe('hivectl mcp proxy (process)', () => {
   }, 30_000);
 
   for (const end of ['stdin EOF', 'SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
-    it(`${end} closes the stream at once (offline before the lease), removes its entry and exits`, async () => {
+    it(`${end} closes the stream at once (offline before the lease), removes its socket and entry, and exits`, async () => {
       const proxy = await launch();
       const agentId = agentIdOf(await registerAs(proxy, 'claude-api'));
       await expect.poll(() => world.isOnline(agentId)).toBe(true);
       expect(existsSync(proxyEntry())).toBe(true);
+      const { socketPath } = readPrivateJson(proxyEntry()) as { socketPath: string };
+      await expect.poll(() => existsSync(socketPath)).toBe(true);
 
       if (end === 'stdin EOF') {
         // The SDK keeps the child private; ending its stdin is exactly what Claude Code's exit does.
@@ -229,6 +231,7 @@ describe('hivectl mcp proxy (process)', () => {
       await expect.poll(() => isAlive(proxy.pid), { timeout: 5_000 }).toBe(false);
       expect(world.isOnline(agentId)).toBe(false);
       expect(existsSync(proxyEntry())).toBe(false);
+      expect(existsSync(socketPath)).toBe(false);
       const reason = end === 'stdin EOF' ? 'client_closed' : end;
       expect(proxy.stderr.join('')).toContain(`"event":"proxy.shutdown","reason":"${reason}"`);
     }, 30_000);
