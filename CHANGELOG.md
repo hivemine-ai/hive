@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-06
+
+v0.3.1. Fixes the upgrade from v0.2.x (INC-2026-010): `serve` and the admin commands refuse a database whose schema does not match the binary instead of running on it. **Upgrading from v0.2.x** (or from a v0.3.0 install that never ran it): back up the database and run `hivectl migrate up` before `hivectl serve`. v0.3.1 adds no migration. **No breaking changes on the wire**: v0.3.0 and v0.3.1 clients and servers work together.
+
 ### Fixed
 
 - **`hivectl serve` and the admin commands refuse to run on a schema that does not match the binary** (PRY-096, INC-2026-010). Upgrading from v0.2.x and running `serve` used to boot on the old schema without a warning: `credential issue --enrollment` failed with `internal error` and `agent list` dropped `origin`. Every command that opens the database, except `init` and `migrate`, now checks the schema first (read-only, nothing is applied) and exits with code `4`:
