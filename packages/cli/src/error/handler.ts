@@ -55,6 +55,11 @@ function mapCliError(err: CliError): MappedExit {
         code: EXIT_PERMISSION,
         message: `--operator-id is not an active admin${suffix}`,
       };
+    case 'OPERATOR_ID_NOT_OWNER':
+      return {
+        code: EXIT_PERMISSION,
+        message: `--operator-id must be the owner of the agent${suffix}`,
+      };
     case 'CONFIRMATION_DECLINED':
       return {
         code: EXIT_USER_ERROR,

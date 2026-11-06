@@ -119,9 +119,15 @@ export interface ParticipantsWriteRepo {
   createHivekeeper(input: CreateHivekeeperInput, caller: CallerContext): Promise<Hivekeeper>;
   createAgent(input: CreateAgentInput, caller: CallerContext): Promise<Agent>;
   revokeAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
-  /** `active` to `suspended`. Any other starting state is a no-op. Agents only. */
+  /**
+   * `active` to `suspended`. A `retired` Agent throws INVALID_STATE_TRANSITION
+   * (`agent_retired_cannot_suspend`); any other starting state is a no-op. Agents only.
+   */
   suspendAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
-  /** `suspended` to `active`. Any other starting state is a no-op. */
+  /**
+   * `suspended` to `active`. A `retired` Agent throws INVALID_STATE_TRANSITION
+   * (`agent_retired_cannot_resume`): only a revival reactivates it. Otherwise a no-op.
+   */
   resumeAgent(id: UUIDv7, caller: CallerContext): Promise<void>;
   /**
    * Promote or demote an Agent. ADR-026: making an enrollment Worker a Scout turns it into
@@ -131,7 +137,8 @@ export interface ParticipantsWriteRepo {
    */
   changeAgentType(id: UUIDv7, newType: 'worker' | 'scout', caller: CallerContext): Promise<void>;
   /**
-   * Revoke a Hivekeeper and cascade-revoke all owned Agents + close their Cells in
+   * Revoke a Hivekeeper and cascade-revoke all owned Agents (active, suspended and
+   * retired) + close their Cells in
    * the same transaction. Snapshots the effective retention policy on the keeper's
    * row so post-revocation reads see frozen retention semantics. Idempotent: a
    * second invocation on an already-revoked keeper returns empty counts without
@@ -175,7 +182,22 @@ export function createParticipantsWriteRepo(
       .where('state', '=', from)
       .returning('id')
       .executeTakeFirst();
-    if (moved) opts.stateSignal?.emit({ participantId: id, newState: to });
+    if (moved) {
+      opts.stateSignal?.emit({ participantId: id, newState: to });
+      return;
+    }
+    // ADR-026: a retired Agent is only revived or revoked; other states stay a no-op.
+    const row = await db
+      .selectFrom('agents')
+      .select('state')
+      .where('id', '=', id)
+      .executeTakeFirst();
+    if (row?.state === 'retired') {
+      throw new AuthError('INVALID_STATE_TRANSITION', {
+        subCode:
+          to === 'suspended' ? 'agent_retired_cannot_suspend' : 'agent_retired_cannot_resume',
+      });
+    }
   }
 
   return {
@@ -356,7 +378,7 @@ export function createParticipantsWriteRepo(
         const now = clock();
         await tx
           .updateTable('agents')
-          .set({ state: 'revoked', revoked_at: dateToIso(now) })
+          .set({ state: 'revoked', revoked_at: dateToIso(now), retired_at: null })
           .where('id', '=', id)
           .execute();
 
@@ -402,12 +424,13 @@ export function createParticipantsWriteRepo(
         }
         const hiveId = keeperRow.hive_id;
 
-        // Cascade-revoke owned agents that are still active.
+        // Cascade-revoke every owned agent not revoked yet: active, suspended and retired
+        // (ADR-026). retired_at is cleared in the same UPDATE, as the agents CHECK requires.
         const revokedAgents = await tx
           .updateTable('agents')
-          .set({ state: 'revoked', revoked_at: dateToIso(now) })
+          .set({ state: 'revoked', revoked_at: dateToIso(now), retired_at: null })
           .where('owner_id', '=', id)
-          .where('state', '=', 'active')
+          .where('state', 'in', ['active', 'suspended', 'retired'])
           .returning('id')
           .execute();
         const revokedAgentIds = revokedAgents.map((r) => r.id);

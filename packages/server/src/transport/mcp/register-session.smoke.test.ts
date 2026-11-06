@@ -397,28 +397,6 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
 
       expect(outcome.error?.code).toBe(-32602);
     });
-
-    it('leaves the retired branch failing as an internal error until revival exists', async () => {
-      const { jwt } = await issueEnrollment();
-      const registered = await register(jwt);
-      await goOffline(world, registered);
-      await db
-        .updateTable('agents')
-        .set({ state: 'retired', retired_at: new Date().toISOString() })
-        .where('id', '=', registered.agent_id)
-        .execute();
-
-      const outcome = await registerRaw(world, jwt, {
-        name: 'claude-api',
-        description: DESCRIPTION,
-      });
-
-      expect(outcome.error).toEqual({ code: -32603, message: 'internal error' });
-      // The reservation was released: nothing holds the name in memory.
-      expect(
-        world.wire._presenceRegistry().claimHolder(registered.agent_id, registered.agent_id),
-      ).toEqual({ outcome: 'granted' });
-    });
   });
 
   describe('renewed', () => {

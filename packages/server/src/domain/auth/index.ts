@@ -83,6 +83,7 @@ export type {
   EnrollmentDeps,
   IssueEnrollmentCredentialInput,
   RenewWorkerTokenInput,
+  ReviveRetiredAgentInput,
 } from './credentials/enrollment.js';
 
 export { createCredentialsReadRepo } from './credentials/repository.js';
@@ -104,6 +105,17 @@ export type {
   ParticipantsWriteRepo,
   ParticipantsWriteRepoOptions,
 } from './participants/repository.write.js';
+
+export {
+  EnrollmentRetentionPassError,
+  createEnrollmentRetention,
+} from './participants/retention.js';
+export type {
+  EnrollmentRetention,
+  EnrollmentRetentionDeps,
+  EnrollmentRetentionPass,
+  EnrollmentRetentionResult,
+} from './participants/retention.js';
 
 export { noopCellsHook } from './participants/cells-hook.js';
 export type {

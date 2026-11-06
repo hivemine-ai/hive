@@ -241,11 +241,16 @@ hivectl agent create --owner <email-or-uuid> --name <name> --type worker|scout
                      [--emit-credential] [--credential-ttl <duration>]
                      [--output-credential <path>]
 hivectl agent list   [--owner <email-or-uuid>] [--type worker|scout]
-                     [--state active|suspended|revoked] [--limit N] [--cursor <c>]
+                     [--state active|suspended|retired|revoked] [--limit N] [--cursor <c>]
 hivectl agent revoke <agent-ref> --yes
+hivectl agent release <agent-ref> --operator-id <owner-email-or-uuid> --yes
 ```
 
 `create` cascades to a new Cell (cross-domain hook). `revoke` cascades to closing the Agent's Cell.
+
+`list` shows every state, `retired` included (unlike `list_agents` over MCP), with the `origin` of each agent (`manual`, or `enrollment` for a session registered with `register_session`) and its `lastConnectedAt`; `--output json` adds `enrolledVia`.
+
+`release` frees the name of a session agent whose holder still looks alive, for example a stream without a lease (ADR-026). It revokes every Worker token of the agent that is valid or inside the holder-proof window (`HIVE_HOLDER_PROOF_WINDOW_DAYS`), so the holder can neither call nor renew; the agent keeps its state and the next `register_session` with the name claims it. `hivectl` runs in another process, so a live stream drops on the server's next re-verification (`HIVE_MCP_REVERIFY_INTERVAL_SECONDS`, 60 s) or when its lease expires; until then the name still answers `name_in_use`. Only the owner may release: `--operator-id` must be the agent's owner, otherwise (or without it) the command exits `EXIT_PERMISSION (5)` with `release_owner_only`. A manual or revoked agent exits `EXIT_PRECONDITION (4)`. With no token left it succeeds with `no active holder`. Audit: `admin_agent_release` with the owner as actor and `revokedHolderTokens`.
 
 `<agent-ref>` accepts two input forms (per [ADR-020](https://github.com/hivemine-ai/hive-vault)):
 

@@ -44,6 +44,37 @@ async function expectAuthError(
   }
 }
 
+/**
+ * Postgres only: retires the Agent in a transaction that holds the row uncommitted while
+ * `during` starts, then commits. `during` reads the Agent as active and its write waits.
+ */
+async function retireWhile<T>(
+  db: SeedWorld['db'],
+  agentId: string,
+  at: Date,
+  during: () => Promise<T>,
+): Promise<PromiseSettledResult<T>> {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let locked!: () => void;
+  const rowLocked = new Promise<void>((resolve) => (locked = resolve));
+  const retire = db.transaction().execute(async (trx) => {
+    await trx
+      .updateTable('agents')
+      .set({ state: 'retired', retired_at: dateToIso(at) })
+      .where('id', '=', agentId)
+      .execute();
+    locked();
+    await gate;
+  });
+  await rowLocked;
+  const settled = Promise.allSettled([during()]);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  release();
+  await retire;
+  return (await settled)[0];
+}
+
 describe(`Worker tokens (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
   let world: SeedWorld;
   let clock: Date;
@@ -228,6 +259,34 @@ describe(`Worker tokens (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
       const winner = (won[0] as PromiseFulfilledResult<IssuedCredential>).value;
       expect((await agentRow()).last_worker_jti).toBe(winner.jti);
       expect(await workerTokenRows()).toBe(rowsBefore + 1);
+    });
+
+    // PRY-094: retirement vs renewal. SQLite serializes writers, so only Postgres races.
+    it.runIf(PG_URL)(
+      'renew: loses to a retirement that commits while it waits, with PARTICIPANT_NOT_ACTIVE{retired}',
+      async () => {
+        const first = await create();
+        const rowsBefore = await workerTokenRows();
+
+        const outcome = await retireWhile(world.db, agentId, clock, () => renew(first.jti));
+
+        expect(outcome.status).toBe('rejected');
+        const err = (outcome as PromiseRejectedResult).reason as AuthError;
+        expect([err.code, err.subCode]).toEqual(['PARTICIPANT_NOT_ACTIVE', 'retired']);
+        expect((await agentRow()).last_worker_jti).toBe(first.jti);
+        expect(await workerTokenRows()).toBe(rowsBefore);
+      },
+    );
+
+    it('renew: refuses a retired Agent with PARTICIPANT_NOT_ACTIVE{retired}', async () => {
+      const first = await create();
+      await world.db
+        .updateTable('agents')
+        .set({ state: 'retired', retired_at: dateToIso(clock) })
+        .where('id', '=', agentId)
+        .execute();
+
+      await expectAuthError(renew(first.jti), 'PARTICIPANT_NOT_ACTIVE', 'retired');
     });
 
     it('renew: keeps working after the enrollment was rotated', async () => {

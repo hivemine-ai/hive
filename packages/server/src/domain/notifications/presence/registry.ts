@@ -97,10 +97,13 @@ export interface PresenceRegistry {
   ): Promise<void>;
   /** `open` streams of the participant, for a replay per stream on resume. */
   listOpenStreams(participantId: UUIDv7): ReadyHookInput[];
-  /** Forced close of every stream of the participant (revocation / suspension). Idempotent. */
+  /** Forced close of every stream of the participant (revocation, suspension, retirement). Idempotent. */
   closeParticipantStreams(
     participantId: UUIDv7,
-    reason: Extract<StreamCloseReason, 'participant_revoked' | 'participant_suspended'>,
+    reason: Extract<
+      StreamCloseReason,
+      'participant_revoked' | 'participant_suspended' | 'participant_retired'
+    >,
   ): void;
   /**
    * ADR-026. Pure and synchronous: true iff the participant has at least one `open`

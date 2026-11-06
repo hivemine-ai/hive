@@ -210,6 +210,14 @@ describe('adaptAgentList', () => {
     expect(summary.capabilities).toEqual(['search']);
   });
 
+  it('projects a retired Agent with its literal state (ADR-026, include_retired)', () => {
+    const result = adaptAgentList({
+      agents: [buildAgent({ state: 'retired', retiredAt: new Date() })],
+      nextCursor: null,
+    });
+    expect(result.agents[0]?.state).toBe('retired');
+  });
+
   it('returns next_cursor as opaque string when nextCursor is non-null', () => {
     const result = adaptAgentList({ agents: [buildAgent()], nextCursor: FIXED_CURSOR });
     expect(typeof result.next_cursor).toBe('string');

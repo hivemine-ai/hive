@@ -98,6 +98,7 @@ const REVERIFY_CLOSE_REASON = {
   participant_not_found: 'participant_revoked',
   participant_revoked: 'participant_revoked',
   participant_suspended: 'participant_suspended',
+  participant_retired: 'participant_retired',
 } as const;
 
 function requestedSubscriptions(body: unknown): unknown {
@@ -114,6 +115,7 @@ function rpcId(body: unknown): string | number {
 function subscribeFailureReason(subCode: string | undefined): StreamCloseReason {
   if (subCode === 'registry_shut_down') return 'shutdown';
   if (subCode === 'suspended') return 'participant_suspended';
+  if (subCode === 'retired') return 'participant_retired';
   return 'participant_revoked';
 }
 

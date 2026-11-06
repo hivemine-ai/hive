@@ -219,6 +219,7 @@ describe('onResponse', () => {
 
   it.each([
     ['suspended', 'participant_suspended'],
+    ['retired', 'participant_retired'],
     ['revoked', 'participant_revoked'],
     ['not_found', 'participant_revoked'],
     ['registry_shut_down', 'shutdown'],
@@ -346,6 +347,7 @@ describe('reverifyOpenStreams', () => {
     ['participant_not_found', 'participant_revoked'],
     ['participant_revoked', 'participant_revoked'],
     ['participant_suspended', 'participant_suspended'],
+    ['participant_retired', 'participant_retired'],
   ])('%s closes the stream as %s', async (reason, closeReason) => {
     const { streams, log } = build({ verifier: { reverifyStream: verdict(reason) } });
     open(streams);

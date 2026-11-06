@@ -11,7 +11,7 @@
 // `jti` in `credentials.enrolled_via`. Its holder renews it by presenting the last token
 // issued (`agents.last_worker_jti`), even expired, within the holder-proof window.
 //
-// The registration primitives (create, claim) are authorized by scope and ownership, not
+// The registration primitives (create, claim, revive) are authorized by scope and ownership, not
 // by the admin flag: the owner of the enrollment is the owner of the Agent.
 
 import { sql } from 'kysely';
@@ -27,6 +27,7 @@ import { AuthError } from '../errors.js';
 import type { Agent } from '#domain/auth/participants/entities.js';
 import { noopCellsHook } from '#domain/auth/participants/cells-hook.js';
 import type { CellsRepoHook } from '#domain/auth/participants/cells-hook.js';
+import type { ParticipantStateSignal } from '#domain/auth/participants/state-signal.js';
 import type { Duration, IdentityContext, IssuedCredential, UUIDv7 } from '../types.js';
 
 import { mintCredential } from './issuer.js';
@@ -63,6 +64,8 @@ export interface EnrollmentDeps extends MintDeps {
   dialect?: DbDialect;
   // Cross-domain hook into Cell Store: the Cell of a created Agent.
   cellsHook?: CellsRepoHook;
+  // Post-commit signal of a revival ('active'): Waggle replays on the holder's streams.
+  stateSignal?: ParticipantStateSignal;
 }
 
 export type WorkerTokenMode = 'create' | 'claim' | 'revive' | 'renew';
@@ -101,6 +104,8 @@ export interface ClaimEnrolledAgentInput {
   capabilities?: string[];
   enrolledVia: UUIDv7;
 }
+
+export type ReviveRetiredAgentInput = ClaimEnrolledAgentInput;
 
 export interface RenewWorkerTokenInput {
   agentId: UUIDv7;
@@ -149,6 +154,17 @@ export interface Enrollment {
   /** Re-binds an `active` enrollment Agent to the claiming enrollment; same id and Cell. */
   claimEnrolledAgent(
     input: ClaimEnrolledAgentInput,
+    identity: IdentityContext,
+  ): Promise<RegisteredAgent>;
+  /**
+   * `retired` to `active` with the same id and Cell (ADR-026): `retired_at` cleared,
+   * description, capabilities, `last_connected_at` and `enrolled_via` updated, the quota
+   * checked like a create, the old tokens superseded and a new one issued, all in one
+   * transaction. The UPDATE is conditional on `retired`, so the end of grace and a
+   * revival racing on the same Agent have exactly one winner.
+   */
+  reviveRetiredAgent(
+    input: ReviveRetiredAgentInput,
     identity: IdentityContext,
   ): Promise<RegisteredAgent>;
   /**
@@ -228,8 +244,18 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
         .set({ last_worker_jti: token.jti, last_connected_at: dateToIso(at) })
         .where('id', '=', input.agentId)
         .where('last_worker_jti', '=', input.presentedJti as UUIDv7)
+        // A retirement that commits first wins over the renewal (PRY-094).
+        .where('state', '=', 'active')
         .executeTakeFirst();
       if (Number(swapped.numUpdatedRows) === 0) {
+        const row = await trx
+          .selectFrom('agents')
+          .select('state')
+          .where('id', '=', input.agentId)
+          .executeTakeFirst();
+        if (row !== undefined && row.state !== 'active') {
+          throw new AuthError('PARTICIPANT_NOT_ACTIVE', { subCode: row.state });
+        }
         throw new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'holder_proof_superseded' });
       }
     } else {
@@ -259,6 +285,23 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
       await sql`select pg_advisory_xact_lock(hashtextextended(${`enroll:${enrolledVia}`}, 0))`.execute(
         trx,
       );
+    }
+  }
+
+  // Active Agents of the enrollment; retired and revoked ones do not count.
+  async function assertQuota(
+    trx: Transaction<Database>,
+    enrolledVia: UUIDv7,
+    limit: number,
+  ): Promise<void> {
+    const active = await trx
+      .selectFrom('agents')
+      .select((eb) => eb.fn.countAll<string | number | bigint>().as('n'))
+      .where('enrolled_via', '=', enrolledVia)
+      .where('state', '=', 'active')
+      .executeTakeFirstOrThrow();
+    if (Number(active.n) >= limit) {
+      throw new AuthError('ENROLLMENT_QUOTA_EXCEEDED', { limit });
     }
   }
 
@@ -327,15 +370,7 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
 
       return deps.db.transaction().execute(async (trx) => {
         await lockEnrollment(trx, input.enrolledVia);
-        const active = await trx
-          .selectFrom('agents')
-          .select((eb) => eb.fn.countAll<string | number | bigint>().as('n'))
-          .where('enrolled_via', '=', input.enrolledVia)
-          .where('state', '=', 'active')
-          .executeTakeFirstOrThrow();
-        if (Number(active.n) >= limit) {
-          throw new AuthError('ENROLLMENT_QUOTA_EXCEEDED', { limit });
-        }
+        await assertQuota(trx, input.enrolledVia, limit);
 
         const id = uuidv7();
         try {
@@ -392,7 +427,8 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
         }
         assertEnrollmentOwner(identity, current.ownerId, input.enrolledVia);
 
-        await trx
+        // Conditional: a retirement that commits after the read above wins (PRY-094).
+        const claimed = await trx
           .updateTable('agents')
           .set({
             description: input.description,
@@ -401,7 +437,14 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
             enrolled_via: input.enrolledVia,
           })
           .where('id', '=', input.agentId)
-          .execute();
+          .where('state', '=', 'active')
+          .where('origin', '=', 'enrollment')
+          .executeTakeFirst();
+        if (Number(claimed.numUpdatedRows) === 0) {
+          throw new AuthError('INVALID_STATE_TRANSITION', {
+            subCode: 'claim_requires_active_enrollment_agent',
+          });
+        }
 
         const token = await issueWorkerToken(
           { agentId: input.agentId, mode: 'claim', enrolledVia: input.enrolledVia },
@@ -419,6 +462,51 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
       }
     },
 
+    async reviveRetiredAgent(input, identity): Promise<RegisteredAgent> {
+      validateDescription(input.description);
+      const limit = identity.snapshot.maxAgents ?? deps.hiveMaxAgents;
+
+      const revived = await deps.db.transaction().execute(async (trx) => {
+        await lockEnrollment(trx, input.enrolledVia);
+        const participant = await deps.participantsRepo.findById(input.agentId, trx);
+        const current = participant?.kind === 'agent' ? participant.agent : null;
+        if (!current || current.state !== 'retired' || current.origin !== 'enrollment') {
+          throw new AuthError('INVALID_STATE_TRANSITION', {
+            subCode: 'revive_requires_retired_enrollment_agent',
+          });
+        }
+        assertEnrollmentOwner(identity, current.ownerId, input.enrolledVia);
+        await assertQuota(trx, input.enrolledVia, limit);
+
+        const moved = await trx
+          .updateTable('agents')
+          .set({
+            state: 'active',
+            retired_at: null,
+            description: input.description,
+            capabilities: jsonStringify(input.capabilities ?? current.capabilities),
+            last_connected_at: dateToIso(now()),
+            enrolled_via: input.enrolledVia,
+          })
+          .where('id', '=', input.agentId)
+          .where('state', '=', 'retired')
+          .executeTakeFirst();
+        if (Number(moved.numUpdatedRows) === 0) {
+          throw new AuthError('INVALID_STATE_TRANSITION', {
+            subCode: 'revive_requires_retired_enrollment_agent',
+          });
+        }
+
+        const token = await issueWorkerToken(
+          { agentId: input.agentId, mode: 'revive', enrolledVia: input.enrolledVia },
+          trx,
+        );
+        return { agent: await loadAgent(trx, input.agentId), token };
+      });
+      deps.stateSignal?.emit({ participantId: input.agentId, newState: 'active' });
+      return revived;
+    },
+
     async revokeWorkerTokens(input, caller): Promise<{ revokedTokenJtis: UUIDv7[] }> {
       return deps.db.transaction().execute(async (trx) => {
         const agent = await trx
@@ -433,17 +521,19 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
           requireAdminCaller(caller);
         }
 
+        // The UPDATE first: it waits for a renewal holding the Agent row, so the
+        // blocklist statement below sees the token that renewal committed (PRY-094).
+        await trx
+          .updateTable('agents')
+          .set({ last_worker_jti: null })
+          .where('id', '=', input.agentId)
+          .execute();
         const revokedTokenJtis = await blocklistWorkerTokens(trx, {
           selector: { agentId: input.agentId },
           expiresAfter: cutoff(now()),
           reason: input.reason,
           revokedBy: input.revokedBy,
         });
-        await trx
-          .updateTable('agents')
-          .set({ last_worker_jti: null })
-          .where('id', '=', input.agentId)
-          .execute();
         return { revokedTokenJtis };
       });
     },

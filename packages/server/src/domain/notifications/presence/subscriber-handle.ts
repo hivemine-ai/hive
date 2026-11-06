@@ -33,6 +33,8 @@ export type StreamCloseReason =
   | 'credential_expired'
   | 'participant_revoked'
   | 'participant_suspended'
+  // ADR-026: the enrollment Worker was retired with the stream open.
+  | 'participant_retired'
   | 'evicted_lru'
   | 'shutdown'
   | 'replay_failed'

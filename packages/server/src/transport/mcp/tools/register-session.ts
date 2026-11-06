@@ -8,8 +8,10 @@
 //   validated, then the Agent of the owner with that name decides the path. None →
 //   createEnrolledAgent (the unique index serializes concurrent creates). Manual or
 //   Scout → NAME_TAKEN. Suspended → AGENT_SUSPENDED. Live holder → NAME_IN_USE.
-//   Offline → claimHolder, then claimEnrolledAgent; a failed transaction releases the
-//   reservation.
+//   Offline → claimHolder, then claimEnrolledAgent (active) or reviveRetiredAgent
+//   (retired, quota checked); a failed transaction releases the reservation. When the
+//   state moved between the read and the write (the retention job retired the Agent, or
+//   the end of grace revoked it), the registration is evaluated once more from scratch.
 //
 // Domain rejections of a registration feed a per-process counter per (owner, name): at
 // the threshold the owner gets one audit event and one notice in its Cell. A created
@@ -52,7 +54,7 @@ export interface RegisterSessionOutput {
   expires_at: string;
 }
 
-export type RegisterSessionOutcome = 'created' | 'claimed' | 'renewed';
+export type RegisterSessionOutcome = 'created' | 'claimed' | 'revived' | 'renewed';
 
 export interface RegisterSessionResult {
   outcome: RegisterSessionOutcome;
@@ -60,7 +62,10 @@ export interface RegisterSessionResult {
 }
 
 export interface RegisterSessionDeps {
-  enrollment: Pick<Enrollment, 'createEnrolledAgent' | 'claimEnrolledAgent' | 'renewWorkerToken'>;
+  enrollment: Pick<
+    Enrollment,
+    'createEnrolledAgent' | 'claimEnrolledAgent' | 'reviveRetiredAgent' | 'renewWorkerToken'
+  >;
   participantsRepo: Pick<
     ParticipantsReadRepo,
     'findAgentByName' | 'findAgentById' | 'findHivekeeperById'
@@ -90,6 +95,23 @@ const COUNTED_REJECTIONS: ReadonlySet<string> = new Set([
 interface Seen {
   agentId: UUIDv7 | null;
   previousEnrolledVia: UUIDv7 | null;
+  retiredAt: Date | null;
+}
+
+// A claim or revival whose conditional write found another state: the Agent moved
+// between the read and the write.
+const STATE_MOVED_SUBCODES: ReadonlySet<string> = new Set([
+  'claim_requires_active_enrollment_agent',
+  'revive_requires_retired_enrollment_agent',
+]);
+
+function isStateMoved(err: unknown): boolean {
+  return (
+    err instanceof AuthError &&
+    err.code === 'INVALID_STATE_TRANSITION' &&
+    err.subCode !== undefined &&
+    STATE_MOVED_SUBCODES.has(err.subCode)
+  );
 }
 
 function isCountedRejection(err: unknown): boolean {
@@ -203,7 +225,7 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
   // Actor is the owner, operating through its enrollment credential (decision 9.14).
   async function auditRegistration(
     ctx: RequestContext,
-    category: 'agent_enrolled' | 'agent_claimed',
+    category: 'agent_enrolled' | 'agent_claimed' | 'agent_revived',
     agentId: UUIDv7,
     detail: Record<string, unknown>,
   ): Promise<void> {
@@ -224,10 +246,15 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
   }
 
   async function register(input: RegisterSessionInput, ctx: RequestContext) {
-    const seen: Seen = { agentId: null, previousEnrolledVia: null };
+    const seen: Seen = { agentId: null, previousEnrolledVia: null, retiredAt: null };
     let result: RegisterSessionResult;
     try {
-      result = await registerOrReject(input, ctx, seen);
+      try {
+        result = await registerOrReject(input, ctx, seen);
+      } catch (err) {
+        if (!isStateMoved(err)) throw err;
+        result = await registerOrReject(input, ctx, seen);
+      }
     } catch (err) {
       if (isCountedRejection(err)) await onRejected(input, ctx, seen.agentId);
       throw err;
@@ -246,6 +273,11 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
         `Hive: new session agent ${agentRef} registered via enrollment credential ${enrolledVia}.`,
         { kind: 'agent_enrolled', agentRef, enrolledVia },
       );
+    } else if (result.outcome === 'revived') {
+      await auditRegistration(ctx, 'agent_revived', result.output.agent_id, {
+        enrolledVia,
+        retiredAt: seen.retiredAt?.toISOString() ?? null,
+      });
     } else {
       await auditRegistration(ctx, 'agent_claimed', result.output.agent_id, {
         enrolledVia,
@@ -301,6 +333,7 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
 
     seen.agentId = existing.id;
     seen.previousEnrolledVia = existing.enrolledVia;
+    seen.retiredAt = existing.retiredAt;
     if (existing.origin === 'manual' || existing.type === 'scout') {
       throw new AuthError('NAME_TAKEN');
     }
@@ -311,17 +344,18 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
       throw new AuthError('NAME_IN_USE');
     }
 
+    const reviving = existing.state === 'retired';
     let claimed: Awaited<ReturnType<RegisterSessionDeps['enrollment']['claimEnrolledAgent']>>;
     try {
-      claimed = await deps.enrollment.claimEnrolledAgent(
-        { agentId: existing.id, description: input.description, ...capabilities, enrolledVia },
-        identity,
-      );
+      const claim = { agentId: existing.id, description: input.description, ...capabilities };
+      claimed = reviving
+        ? await deps.enrollment.reviveRetiredAgent({ ...claim, enrolledVia }, identity)
+        : await deps.enrollment.claimEnrolledAgent({ ...claim, enrolledVia }, identity);
     } catch (err) {
       deps.presenceRegistry.releaseClaim(existing.id, requestId);
       throw err;
     }
-    return respond('claimed', claimed.agent, claimed.token, identity);
+    return respond(reviving ? 'revived' : 'claimed', claimed.agent, claimed.token, identity);
   }
 
   return async function registerSession(
