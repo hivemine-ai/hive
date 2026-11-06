@@ -121,6 +121,27 @@ describe('createNotificationsForProduction wiring', () => {
     expect(result.replay).toBeDefined();
   });
 
+  it.each([
+    ['suspended', 'participant_suspended'],
+    ['retired', 'participant_retired'],
+    ['revoked', 'participant_revoked'],
+  ] as const)(
+    'a %s state change closes the streams of the participant with %s',
+    (newState, reason) => {
+      const result = createNotificationsForProduction({
+        cellEvents: createCellEvents(),
+        cellsRepo: fakeCellsRepo(),
+        participantsRepo: fakeParticipantsRepo(),
+        logger: silentLogger(),
+      });
+      const close = vi.spyOn(result.presenceRegistry, 'closeParticipantStreams');
+
+      result.handleParticipantStateChanged({ participantId: 'agent-1', newState });
+
+      expect(close).toHaveBeenCalledWith('agent-1', reason);
+    },
+  );
+
   it('subscribes pipeline.handleMessageStored to cellEvents.messageStored', () => {
     const cellEvents = createCellEvents();
     const result = createNotificationsForProduction(

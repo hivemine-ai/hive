@@ -132,6 +132,6 @@ jobs:
       - name: Enrollment schema and auth tests (Postgres)
         run: pnpm --filter @hive/server exec vitest run src/persistence/migrate.enrollment.test.ts src/domain/auth/credentials/enrollment.worker-token.test.ts src/domain/auth/credentials/enrollment.registration.test.ts src/domain/auth/credentials/enrollment.cascade.test.ts src/persistence/migrate.audit-enrollment.test.ts src/domain/auth/participants/retention.test.ts --no-file-parallelism --reporter=verbose
 
-      # PRY-091: register_session over the real HTTP wire, with concurrent requests.
+      # PRY-091 / PRY-094: register_session and the retention job over the real HTTP wire, with concurrent requests.
       - name: register_session tests (Postgres)
-        run: pnpm --filter @hive/server exec vitest run src/transport/mcp/register-session.smoke.test.ts --no-file-parallelism --reporter=verbose
+        run: pnpm --filter @hive/server exec vitest run src/transport/mcp/register-session.smoke.test.ts src/transport/mcp/retention.smoke.test.ts --no-file-parallelism --reporter=verbose

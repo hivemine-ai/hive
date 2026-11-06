@@ -83,6 +83,7 @@ export type {
   EnrollmentDeps,
   IssueEnrollmentCredentialInput,
   RenewWorkerTokenInput,
+  ReviveRetiredAgentInput,
 } from './credentials/enrollment.js';
 
 export { createCredentialsReadRepo } from './credentials/repository.js';

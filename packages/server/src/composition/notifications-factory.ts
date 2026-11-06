@@ -242,10 +242,7 @@ export function createNotificationsForProduction(
         }
         return;
       }
-      presenceRegistry.closeParticipantStreams(
-        participantId,
-        newState === 'suspended' ? 'participant_suspended' : 'participant_revoked',
-      );
+      presenceRegistry.closeParticipantStreams(participantId, `participant_${newState}`);
     },
     stop() {
       senderThrottle.stop();

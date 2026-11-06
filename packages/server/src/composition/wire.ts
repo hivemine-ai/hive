@@ -468,6 +468,8 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     logger,
     dialect: dbConfig.dialect,
     cellsHook: createCellsHookAdapter(cellsRepo),
+    // A revival signals 'active', which replays on the holder's open streams.
+    stateSignal: participantStateSignal,
     enrollmentTtlMs: enrollmentConfig.enrollmentTtlMs,
     hiveMaxAgents: enrollmentConfig.hiveMaxAgents,
     workerTokenTtlMs: cfg.workerTokenTtlMs,
