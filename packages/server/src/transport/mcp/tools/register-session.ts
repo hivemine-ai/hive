@@ -11,6 +11,10 @@
 //   Offline → claimHolder, then claimEnrolledAgent; a failed transaction releases the
 //   reservation.
 //
+// Domain rejections of a registration feed a per-process counter per (owner, name): at
+// the threshold the owner gets one audit event and one notice in its Cell. A created
+// Agent is announced to the owner the same way. A failed notice never fails the call.
+//
 // The outcome stays internal (logs); the wire carries only the new token.
 
 import { z } from 'zod';
@@ -24,9 +28,12 @@ import type {
   ParticipantsReadRepo,
   UUIDv7,
 } from '#domain/auth/index.js';
+import type { AuditRecorder } from '#domain/audit/index.js';
+import type { Sender } from '#domain/cells/index.js';
 import type { PresenceRegistry } from '#domain/notifications/index.js';
 import type { Logger } from '#observability/logger.js';
 
+import type { RejectAlertCounter } from '../enrollment-guards.js';
 import type { RequestContext } from '../types.js';
 
 const DESCRIPTION_MAX_LENGTH = 280;
@@ -64,7 +71,27 @@ export interface RegisterSessionDeps {
     participantId: UUIDv7,
     credential: { jti: UUIDv7; expiresAt: Date },
   ) => number;
+  rejectAlerts: RejectAlertCounter;
+  /** HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES, for the text and the audit detail. */
+  rejectAlertWindowMinutes: number;
+  sender: Pick<Sender, 'depositSystemNotification'>;
+  auditRecorder: Pick<AuditRecorder, 'recordEvent'>;
   logger: Pick<Logger, 'info' | 'warn'>;
+}
+
+const COUNTED_REJECTIONS: ReadonlySet<string> = new Set([
+  'NAME_IN_USE',
+  'NAME_TAKEN',
+  'AGENT_SUSPENDED',
+  'ENROLLMENT_QUOTA_EXCEEDED',
+]);
+
+function isCountedRejection(err: unknown): boolean {
+  if (!(err instanceof AuthError)) return false;
+  return (
+    COUNTED_REJECTIONS.has(err.code) ||
+    (err.code === 'INVALID_INPUT' && err.subCode === 'name_prefix_mismatch')
+  );
 }
 
 export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
@@ -111,7 +138,84 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
     return respond('renewed', agent, token, identity);
   }
 
+  async function notifyOwner(
+    kind: 'agent_enrolled' | 'enrollment_reject_alert',
+    ownerId: UUIDv7,
+    body: string,
+    action: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await deps.sender.depositSystemNotification(
+        { recipientId: ownerId, body, action },
+        { kind: 'system' },
+      );
+    } catch {
+      deps.logger.warn({ event: 'mcp_enrollment_notify_failed', kind }, 'owner notice failed');
+    }
+  }
+
+  async function onRejected(
+    input: RegisterSessionInput,
+    ctx: RequestContext,
+    agentId: UUIDv7 | null,
+  ): Promise<void> {
+    const { identity } = ctx;
+    const verdict = deps.rejectAlerts.record(identity.participantId, input.name);
+    if (!verdict.alert) return;
+    const enrolledVia = identity.snapshot.credentialJti;
+    const windowMinutes = deps.rejectAlertWindowMinutes;
+    await deps.auditRecorder.recordEvent({
+      category: 'enrollment_reject_alert',
+      decision: 'deny',
+      actorId: identity.participantId,
+      actorKind: 'hivekeeper',
+      subjectId: agentId,
+      subjectKind: agentId !== null ? 'participant' : null,
+      reasonCode: null,
+      detail: {
+        name: input.name,
+        rejections: verdict.rejections,
+        windowMinutes,
+        enrolledVia,
+        viaEnrollmentJti: enrolledVia,
+      },
+      requestId: ctx.requestId,
+      hiveId: identity.hiveId,
+      occurredAt: new Date(),
+    });
+    await notifyOwner(
+      'enrollment_reject_alert',
+      identity.participantId,
+      `Hive: ${String(verdict.rejections)} rejected session registrations for name '${input.name}' in ${String(windowMinutes)} min. If this was not you, revoke the enrollment credential.`,
+      { kind: 'enrollment_reject_alert', name: input.name, enrolledVia },
+    );
+  }
+
   async function register(input: RegisterSessionInput, ctx: RequestContext) {
+    const seen: { agentId: UUIDv7 | null } = { agentId: null };
+    try {
+      const result = await registerOrReject(input, ctx, seen);
+      if (result.outcome === 'created') {
+        const enrolledVia = ctx.identity.snapshot.credentialJti;
+        await notifyOwner(
+          'agent_enrolled',
+          ctx.identity.participantId,
+          `Hive: new session agent ${result.output.agent_ref} registered via enrollment credential ${enrolledVia}.`,
+          { kind: 'agent_enrolled', agentRef: result.output.agent_ref, enrolledVia },
+        );
+      }
+      return result;
+    } catch (err) {
+      if (isCountedRejection(err)) await onRejected(input, ctx, seen.agentId);
+      throw err;
+    }
+  }
+
+  async function registerOrReject(
+    input: RegisterSessionInput,
+    ctx: RequestContext,
+    seen: { agentId: UUIDv7 | null },
+  ): Promise<RegisterSessionResult> {
     const { identity, requestId } = ctx;
     const enrolledVia = identity.snapshot.credentialJti;
     validateEnrollmentName(input.name, identity.snapshot.namePrefix);
@@ -137,6 +241,7 @@ export function createRegisterSessionHandler(deps: RegisterSessionDeps) {
       return respond('created', created.agent, created.token, identity);
     }
 
+    seen.agentId = existing.id;
     if (existing.origin === 'manual' || existing.type === 'scout') {
       throw new AuthError('NAME_TAKEN');
     }

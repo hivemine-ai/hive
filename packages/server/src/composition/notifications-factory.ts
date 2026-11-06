@@ -12,7 +12,7 @@
 // in-tree `createCellEvents` (Cell Store) already satisfies this; if it is
 // ever swapped for an async-emit lib the race analysis must be revisited.
 
-import type { ParticipantStateChange, ParticipantsReadRepo } from '#domain/auth/index.js';
+import type { ParticipantStateChange, ParticipantsReadRepo, UUIDv7 } from '#domain/auth/index.js';
 import type { CellEvents, CellsRepo } from '#domain/cells/index.js';
 import {
   createBuilder,
@@ -38,6 +38,8 @@ export interface NotificationsFactoryDeps {
   cellsRepo: CellsRepo;
   participantsRepo: ParticipantsReadRepo;
   logger: Logger;
+  /** ADR-026: the Hive id, the sender of system notifications. */
+  hiveId?: UUIDv7;
 }
 
 export interface NotificationsFactoryOptions {
@@ -150,7 +152,10 @@ export function createNotificationsForProduction(
 ): Notifications {
   const config = resolveNotificationsConfig(process.env, options);
 
-  const builder = createBuilder({ cellsRepo: deps.cellsRepo });
+  const builder = createBuilder({
+    cellsRepo: deps.cellsRepo,
+    ...(deps.hiveId !== undefined && { systemSenderId: deps.hiveId }),
+  });
 
   // Forward reference: the registry calls the replay on ready(), and the replay asks
   // the registry whether the stream is still open before delivering.

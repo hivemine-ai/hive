@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AuthError } from '#domain/auth/index.js';
 import type { Agent, Hivekeeper, IdentityContext, UUIDv7 } from '#domain/auth/index.js';
 
+import { createRejectAlertCounter } from '../enrollment-guards.js';
 import type { RequestContext } from '../types.js';
 
 import { RegisterSessionInputSchema, createRegisterSessionHandler } from './register-session.js';
@@ -119,6 +120,19 @@ function build(existing: Agent | null = null, live = false) {
       releaseClaim: vi.fn(),
     },
     rebindParticipantStreams: vi.fn(() => 0),
+    rejectAlerts: createRejectAlertCounter({ threshold: 2, windowMinutes: 10 }),
+    rejectAlertWindowMinutes: 10,
+    sender: {
+      depositSystemNotification: vi.fn(() =>
+        Promise.resolve({
+          messageId: 'm',
+          sentAt: new Date(),
+          storedAt: new Date(),
+          replayed: false,
+        }),
+      ),
+    },
+    auditRecorder: { recordEvent: vi.fn(() => Promise.resolve()) },
     logger: { info: vi.fn(), warn: vi.fn() },
   };
   const handler = createRegisterSessionHandler(deps);
@@ -327,6 +341,113 @@ describe('register_session — identity guard', () => {
     await expectAuthError(
       handler(INPUT, { ...ctx, identity: { ...ctx.identity, snapshot } }),
       'INSUFFICIENT_PRIVILEGE',
+    );
+  });
+});
+
+describe('register_session — repeated rejections and owner notices', () => {
+  it('alerts once at the threshold: one audit event and one system notification', async () => {
+    const { deps, handler } = build(agent({ origin: 'manual', enrolledVia: null }));
+
+    for (let i = 0; i < 3; i += 1) {
+      await expectAuthError(handler(INPUT, enrollCtx()), 'NAME_TAKEN');
+    }
+
+    expect(deps.auditRecorder.recordEvent).toHaveBeenCalledTimes(1);
+    expect(deps.auditRecorder.recordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: 'enrollment_reject_alert',
+        decision: 'deny',
+        actorId: OWNER_ID,
+        actorKind: 'hivekeeper',
+        subjectId: AGENT_ID,
+        subjectKind: 'participant',
+        hiveId: HIVE_ID,
+        requestId: REQUEST_ID,
+        detail: {
+          name: 'claude-api',
+          rejections: 2,
+          windowMinutes: 10,
+          enrolledVia: ENROLLMENT_JTI,
+          viaEnrollmentJti: ENROLLMENT_JTI,
+        },
+      }),
+    );
+    expect(deps.sender.depositSystemNotification).toHaveBeenCalledTimes(1);
+    expect(deps.sender.depositSystemNotification).toHaveBeenCalledWith(
+      {
+        recipientId: OWNER_ID,
+        body: "Hive: 2 rejected session registrations for name 'claude-api' in 10 min. If this was not you, revoke the enrollment credential.",
+        action: {
+          kind: 'enrollment_reject_alert',
+          name: 'claude-api',
+          enrolledVia: ENROLLMENT_JTI,
+        },
+      },
+      { kind: 'system' },
+    );
+  });
+
+  it('counts a name_prefix_mismatch, and an alert for a name that never existed has no subject', async () => {
+    const { deps, handler } = build(null);
+
+    for (let i = 0; i < 2; i += 1) {
+      await expectAuthError(
+        handler({ ...INPUT, name: 'other-api' }, enrollCtx('claude-')),
+        'INVALID_INPUT',
+      );
+    }
+
+    expect(deps.auditRecorder.recordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ subjectId: null, subjectKind: null }),
+    );
+  });
+
+  it('does not count a malformed name, an invalid description or an auth failure', async () => {
+    const { deps, handler } = build(null);
+    deps.enrollment.createEnrolledAgent.mockRejectedValue(new AuthError('CREDENTIAL_REVOKED'));
+
+    for (let i = 0; i < 3; i += 1) {
+      await handler({ ...INPUT, name: 'Bad' }, enrollCtx()).catch(() => undefined);
+      await handler({ ...INPUT, description: 'a\nb' }, enrollCtx()).catch(() => undefined);
+      await handler(INPUT, enrollCtx()).catch(() => undefined);
+    }
+
+    expect(deps.auditRecorder.recordEvent).not.toHaveBeenCalled();
+    expect(deps.sender.depositSystemNotification).not.toHaveBeenCalled();
+  });
+
+  it('notifies the owner of a created Agent, and only of a created one', async () => {
+    const created = build(null);
+    await created.handler(INPUT, enrollCtx());
+    const claimed = build(agent());
+    await claimed.handler(INPUT, enrollCtx());
+
+    expect(created.deps.sender.depositSystemNotification).toHaveBeenCalledWith(
+      {
+        recipientId: OWNER_ID,
+        body: `Hive: new session agent claude-api@alice.acme registered via enrollment credential ${ENROLLMENT_JTI}.`,
+        action: {
+          kind: 'agent_enrolled',
+          agentRef: 'claude-api@alice.acme',
+          enrolledVia: ENROLLMENT_JTI,
+        },
+      },
+      { kind: 'system' },
+    );
+    expect(claimed.deps.sender.depositSystemNotification).not.toHaveBeenCalled();
+  });
+
+  it('a failed notice is logged and never fails the registration', async () => {
+    const { deps, handler } = build(null);
+    deps.sender.depositSystemNotification.mockRejectedValue(new Error('cell closed'));
+
+    const result = await handler(INPUT, enrollCtx());
+
+    expect(result.outcome).toBe('created');
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      { event: 'mcp_enrollment_notify_failed', kind: 'agent_enrolled' },
+      expect.any(String),
     );
   });
 });

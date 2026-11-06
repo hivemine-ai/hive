@@ -30,12 +30,18 @@ import { attachRequestIdHook } from '#observability/request-id.js';
 import type { Database } from '#persistence/schema.js';
 
 import {
+  REGISTER_SESSION_TOOL,
   requestOperation,
   toAuthInfo,
   verifyBearerHeader,
   type LastConnectedRefresher,
 } from './auth-binding.js';
-import { MCP_ERR_FORBIDDEN, MCP_ERR_INTERNAL } from './error-codes.js';
+import type { RegisterRateLimiter } from './enrollment-guards.js';
+import {
+  MCP_ERR_ENROLLMENT_RATE_LIMITED,
+  MCP_ERR_FORBIDDEN,
+  MCP_ERR_INTERNAL,
+} from './error-codes.js';
 import { mapDomainError } from './error-mapper.js';
 import { isAllowedByOriginGuard } from './origin-guard.js';
 import type { McpTransport } from './server.js';
@@ -89,6 +95,8 @@ export interface HttpHostDeps {
   signingKeysProvider: () => Iterable<SigningKey>;
   logger: Logger;
   listenEdge?: ListenEdge;
+  /** ADR-026: limit of register_session per enrollment jti, or per Agent on a renewal. */
+  registerRateLimiter?: RegisterRateLimiter;
 }
 
 export interface HttpHostOptions {
@@ -243,6 +251,33 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
     const body = req.body;
     const method = rpcMethod(body);
     const isListen = method === LISTEN_METHOD;
+    const isRegister = requestOperation(body) === `tools_call:${REGISTER_SESSION_TOOL}`;
+    if (isRegister && deps.registerRateLimiter) {
+      // Before the domain: an exceeded key never reaches register_session.
+      const keyKind = identity.snapshot.scope === 'enroll' ? 'enrollment_jti' : 'agent_id';
+      const key =
+        keyKind === 'enrollment_jti' ? identity.snapshot.credentialJti : identity.participantId;
+      const verdict = deps.registerRateLimiter.hit(`${keyKind}:${key}`);
+      if (!verdict.allowed) {
+        deps.logger.warn(
+          {
+            event: 'mcp_enrollment_rate_limited',
+            keyKind,
+            retryAfterSeconds: verdict.retryAfterSeconds,
+          },
+          'register_session rate limited',
+        );
+        return reply
+          .code(429)
+          .header('retry-after', String(verdict.retryAfterSeconds))
+          .type('application/json')
+          .send({
+            jsonrpc: '2.0',
+            error: { code: MCP_ERR_ENROLLMENT_RATE_LIMITED, message: 'too many registrations' },
+            id: rpcId(body),
+          });
+      }
+    }
     const leaseKey = headerString(req.headers[LEASE_REQUEST_HEADER]);
     if (method === DISCOVER_METHOD && leaseKey !== undefined) {
       const renewed = deps.listenEdge?.renewLease({ key: leaseKey, identity }) ?? false;
@@ -307,7 +342,11 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
         })
       : undefined;
 
-    raw.writeHead(response.status, Object.fromEntries(response.headers));
+    raw.writeHead(response.status, {
+      ...Object.fromEntries(response.headers),
+      // The result carries a Worker token.
+      ...(isRegister && { 'cache-control': 'no-store' }),
+    });
     if (!response.body) {
       raw.end();
       return;

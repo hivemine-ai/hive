@@ -488,6 +488,82 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
     });
   });
 
+  describe('owner notices and the system sender', () => {
+    async function auditRows(
+      category: 'enrollment_reject_alert' | 'agent_enrolled' | 'agent_claimed',
+    ) {
+      return db.selectFrom('audit_log').selectAll().where('category', '=', category).execute();
+    }
+
+    it('five rejections of one name: one enrollment_reject_alert and one notice in the owner Cell', async () => {
+      const { jwt, jti } = await issueEnrollment();
+      const owner = await client(world.jwtAdmin);
+      const before = await owner.callTool({ name: 'check_unread_messages', arguments: {} });
+      const unreadBefore = (before.structuredContent as { unread_count: number }).unread_count;
+
+      for (let i = 0; i < 6; i += 1) {
+        const outcome = await registerRaw(world, jwt, {
+          name: 'worker-a',
+          description: DESCRIPTION,
+        });
+        expect(outcome.error?.code).toBe(-32008);
+      }
+
+      const alerts = await auditRows('enrollment_reject_alert');
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toMatchObject({
+        decision: 'deny',
+        actor_id: world.adminId,
+        actor_kind: 'hivekeeper',
+        subject_id: world.workerAId,
+      });
+      expect(JSON.parse(alerts[0]?.detail as string)).toEqual({
+        name: 'worker-a',
+        rejections: 5,
+        windowMinutes: 10,
+        enrolledVia: jti,
+        viaEnrollmentJti: jti,
+      });
+      const after = await owner.callTool({ name: 'check_unread_messages', arguments: {} });
+      const summary = after.structuredContent as { unread_count: number; sender_ids: string[] };
+      expect(summary.unread_count).toBe(unreadBefore + 1);
+      expect(summary.sender_ids).toContain('system');
+      expect(summary.sender_ids).not.toContain(world.hiveId);
+    });
+
+    it('a created Agent is announced once; the notice reads as system and cannot be answered', async () => {
+      const { jwt, jti } = await issueEnrollment();
+      const registered = await register(jwt);
+      await register(jwt); // a claim: no second notice
+
+      const owner = await client(world.jwtAdmin);
+      const mailbox = await owner.callTool({ name: 'read_mailbox', arguments: {} });
+      const notices = (
+        mailbox.structuredContent as {
+          messages: {
+            id: string;
+            from: string;
+            from_kind?: string;
+            body: string;
+            action: unknown;
+          }[];
+        }
+      ).messages.filter((m) => m.from === 'system');
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toMatchObject({
+        from_kind: 'system',
+        body: `Hive: new session agent ${registered.agent_ref} registered via enrollment credential ${jti}.`,
+        action: { kind: 'agent_enrolled', agentRef: registered.agent_ref, enrolledVia: jti },
+      });
+
+      const reply = await raw(world, world.jwtAdmin, 'tools/call', {
+        name: 'reply_to',
+        arguments: { message_id: notices[0]?.id, type: 'response', body: 'thanks' },
+      });
+      expect(reply.error).toEqual({ code: -32004, message: 'recipient is not reachable' });
+    });
+  });
+
   it('is caught by ProtocolError in the SDK client with the wire code', async () => {
     const { jwt } = await issueEnrollment();
     const enrolled = await client(jwt);
@@ -577,4 +653,42 @@ describe(`register_session renewal and the listen stream (${PG_URL ? 'postgres' 
     await expect.poll(() => registry.isHolderLive(first.agent_id), { timeout: 3000 }).toBe(false);
     await expect.poll(() => closed, { timeout: 3000 }).toBe(true);
   }, 15_000);
+});
+
+describe(`register_session rate limit (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
+  let world: SmokeWorld;
+  let db: Kysely<Database>;
+
+  beforeEach(async () => {
+    world = await seedSmokeWorld({
+      ...(PG_URL !== undefined && { pgUrl: PG_URL }),
+      wire: { enrollmentRegisterRateLimit: 2, enrollmentRegisterRateWindowSeconds: 60 },
+    });
+    db = createDb(world.dbConfig);
+  });
+
+  afterEach(async () => {
+    await db.destroy();
+    await world.cleanup();
+  });
+
+  it('answers 429 with Retry-After and -32011 once the enrollment spent its window', async () => {
+    const credential = await createEnrollment({
+      signingKey: world.signingKey,
+      participantsRepo: createParticipantsReadRepo(db, world.dbConfig.dialect),
+      hiveStableIdentifier: world.hiveId,
+      db,
+      enrollmentTtlMs: 90 * DAY_MS,
+      hiveMaxAgents: 10,
+    }).issueEnrollmentCredential({ ownerId: world.adminId }, { kind: 'system' });
+    const args = { name: 'claude-api', description: DESCRIPTION };
+
+    await registerRaw(world, credential.jwt, args);
+    await registerRaw(world, credential.jwt, args);
+    const limited = await registerRaw(world, credential.jwt, args);
+
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get('retry-after'))).toBeGreaterThan(0);
+    expect(limited.error).toEqual({ code: -32011, message: 'too many registrations' });
+  });
 });

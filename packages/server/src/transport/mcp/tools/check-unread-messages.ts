@@ -4,6 +4,7 @@ import { CellError } from '#domain/cells/index.js';
 import type { CellsRepo } from '#domain/cells/index.js';
 
 import type { RequestContext } from '../types.js';
+import { SYSTEM_SENDER } from '#transport/mcp/views/message-view-wire.js';
 
 export const CheckUnreadMessagesInputSchema = z.object({}).strict();
 export type CheckUnreadMessagesInput = z.infer<typeof CheckUnreadMessagesInputSchema>;
@@ -29,7 +30,10 @@ export function createCheckUnreadMessagesHandler(deps: CheckUnreadMessagesDeps) 
     const summary = await deps.cellsRepo.summarizeUnreadForCell(cell.id);
     return {
       unread_count: summary.unreadCount,
-      sender_ids: summary.distinctSenderIds,
+      // A notification of the Hive comes from hives.id, which is no participant.
+      sender_ids: summary.distinctSenderIds.map((id) =>
+        id === ctx.identity.hiveId ? SYSTEM_SENDER : id,
+      ),
     };
   };
 }

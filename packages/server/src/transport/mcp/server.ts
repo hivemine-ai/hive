@@ -41,6 +41,10 @@ export interface McpTransportDeps {
   enrollment: ToolCatalogDeps['enrollment'];
   /** ADR-026: `listen-stream.ts` re-binds the open streams of a renewed Agent. */
   rebindParticipantStreams: ToolCatalogDeps['rebindParticipantStreams'];
+  /** ADR-026: repeated rejections of register_session per (owner, name). */
+  rejectAlerts: ToolCatalogDeps['rejectAlerts'];
+  rejectAlertWindowMinutes: number;
+  auditRecorder: ToolCatalogDeps['auditRecorder'];
 }
 
 export interface McpTransport {
@@ -80,6 +84,9 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
     maxPageSize: deps.listAgentsMaxPageSize,
     enrollment: deps.enrollment,
     rebindParticipantStreams: deps.rebindParticipantStreams,
+    rejectAlerts: deps.rejectAlerts,
+    rejectAlertWindowMinutes: deps.rejectAlertWindowMinutes,
+    auditRecorder: deps.auditRecorder,
     logger: deps.logger,
   });
 

@@ -19,6 +19,7 @@ import { sql } from 'kysely';
 import type { Kysely, Transaction } from 'kysely';
 import { v7 as uuidv7, validate as uuidValidate, version as uuidVersion } from 'uuid';
 
+import type { CallerContext } from '#domain/auth/caller-context.js';
 import type { UUIDv7 } from '#domain/auth/types.js';
 import type { Logger } from '#observability/logger.js';
 import type { DbDialect } from '#persistence/db.js';
@@ -85,8 +86,25 @@ export interface SenderDeps {
   logger?: Logger;
 }
 
+export interface SystemNotificationInput {
+  recipientId: UUIDv7;
+  body: string;
+  action?: ActionDescriptor;
+}
+
 export interface Sender {
   sendMessage(input: SendMessageInput): Promise<SendResult>;
+  /**
+   * ADR-026: a notice of the Hive to the Cell of a participant, only from the system
+   * caller. `from_participant_id` is `hives.id`, which is no participant, so the read
+   * views render it as `system` and `reply_to` to it fails. No visibility check and no
+   * per-sender quota; body and action are validated as in sendMessage. A missing or
+   * closed Cell fails with RECIPIENT_UNREACHABLE.
+   */
+  depositSystemNotification(
+    input: SystemNotificationInput,
+    caller: CallerContext,
+  ): Promise<SendResult>;
 }
 
 // ---------- Implementation ----------
@@ -397,7 +415,75 @@ export function createSender(deps: SenderDeps): Sender {
     return result;
   }
 
-  return { sendMessage };
+  async function depositSystemNotification(
+    input: SystemNotificationInput,
+    caller: CallerContext,
+  ): Promise<SendResult> {
+    if (caller.kind !== 'system') {
+      throw new CellError('INSUFFICIENT_PRIVILEGE', { subCode: 'system_caller_required' });
+    }
+    validateBodySize(input.body, config.maxBodyBytes);
+    validateAction(input.action, config.maxActionBytes);
+
+    const messageId = uuidv7();
+    const storedAt = now();
+    const stored = await deps.db.transaction().execute(async (tx) => {
+      let q = tx
+        .selectFrom('cells')
+        .select(['id', 'state', 'hive_id'])
+        .where('owner_id', '=', input.recipientId);
+      if (config.dialect === 'postgres') q = q.forShare();
+      const cell = await q.executeTakeFirst();
+      if (!cell || cell.state === 'closed') {
+        throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'cell_closed_or_missing' });
+      }
+      await deps.cellsRepo.insertMessage(
+        {
+          id: messageId,
+          cellId: cell.id,
+          fromParticipantId: cell.hive_id,
+          toParticipantId: input.recipientId,
+          type: 'notification',
+          body: input.body,
+          action: input.action ?? null,
+          replyTo: null,
+          ttl: null,
+          sentAt: storedAt,
+          storedAt,
+          readAt: null,
+          state: 'stored',
+          expiredAt: null,
+        },
+        tx,
+      );
+      return { cellId: cell.id, hiveId: cell.hive_id };
+    });
+
+    deps.events.emit(
+      'messageStored',
+      {
+        messageId,
+        cellId: stored.cellId,
+        recipientId: input.recipientId,
+        fromParticipantId: stored.hiveId,
+        type: 'notification',
+        storedAt,
+      },
+      deps.onEmitError,
+    );
+    deps.logger?.info(
+      {
+        event: 'cell_system_notification_stored',
+        messageId,
+        cellId: stored.cellId,
+        recipientId: input.recipientId,
+      },
+      'cell system notification stored',
+    );
+    return { messageId, sentAt: storedAt, storedAt, replayed: false };
+  }
+
+  return { sendMessage, depositSystemNotification };
 }
 
 /**

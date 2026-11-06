@@ -77,6 +77,10 @@ import {
 } from './snapshot-writer.js';
 import { createVisibilityEngineForProduction } from './visibility-engine-factory.js';
 import { createLastConnectedRefresher } from '#transport/mcp/auth-binding.js';
+import {
+  createRegisterRateLimiter,
+  createRejectAlertCounter,
+} from '#transport/mcp/enrollment-guards.js';
 import { createListenStreams, type ListenStreams } from '#transport/mcp/listen-stream.js';
 import { createMcpTransport } from '#transport/mcp/server.js';
 import { createHttpHost } from '#transport/mcp/http-host.js';
@@ -121,6 +125,14 @@ export interface WireConfig {
   maxUnreadPerSender?: number;
   /** From HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS. Default 3600. 0 disables the purge. */
   revocationPurgeIntervalSeconds?: number;
+  /** From HIVE_ENROLLMENT_REGISTER_RATE_LIMIT. Default 30 per window. 0 disables it. */
+  enrollmentRegisterRateLimit?: number;
+  /** From HIVE_ENROLLMENT_REGISTER_RATE_WINDOW_SECONDS. Default 60. */
+  enrollmentRegisterRateWindowSeconds?: number;
+  /** From HIVE_ENROLLMENT_REJECT_ALERT_THRESHOLD. Default 5. 0 disables the alert. */
+  enrollmentRejectAlertThreshold?: number;
+  /** From HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES. Default 10. */
+  enrollmentRejectAlertWindowMinutes?: number;
 }
 
 export interface WireDeps {
@@ -149,6 +161,30 @@ export function resolveWireConfigFromEnv(
   return {
     workerTokenTtlMs:
       overrides.workerTokenTtlMs ?? resolveEnrollmentConfigFromEnv(env).workerTokenTtlMs,
+    enrollmentRegisterRateLimit:
+      overrides.enrollmentRegisterRateLimit ??
+      parseIntEnv(env['HIVE_ENROLLMENT_REGISTER_RATE_LIMIT'], 30, {
+        name: 'HIVE_ENROLLMENT_REGISTER_RATE_LIMIT',
+        min: 0,
+      }),
+    enrollmentRegisterRateWindowSeconds:
+      overrides.enrollmentRegisterRateWindowSeconds ??
+      parseIntEnv(env['HIVE_ENROLLMENT_REGISTER_RATE_WINDOW_SECONDS'], 60, {
+        name: 'HIVE_ENROLLMENT_REGISTER_RATE_WINDOW_SECONDS',
+        min: 1,
+      }),
+    enrollmentRejectAlertThreshold:
+      overrides.enrollmentRejectAlertThreshold ??
+      parseIntEnv(env['HIVE_ENROLLMENT_REJECT_ALERT_THRESHOLD'], 5, {
+        name: 'HIVE_ENROLLMENT_REJECT_ALERT_THRESHOLD',
+        min: 0,
+      }),
+    enrollmentRejectAlertWindowMinutes:
+      overrides.enrollmentRejectAlertWindowMinutes ??
+      parseIntEnv(env['HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES'], 10, {
+        name: 'HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES',
+        min: 1,
+      }),
     httpHost: overrides.httpHost ?? env['HIVE_MCP_HTTP_HOST'] ?? '0.0.0.0',
     httpPort:
       overrides.httpPort ??
@@ -374,6 +410,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     cellsRepo,
     participantsRepo,
     logger,
+    hiveId: hiveRow.id,
   });
 
   // State changes made in this process close or replay streams right away. Changes made
@@ -418,6 +455,16 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     enrollment,
     rebindParticipantStreams: (participantId, credential) =>
       listenStreamsRef?.rebindParticipantStreams(participantId, credential) ?? 0,
+    rejectAlerts: createRejectAlertCounter({
+      threshold: cfg.enrollmentRejectAlertThreshold,
+      windowMinutes: cfg.enrollmentRejectAlertWindowMinutes,
+    }),
+    rejectAlertWindowMinutes: cfg.enrollmentRejectAlertWindowMinutes,
+    auditRecorder: createAuditRecorder({
+      auditRepo: createAuditRepo(db),
+      logger,
+      onAfterRecord: () => snapshotWriter.writeRefresh(),
+    }),
   });
 
   const listenStreams = createListenStreams({
@@ -440,6 +487,10 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       verifier,
       listenEdge: listenStreams,
       lastConnected: createLastConnectedRefresher({ participantsRepo, logger }),
+      registerRateLimiter: createRegisterRateLimiter({
+        limit: cfg.enrollmentRegisterRateLimit,
+        windowSeconds: cfg.enrollmentRegisterRateWindowSeconds,
+      }),
       db,
       signingKeysProvider: () => signingKeys.values() as Iterable<SigningKey>,
       logger,

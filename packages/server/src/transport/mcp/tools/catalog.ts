@@ -96,6 +96,9 @@ export interface ToolCatalogDeps
     GetAgentStatusDeps {
   enrollment: RegisterSessionDeps['enrollment'];
   rebindParticipantStreams: RegisterSessionDeps['rebindParticipantStreams'];
+  rejectAlerts: RegisterSessionDeps['rejectAlerts'];
+  rejectAlertWindowMinutes: number;
+  auditRecorder: RegisterSessionDeps['auditRecorder'];
   logger: RegisterSessionDeps['logger'];
 }
 

@@ -13,6 +13,7 @@ import { createLogger } from '#observability/logger.js';
 import type { Logger } from '#observability/logger.js';
 
 import type { LastConnectedRefresher } from './auth-binding.js';
+import { createRegisterRateLimiter, type RegisterRateLimiter } from './enrollment-guards.js';
 import {
   createHttpHost,
   type HttpHost,
@@ -47,6 +48,7 @@ interface StubOptions {
   host?: HttpHostOptions;
   logger?: Logger;
   cellsRepo?: Partial<CellsRepo>;
+  registerRateLimiter?: RegisterRateLimiter;
 }
 
 let current: HttpHost | undefined;
@@ -66,6 +68,9 @@ async function startHost(options: StubOptions = {}): Promise<string> {
     listAgentsMaxPageSize: 100,
     enrollment: {} as McpTransportDeps['enrollment'],
     rebindParticipantStreams: () => 0,
+    rejectAlerts: { record: () => ({ alert: false }) },
+    rejectAlertWindowMinutes: 10,
+    auditRecorder: { recordEvent: () => Promise.resolve() },
   });
   current = createHttpHost(
     {
@@ -81,6 +86,7 @@ async function startHost(options: StubOptions = {}): Promise<string> {
       signingKeysProvider: () => [],
       logger,
       ...(options.listenEdge && { listenEdge: options.listenEdge }),
+      ...(options.registerRateLimiter && { registerRateLimiter: options.registerRateLimiter }),
     },
     { host: '127.0.0.1', port: 0, ...options.host },
   );
@@ -272,6 +278,74 @@ describe('scoped credentials at the edge', () => {
     const register = await callTool(url, 'register_session', {});
     expect(register.status).not.toBe(403);
     expect(refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe('register_session rate limit at the edge', () => {
+  const ENROLLMENT = {
+    ...IDENTITY,
+    kind: 'hivekeeper',
+    snapshot: { ...IDENTITY.snapshot, scope: 'enroll' },
+  } as unknown as IdentityContext;
+
+  it('answers 429 with Retry-After and -32011 once the key spent its window, logging no jti', async () => {
+    const warn = vi.fn();
+    const logger = createLogger({ level: 'silent' });
+    logger.warn = warn;
+    const url = await startHost({
+      verify: () => Promise.resolve(ENROLLMENT),
+      registerRateLimiter: createRegisterRateLimiter({ limit: 1, windowSeconds: 60 }),
+      logger,
+    });
+
+    const first = await callTool(url, 'register_session', {});
+    const second = await callTool(url, 'register_session', {});
+
+    expect(first.status).not.toBe(429);
+    expect(second.status).toBe(429);
+    expect(second.headers.get('retry-after')).toBe('60');
+    expect(((await second.json()) as RpcError).error).toEqual({
+      code: -32011,
+      message: 'too many registrations',
+    });
+    expect(warn).toHaveBeenCalledWith(
+      { event: 'mcp_enrollment_rate_limited', keyKind: 'enrollment_jti', retryAfterSeconds: 60 },
+      expect.any(String),
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(IDENTITY.snapshot.credentialJti);
+  });
+
+  it('keys a renewal by the Agent id and leaves other tools alone', async () => {
+    const hit = vi.fn(() => ({ allowed: true as const }));
+    const renewal = {
+      ...IDENTITY,
+      snapshot: { ...IDENTITY.snapshot, renewal: true },
+    } as unknown as IdentityContext;
+    const url = await startHost({
+      verifyRenewalBearer: () => Promise.resolve(renewal),
+      registerRateLimiter: { hit },
+    });
+    const bearer = `Bearer ${Buffer.from('{"alg":"EdDSA"}').toString('base64url')}.${Buffer.from(
+      '{"sub":"agent"}',
+    ).toString('base64url')}.c2ln`;
+
+    await post(
+      url,
+      'tools/call',
+      { name: 'register_session', arguments: {} },
+      { authorization: bearer },
+    );
+    await callTool(url, 'list_agents', {});
+
+    expect(hit.mock.calls).toEqual([[`agent_id:${PARTICIPANT_ID}`]]);
+  });
+
+  it('marks the register_session response as not cacheable', async () => {
+    const url = await startHost({ verify: () => Promise.resolve(ENROLLMENT) });
+
+    const res = await callTool(url, 'register_session', {});
+
+    expect(res.headers.get('cache-control')).toBe('no-store');
   });
 });
 
