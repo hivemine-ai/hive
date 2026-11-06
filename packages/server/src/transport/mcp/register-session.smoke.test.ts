@@ -10,6 +10,7 @@ import type { Kysely } from 'kysely';
 import {
   createEnrollment,
   createParticipantsReadRepo,
+  createRevoker,
   type Enrollment,
   type UUIDv7,
 } from '#domain/auth/index.js';
@@ -501,4 +502,79 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
     expect(err).toBeInstanceOf(ProtocolError);
     expect((err as ProtocolError).code).toBe(-32008);
   });
+});
+
+// A renewal re-binds the open listen stream of the Agent to the new token (ADR-026): the
+// stream does not close at the `exp` of the token it was opened with and the Agent stays
+// online; a later revocation of the enrollment still closes it on the next pass.
+describe(`register_session renewal and the listen stream (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
+  const TTL_MS = 4000;
+  let world: SmokeWorld;
+  let db: Kysely<Database>;
+  let clients: Client[];
+
+  beforeEach(async () => {
+    world = await seedSmokeWorld({
+      ...(PG_URL !== undefined && { pgUrl: PG_URL }),
+      wire: { workerTokenTtlMs: TTL_MS, reverifyIntervalSeconds: 1 },
+    });
+    db = createDb(world.dbConfig);
+    clients = [];
+  });
+
+  afterEach(async () => {
+    for (const client of clients) await client.close().catch(() => undefined);
+    await db.destroy();
+    await world.cleanup();
+  });
+
+  it('keeps the stream open and online past the original exp, and closes it on revocation', async () => {
+    const enrollment = createEnrollment({
+      signingKey: world.signingKey,
+      participantsRepo: createParticipantsReadRepo(db, world.dbConfig.dialect),
+      hiveStableIdentifier: world.hiveId,
+      db,
+      enrollmentTtlMs: 90 * DAY_MS,
+      hiveMaxAgents: 10,
+    });
+    const credential = await enrollment.issueEnrollmentCredential(
+      { ownerId: world.adminId },
+      { kind: 'system' },
+    );
+    const args = { name: 'claude-api', description: DESCRIPTION };
+    const first = (
+      (await registerRaw(world, credential.jwt, args)).result as { structuredContent: Registered }
+    ).structuredContent;
+    const firstExp = Date.parse(first.expires_at);
+
+    const holder = await connect(world, first.token);
+    clients.push(holder);
+    const uri = (await holder.listResources()).resources[0]?.uri as string;
+    const subscription = await holder.listen({ resourceSubscriptions: [uri] });
+    let closed = false;
+    void subscription.closed.then(
+      () => (closed = true),
+      () => (closed = true),
+    );
+    const registry = world.wire._presenceRegistry();
+    await expect.poll(() => registry.isHolderLive(first.agent_id)).toBe(true);
+
+    // Renew halfway, so the new exp lands clearly after the original one.
+    await new Promise((resolve) => setTimeout(resolve, TTL_MS / 2));
+    const renewal = await registerRaw(world, first.token, args);
+    expect(renewal.error).toBeUndefined();
+    const renewed = (renewal.result as { structuredContent: Registered }).structuredContent;
+    expect(Date.parse(renewed.expires_at)).toBeGreaterThan(firstExp);
+
+    // Past the exp of the token the stream was opened with.
+    await new Promise((resolve) => setTimeout(resolve, firstExp - Date.now() + 400));
+    expect(Date.now()).toBeLessThan(Date.parse(renewed.expires_at));
+    expect(closed).toBe(false);
+    expect(registry.isHolderLive(first.agent_id)).toBe(true);
+
+    await createRevoker({ db }).revokeCredential({ jti: credential.jti, reason: 'leaked' });
+
+    await expect.poll(() => registry.isHolderLive(first.agent_id), { timeout: 3000 }).toBe(false);
+    await expect.poll(() => closed, { timeout: 3000 }).toBe(true);
+  }, 15_000);
 });

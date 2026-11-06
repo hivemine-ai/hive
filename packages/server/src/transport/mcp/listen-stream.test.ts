@@ -526,3 +526,87 @@ describe('listen lease', () => {
     vi.useRealTimers();
   });
 });
+
+// ADR-026: a register_session renewal moves the open presence streams of the Agent to
+// the new token, so they survive the `exp` of the token they were opened with.
+describe('rebindParticipantStreams', () => {
+  const NEW_JTI = '01900000-0000-7000-8000-0000000000ee';
+
+  function expiringIdentity(ms: number): IdentityContext {
+    return {
+      ...IDENTITY,
+      snapshot: { ...IDENTITY.snapshot, credentialExpiresAt: new Date(Date.now() + ms) },
+    };
+  }
+
+  it('re-arms the expiry on the new token: the stream outlives the original exp', () => {
+    vi.useFakeTimers();
+    try {
+      const { streams, log } = build();
+      const { raw } = open(streams, [OWN_URI], { identity: expiringIdentity(5000) });
+
+      const rebound = streams.rebindParticipantStreams(IDENTITY.participantId, {
+        jti: NEW_JTI,
+        expiresAt: new Date(Date.now() + 20_000),
+      });
+      vi.advanceTimersByTime(10_000);
+
+      expect(rebound).toBe(1);
+      expect(raw.destroyed).toBe(false);
+      expect(streams.__openCount()).toBe(1);
+
+      vi.advanceTimersByTime(10_000);
+      expect(log.entries).toContainEqual(
+        expect.objectContaining({ event: 'mcp_listen_closed', closeReason: 'credential_expired' }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-verifies the new jti from then on', async () => {
+    const reverifyStream = vi.fn(() => Promise.resolve({ ok: true as const }));
+    const { streams } = build({ verifier: { reverifyStream } });
+    open(streams, [OWN_URI]);
+    const expiresAt = new Date(Date.now() + 60_000);
+
+    streams.rebindParticipantStreams(IDENTITY.participantId, { jti: NEW_JTI, expiresAt });
+    await streams.reverifyOpenStreams();
+
+    expect(reverifyStream).toHaveBeenCalledWith({
+      jti: NEW_JTI,
+      participantId: IDENTITY.participantId,
+      credentialExpiresAt: expiresAt,
+    });
+  });
+
+  it('re-binds every presence stream of the participant, and only those', () => {
+    const { streams } = build();
+    const other = {
+      ...IDENTITY,
+      participantId: '01900000-0000-7000-8000-0000000000cc',
+    };
+    open(streams, [OWN_URI]);
+    open(streams, [OWN_URI]);
+    open(streams, []);
+    open(streams, [OWN_URI], { identity: other });
+
+    const rebound = streams.rebindParticipantStreams(IDENTITY.participantId, {
+      jti: NEW_JTI,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    expect(rebound).toBe(2);
+  });
+
+  it('answers 0 when the holder has no stream', () => {
+    const { streams } = build();
+
+    expect(
+      streams.rebindParticipantStreams(IDENTITY.participantId, {
+        jti: NEW_JTI,
+        expiresAt: new Date(),
+      }),
+    ).toBe(0);
+  });
+});

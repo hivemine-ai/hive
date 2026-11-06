@@ -77,7 +77,7 @@ import {
 } from './snapshot-writer.js';
 import { createVisibilityEngineForProduction } from './visibility-engine-factory.js';
 import { createLastConnectedRefresher } from '#transport/mcp/auth-binding.js';
-import { createListenStreams } from '#transport/mcp/listen-stream.js';
+import { createListenStreams, type ListenStreams } from '#transport/mcp/listen-stream.js';
 import { createMcpTransport } from '#transport/mcp/server.js';
 import { createHttpHost } from '#transport/mcp/http-host.js';
 import type { HttpHost } from '#transport/mcp/http-host.js';
@@ -403,7 +403,9 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     holderProofWindowDays,
   });
 
-  // 7. MCP transport.
+  // 7. MCP transport. Forward reference: a renewal re-binds the streams of the listen
+  // edge, which is built from the transport's serverInfo.
+  let listenStreamsRef: ListenStreams | null = null;
   const mcpTransport = createMcpTransport({
     participantsRepo,
     cellsRepo,
@@ -414,7 +416,8 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     logger,
     listAgentsMaxPageSize: cfg.listAgentsMaxPageSize,
     enrollment,
-    rebindParticipantStreams: () => 0,
+    rebindParticipantStreams: (participantId, credential) =>
+      listenStreamsRef?.rebindParticipantStreams(participantId, credential) ?? 0,
   });
 
   const listenStreams = createListenStreams({
@@ -428,6 +431,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     reverifyIntervalSeconds: cfg.reverifyIntervalSeconds,
     leaseMs: cfg.listenLeaseMs > 0 ? cfg.listenLeaseMs : null,
   });
+  listenStreamsRef = listenStreams;
 
   // 8. HTTP host.
   const httpHost = createHttpHost(
