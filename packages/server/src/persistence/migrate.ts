@@ -74,26 +74,90 @@ export function isPendingMigrationsError(err: unknown): err is PendingMigrations
 }
 
 /**
- * Names of the catalog migrations not yet applied, in application order. Read-only:
- * Kysely's `getMigrations` only reads the migration table and never creates it.
+ * Raised when the database carries migrations this binary does not know: it was migrated by
+ * a newer `hivectl`. Running `migrate up` cannot help; the operator upgrades `hivectl`.
  */
+export class UnknownMigrationsError extends Error {
+  readonly code = 'MIGRATIONS_UNKNOWN' as const;
+  readonly unknown: readonly string[];
+
+  constructor(unknown: readonly string[]) {
+    super(
+      `the database has migrations unknown to this binary: ${unknown.join(', ')}; upgrade hivectl`,
+    );
+    this.name = 'UnknownMigrationsError';
+    this.unknown = unknown;
+  }
+}
+
+export function isUnknownMigrationsError(err: unknown): err is UnknownMigrationsError {
+  return err instanceof UnknownMigrationsError;
+}
+
+export interface SchemaStatus {
+  /** Migrations recorded in the migration table, catalog or not, sorted. */
+  applied: string[];
+  /** Catalog migrations not applied yet, sorted. */
+  pending: string[];
+  /** Applied migrations missing from the catalog (a newer binary ran them), sorted. */
+  unknown: string[];
+}
+
+const MIGRATION_TABLE = 'kysely_migration';
+
+/** Read-only: checks the table exists before reading it, and never creates it. */
+async function listExecutedMigrations(db: Kysely<Database>): Promise<string[]> {
+  const tables = await db.introspection.getTables({ withInternalKyselyTables: true });
+  if (!tables.some((t) => t.name === MIGRATION_TABLE)) return [];
+  const rows = await db
+    .selectFrom(MIGRATION_TABLE as never)
+    .select(['name'] as never)
+    .execute();
+  return (rows as { name: string }[]).map((r) => r.name).sort();
+}
+
+/** Applied, pending and unknown migrations of the database against the catalog. Read-only. */
+export async function getSchemaStatus(
+  db: Kysely<Database>,
+  opts: MigrateOptions = {},
+): Promise<SchemaStatus> {
+  const catalog = Object.keys(opts.migrations ?? ALL_MIGRATIONS);
+  const applied = await listExecutedMigrations(db);
+  const appliedSet = new Set(applied);
+  const catalogSet = new Set(catalog);
+  return {
+    applied,
+    pending: catalog.filter((name) => !appliedSet.has(name)).sort(),
+    unknown: applied.filter((name) => !catalogSet.has(name)),
+  };
+}
+
+/** Names of the catalog migrations not yet applied, in application order. Read-only. */
 export async function listPendingMigrations(
   db: Kysely<Database>,
   opts: MigrateOptions = {},
 ): Promise<string[]> {
-  const migrations = await buildMigrator(db, opts).getMigrations();
-  return migrations
-    .filter((m) => m.executedAt === undefined)
-    .map((m) => m.name)
-    .sort();
+  return (await getSchemaStatus(db, opts)).pending;
 }
 
-/** Throws {@link PendingMigrationsError} when any catalog migration is not applied. */
-export async function assertNoPendingMigrations(
+/** Applied migrations missing from the catalog, sorted. Read-only. */
+export async function listUnknownMigrations(
+  db: Kysely<Database>,
+  opts: MigrateOptions = {},
+): Promise<string[]> {
+  return (await getSchemaStatus(db, opts)).unknown;
+}
+
+/**
+ * Throws {@link UnknownMigrationsError} when the database is newer than the catalog, else
+ * {@link PendingMigrationsError} when it is older. Read-only: applies nothing.
+ */
+export async function assertSchemaUpToDate(
   db: Kysely<Database>,
   opts: MigrateOptions = {},
 ): Promise<void> {
-  const pending = await listPendingMigrations(db, opts);
+  const { pending, unknown } = await getSchemaStatus(db, opts);
+  if (unknown.length > 0) throw new UnknownMigrationsError(unknown);
   if (pending.length > 0) throw new PendingMigrationsError(pending);
 }
 

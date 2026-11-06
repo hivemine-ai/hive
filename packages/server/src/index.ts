@@ -47,12 +47,16 @@ export {
   migrateToLatest,
   migrateDown,
   listPendingMigrations,
-  assertNoPendingMigrations,
+  listUnknownMigrations,
+  getSchemaStatus,
+  assertSchemaUpToDate,
   PendingMigrationsError,
   isPendingMigrationsError,
+  UnknownMigrationsError,
+  isUnknownMigrationsError,
 } from './persistence/migrate.js';
 export { ALL_MIGRATIONS } from './persistence/migrations/index.js';
-export type { MigrateOptions } from './persistence/migrate.js';
+export type { MigrateOptions, SchemaStatus } from './persistence/migrate.js';
 
 export { createLogger } from './observability/logger.js';
 export type { Logger, LoggerOptions } from './observability/logger.js';
