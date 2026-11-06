@@ -8,7 +8,8 @@ import type { UUIDv7 } from '../types.js';
 
 export interface ParticipantStateChange {
   participantId: UUIDv7;
-  newState: 'active' | 'suspended' | 'revoked';
+  // ADR-026: 'retired' comes from the retention job, 'active' also from a revival.
+  newState: 'active' | 'suspended' | 'retired' | 'revoked';
 }
 
 export type ParticipantStateListener = (change: ParticipantStateChange) => void;

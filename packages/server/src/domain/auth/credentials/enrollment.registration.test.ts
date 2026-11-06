@@ -49,6 +49,37 @@ function fullSnapshot(identity: IdentityContext): IdentityContext['snapshot'] {
   return rest;
 }
 
+/**
+ * Postgres only: retires the Agent in a transaction that holds the row uncommitted while
+ * `during` starts, then commits. `during` reads the Agent as active and its write waits.
+ */
+async function retireWhile<T>(
+  db: SeedWorld['db'],
+  agentId: string,
+  at: Date,
+  during: () => Promise<T>,
+): Promise<PromiseSettledResult<T>> {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let locked!: () => void;
+  const rowLocked = new Promise<void>((resolve) => (locked = resolve));
+  const retire = db.transaction().execute(async (trx) => {
+    await trx
+      .updateTable('agents')
+      .set({ state: 'retired', retired_at: dateToIso(at) })
+      .where('id', '=', agentId)
+      .execute();
+    locked();
+    await gate;
+  });
+  await rowLocked;
+  const settled = Promise.allSettled([during()]);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  release();
+  await retire;
+  return (await settled)[0];
+}
+
 describe(`registration primitives (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
   let world: SeedWorld;
   let clock: Date;
@@ -309,6 +340,36 @@ describe(`registration primitives (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
         .execute();
       await expectAuthError(claim(agent.id), 'INVALID_STATE_TRANSITION');
     });
+
+    // PRY-094: retirement vs claim. SQLite serializes writers, so only Postgres races.
+    it.runIf(PG_URL)(
+      'loses to a retirement that commits while it waits: no token, the Agent stays retired',
+      async () => {
+        const identity = await enrollmentIdentity();
+        const { agent } = await create(identity, 'docs-bot');
+
+        const outcome = await retireWhile(world.db, agent.id, clock, () =>
+          enrollment.claimEnrolledAgent(
+            { agentId: agent.id, description: 'x', enrolledVia: identity.snapshot.credentialJti },
+            identity,
+          ),
+        );
+
+        expect(outcome.status).toBe('rejected');
+        const err = (outcome as PromiseRejectedResult).reason as AuthError;
+        expect([err.code, err.subCode]).toEqual([
+          'INVALID_STATE_TRANSITION',
+          'claim_requires_active_enrollment_agent',
+        ]);
+        const row = await world.db
+          .selectFrom('agents')
+          .select(['state', 'last_worker_jti'])
+          .where('id', '=', agent.id)
+          .executeTakeFirstOrThrow();
+        expect(row.state).toBe('retired');
+        expect(await countActive(identity.snapshot.credentialJti)).toBe(0);
+      },
+    );
 
     it('refuses an Agent of another owner', async () => {
       const mine = await enrollmentIdentity();

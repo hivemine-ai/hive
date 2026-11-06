@@ -228,8 +228,18 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
         .set({ last_worker_jti: token.jti, last_connected_at: dateToIso(at) })
         .where('id', '=', input.agentId)
         .where('last_worker_jti', '=', input.presentedJti as UUIDv7)
+        // A retirement that commits first wins over the renewal (PRY-094).
+        .where('state', '=', 'active')
         .executeTakeFirst();
       if (Number(swapped.numUpdatedRows) === 0) {
+        const row = await trx
+          .selectFrom('agents')
+          .select('state')
+          .where('id', '=', input.agentId)
+          .executeTakeFirst();
+        if (row !== undefined && row.state !== 'active') {
+          throw new AuthError('PARTICIPANT_NOT_ACTIVE', { subCode: row.state });
+        }
         throw new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'holder_proof_superseded' });
       }
     } else {
@@ -392,7 +402,8 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
         }
         assertEnrollmentOwner(identity, current.ownerId, input.enrolledVia);
 
-        await trx
+        // Conditional: a retirement that commits after the read above wins (PRY-094).
+        const claimed = await trx
           .updateTable('agents')
           .set({
             description: input.description,
@@ -401,7 +412,14 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
             enrolled_via: input.enrolledVia,
           })
           .where('id', '=', input.agentId)
-          .execute();
+          .where('state', '=', 'active')
+          .where('origin', '=', 'enrollment')
+          .executeTakeFirst();
+        if (Number(claimed.numUpdatedRows) === 0) {
+          throw new AuthError('INVALID_STATE_TRANSITION', {
+            subCode: 'claim_requires_active_enrollment_agent',
+          });
+        }
 
         const token = await issueWorkerToken(
           { agentId: input.agentId, mode: 'claim', enrolledVia: input.enrolledVia },

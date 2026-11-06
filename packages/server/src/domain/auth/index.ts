@@ -105,6 +105,17 @@ export type {
   ParticipantsWriteRepoOptions,
 } from './participants/repository.write.js';
 
+export {
+  EnrollmentRetentionPassError,
+  createEnrollmentRetention,
+} from './participants/retention.js';
+export type {
+  EnrollmentRetention,
+  EnrollmentRetentionDeps,
+  EnrollmentRetentionPass,
+  EnrollmentRetentionResult,
+} from './participants/retention.js';
+
 export { noopCellsHook } from './participants/cells-hook.js';
 export type {
   CellsRepoHook,
