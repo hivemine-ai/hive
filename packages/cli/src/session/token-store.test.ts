@@ -39,17 +39,23 @@ function token(overrides: Partial<PersistedToken> = {}): PersistedToken {
   };
 }
 
-/** Holds the lock in another process until killed. Resolves once it holds it. */
+/**
+ * Holds the lock in another process until killed. Resolves once it holds it. The
+ * child drops its own reference and forces a garbage collection first: the lock
+ * must survive that.
+ */
 async function holdInChild(path: string): Promise<ChildProcess> {
   const lockModule = new URL('../../dist/session/token-lock.js', import.meta.url).href;
   const child = spawn(
     process.execPath,
     [
+      '--expose-gc',
       '--input-type=module',
       '-e',
       `const { tryExclusiveLock } = await import(${JSON.stringify(lockModule)});
-       const held = tryExclusiveLock(${JSON.stringify(path)});
-       process.stdout.write(held ? 'held\\n' : 'busy\\n');
+       const ok = tryExclusiveLock(${JSON.stringify(path)}) !== undefined;
+       globalThis.gc(); globalThis.gc();
+       process.stdout.write(ok ? 'held\\n' : 'busy\\n');
        setInterval(() => {}, 1000);`,
     ],
     { stdio: ['ignore', 'pipe', 'inherit'] },

@@ -18,6 +18,13 @@ export interface HeldLock {
   release(): void;
 }
 
+/**
+ * Open lock handles. A handle that nobody references could be garbage collected,
+ * which closes the database and silently drops the lock; this set keeps every
+ * held lock alive until it is released.
+ */
+const held = new Set<Database.Database>();
+
 /** Takes the lock or returns undefined at once if someone else holds it. */
 export function tryExclusiveLock(path: string): HeldLock | undefined {
   ensurePrivateDir(dirname(path));
@@ -32,11 +39,13 @@ export function tryExclusiveLock(path: string): HeldLock | undefined {
     if ((err as { code?: unknown }).code === 'SQLITE_BUSY') return undefined;
     throw err;
   }
+  held.add(db);
   let released = false;
   return {
     release() {
       if (released) return;
       released = true;
+      held.delete(db);
       db.close();
     },
   };
