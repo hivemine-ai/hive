@@ -56,11 +56,16 @@ export interface StatePaths {
   enrollment(projectKey: string): string;
   enrollmentDir: string;
   sessionsDir(projectKey: string): string;
+  sessionFile(projectKey: string, sessionId: string): string;
   pidMap(claudePid: number): string;
   proxy(claudePid: number): string;
   tokensDir(projectKey: string): string;
   tokenFile(projectKey: string, name: string): string;
   tokenLock(projectKey: string, name: string): string;
+  harnessDir: string;
+  harnessFile(id: string): string;
+  pidMapDir: string;
+  proxiesDir: string;
 }
 
 export function statePaths(root: string): StatePaths {
@@ -70,11 +75,16 @@ export function statePaths(root: string): StatePaths {
     enrollment: (key) => join(root, 'enrollment', `${key}.json`),
     enrollmentDir: join(root, 'enrollment'),
     sessionsDir: (key) => join(state, 'sessions', key),
+    sessionFile: (key, sessionId) => join(state, 'sessions', key, `${fileSegment(sessionId)}.json`),
     pidMap: (pid) => join(state, 'pid-map', `${String(pid)}.json`),
     proxy: (pid) => join(state, 'proxies', `${String(pid)}.json`),
     tokensDir: (key) => join(state, 'tokens', key),
     tokenFile: (key, name) => join(state, 'tokens', key, `${fileSegment(name)}.json`),
     tokenLock: (key, name) => join(state, 'tokens', key, `${fileSegment(name)}.lock`),
+    harnessDir: join(state, 'harness'),
+    harnessFile: (id) => join(state, 'harness', `${id}.json`),
+    pidMapDir: join(state, 'pid-map'),
+    proxiesDir: join(state, 'proxies'),
   };
 }
 
@@ -135,10 +145,18 @@ export function writePrivateJson(
   value: unknown,
   platform: NodeJS.Platform = process.platform,
 ): void {
+  writePrivateText(path, `${JSON.stringify(value)}\n`, platform);
+}
+
+export function writePrivateText(
+  path: string,
+  text: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
   const dir = dirname(path);
   ensurePrivateDir(dir, platform);
   const temporary = join(dir, `.${randomBytes(8).toString('hex')}.tmp`);
-  writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
+  writeFileSync(temporary, text, { mode: 0o600, flag: 'wx' });
   try {
     renameSync(temporary, path);
   } catch (err) {

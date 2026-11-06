@@ -2,7 +2,9 @@
 // register module wires it to `$.process`, `$.prompt` and `$.ui`.
 //
 // Two jobs:
-//  1. keep `hivectl watch` alive and turn each metadata line into a turn;
+//  1. keep `hivectl watch --attach-session <session_id>` alive and turn each
+//     metadata line into a turn; follow the session id when /clear or /resume
+//     change it (retarget);
 //  2. keep one flag while a turn is active and, at `turn.complete`, ask
 //     `hivectl watch --once` whether anything is still unread.
 // There is no queue and no resend: the mailbox is the source of truth.
@@ -41,7 +43,7 @@ const RETRY_MAX_MS = 60_000;
  *   sleep(ms: number): Promise<void>,
  *   now(): number,
  * }} Host
- * @typedef {{ hivectl: string, server: string, credentialFile: string }} Options
+ * @typedef {{ hivectl: readonly string[], sessionId: string }} Options
  */
 
 /**
@@ -49,6 +51,14 @@ const RETRY_MAX_MS = 60_000;
  */
 export function createController({ options, host }) {
   let started = false;
+  /** Session id watch attaches to; changed by retarget. */
+  let target = options.sessionId;
+  let supervising = false;
+  /** Set by retarget while a child runs: it is replaced at once, without backoff. */
+  let restartNow = false;
+  /** Ends the restart backoff early (set while supervise sleeps). */
+  /** @type {(() => void) | undefined} */
+  let wakeBackoff;
   let stopped = false;
   let turnActive = false;
   let onceRunning = false;
@@ -69,14 +79,13 @@ export function createController({ options, host }) {
   /** @type {SpawnedProcess | undefined} */
   let child;
 
-  /** `hivectl watch [extra] --server ... [--credential-file ...]` */
+  /** `hivectl watch [extra] --attach-session <session_id>` */
   const watchArgv = (/** @type {string[]} */ extra = []) => [
-    options.hivectl,
+    ...options.hivectl,
     'watch',
     ...extra,
-    '--server',
-    options.server,
-    ...(options.credentialFile === '' ? [] : ['--credential-file', options.credentialFile]),
+    '--attach-session',
+    target,
   ];
 
   const raiseFlag = () => {
@@ -213,7 +222,15 @@ export function createController({ options, host }) {
     return `hivectl watch stopped with exit code ${String(code)} and will not restart; fix the cause and reload the plugin.`;
   }
 
-  async function supervise() {
+  function supervise() {
+    if (supervising || stopped) return;
+    supervising = true;
+    void superviseLoop().finally(() => {
+      supervising = false;
+    });
+  }
+
+  async function superviseLoop() {
     let backoff = BACKOFF_MIN_MS;
     let shortRuns = 0;
     let warned = false;
@@ -224,6 +241,8 @@ export function createController({ options, host }) {
         child = host.spawn(watchArgv());
         outcome = await consume(child);
       } catch (err) {
+        child = undefined;
+        restartNow = false;
         if (stopped) return;
         const reason = err instanceof Error ? err.message : String(err);
         host.toast(
@@ -233,6 +252,10 @@ export function createController({ options, host }) {
       }
       child = undefined;
       if (stopped) return;
+      if (restartNow) {
+        restartNow = false;
+        continue;
+      }
       const { exit, stderrTail } = outcome;
       if (exit.code === EXIT_INTERRUPTED) return;
       if (exit.code === EXIT_PRECONDITION || exit.code === EXIT_USER_ERROR) {
@@ -253,7 +276,11 @@ export function createController({ options, host }) {
           'hivectl watch keeps crashing; it is being restarted with backoff. Check its stderr.',
         );
       }
-      await host.sleep(backoff);
+      await new Promise((resolve) => {
+        wakeBackoff = () => resolve(undefined);
+        void host.sleep(backoff).then(resolve);
+      });
+      wakeBackoff = undefined;
       backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
     }
   }
@@ -262,7 +289,25 @@ export function createController({ options, host }) {
     start() {
       if (started) return;
       started = true;
-      void supervise();
+      supervise();
+    },
+    /** Follows a new session id (classic.SessionStart after /clear or /resume). */
+    retarget(/** @type {string} */ sessionId) {
+      if (sessionId === '' || sessionId === target) return;
+      target = sessionId;
+      onceHalted = false;
+      onceWarned = false;
+      watchReported = false;
+      if (!started || stopped) return;
+      const proc = child;
+      if (proc !== undefined) {
+        restartNow = true;
+        void proc.return().catch(() => {});
+      } else if (wakeBackoff !== undefined) {
+        wakeBackoff();
+      } else {
+        supervise();
+      }
     },
     onTurnStart() {
       turnActive = true;
@@ -275,6 +320,7 @@ export function createController({ options, host }) {
     async stop() {
       stopped = true;
       cancelRetry();
+      wakeBackoff?.();
       const proc = child;
       child = undefined;
       if (proc) await proc.return().catch(() => {});

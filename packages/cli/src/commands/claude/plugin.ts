@@ -12,7 +12,7 @@ import { chmodSync, copyFileSync, existsSync, readFileSync, realpathSync } from 
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 
-import { ensurePrivateDir, writePrivateJson } from '#session/state-dir.js';
+import { ensurePrivateDir, writePrivateJson, writePrivateText } from '#session/state-dir.js';
 
 export const MARKETPLACE_NAME = 'hive';
 export const PLUGIN_NAME = 'hive-wake';
@@ -90,6 +90,46 @@ export function marketplaceDir(configRoot: string): string {
   return join(configRoot, 'marketplace');
 }
 
+/** POSIX single quoting: the hook commands run through a shell. */
+export function shellQuote(word: string): string {
+  return `'${word.replaceAll("'", "'\\''")}'`;
+}
+
+const HOOKS_FILE = 'hooks/hooks.json';
+const HIVECTL_PATH_FILE = 'hooks/hivectl-path.js';
+const HOOK_COMMAND = /^hivectl(?= )/;
+
+interface HooksManifest {
+  hooks?: Record<string, { hooks?: { command?: unknown }[] }[]>;
+  [key: string]: unknown;
+}
+
+/** The command hooks call `hivectl` by name in the repo; the copy calls the absolute command. */
+function fixHookCommands(text: string, hivectl: HivectlCommand): HooksManifest {
+  const manifest = JSON.parse(text) as HooksManifest;
+  const prefix = [hivectl.command, ...hivectl.args].map(shellQuote).join(' ');
+  for (const matchers of Object.values(manifest.hooks ?? {})) {
+    for (const matcher of matchers) {
+      for (const hook of matcher.hooks ?? []) {
+        if (typeof hook.command === 'string') {
+          hook.command = hook.command.replace(HOOK_COMMAND, () => prefix);
+        }
+      }
+    }
+  }
+  return manifest;
+}
+
+function hivectlPathModule(hivectl: HivectlCommand): string {
+  return [
+    '// Written by `hivectl claude install`: the absolute command of this hivectl.',
+    '',
+    '/** @type {readonly string[]} */',
+    `export const HIVECTL = ${JSON.stringify([hivectl.command, ...hivectl.args])};`,
+    '',
+  ].join('\n');
+}
+
 /** Writes (or rewrites in place) the marketplace and the plugin with the stdio server. */
 export function installPluginCopy(
   source: string,
@@ -109,7 +149,15 @@ export function installPluginCopy(
   for (const file of distribution.files) {
     if (file === '.claude-plugin/plugin.json') continue;
     const target = join(pluginDir, file);
+    if (file === HOOKS_FILE) {
+      writePrivateJson(target, fixHookCommands(readFileSync(join(source, file), 'utf8'), hivectl));
+      continue;
+    }
     ensurePrivateDir(dirname(target));
+    if (file === HIVECTL_PATH_FILE) {
+      writePrivateText(target, hivectlPathModule(hivectl));
+      continue;
+    }
     copyFileSync(join(source, file), target);
     chmodSync(target, 0o600);
   }

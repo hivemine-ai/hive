@@ -24,6 +24,7 @@ const ruleTester = new RuleTester({
 ruleTester.run('no-spanish-leakage', rule, {
   // ── valid: things the rule must NOT flag ─────────────────────────────
   valid: [
+    { name: 'English words that contain del', code: '// delete the model, then model.delta' },
     {
       // Completely English comment.
       name: 'English comment passes',
@@ -98,8 +99,15 @@ ruleTester.run('no-spanish-leakage', rule, {
       code: 'const m = "el mensaje del usuario";',
       errors: [
         { messageId: 'stopword', data: { word: 'mensaje' } },
+        { messageId: 'stopword', data: { word: 'del' } },
         { messageId: 'stopword', data: { word: 'usuario' } },
       ],
+    },
+    {
+      // A vault section name quoted verbatim leaked "del" (PRY-093 review).
+      name: 'Spanish contraction "del" in a comment',
+      code: '// tech spec section "Hooks del plugin"',
+      errors: [{ messageId: 'stopword', data: { word: 'del' } }],
     },
     {
       // Stopword in HEAD quasi (before the first `${}` interpolation).

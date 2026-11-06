@@ -9,6 +9,7 @@ import { HIVE_VERSION } from '@hive/shared';
 import { mapErrorToExit } from '#error/handler.js';
 import { Upstream } from '#session/upstream.js';
 
+import { runClaudeHook } from './hooks.js';
 import { runClaudeInstall, runClaudeUninstall } from './install.js';
 import type { ClaudeInstallResult, ClaudeUninstallResult } from './install.js';
 import { currentHivectlCommand, defaultPluginSearchStarts, findPluginSource } from './plugin.js';
@@ -117,5 +118,12 @@ export function registerClaudeCommands(program: Command, hooks: Hooks): void {
       } catch (err) {
         fail(err, hooks);
       }
+    });
+
+  claude
+    .command('hook <kind>', { hidden: true })
+    .description('Internal: command hooks of the hive-wake plugin (session-start, post-tool-use).')
+    .action(async (kind: string) => {
+      hooks.setExitCode(await runClaudeHook(kind));
     });
 }

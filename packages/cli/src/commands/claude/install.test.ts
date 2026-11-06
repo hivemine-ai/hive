@@ -194,6 +194,56 @@ describe('hivectl claude install', () => {
     expect(warnings).toEqual([]);
   });
 
+  it('fixes the absolute hivectl command in the copied hooks and mod, quoted for the shell', async () => {
+    await runClaudeInstall(
+      { server: SERVER, enrollmentCredential: credentialFile(), project: undefined },
+      {
+        ...deps(),
+        hivectl: { command: '/opt/my node/bin/node', args: ["/opt/hive's/main.js"] },
+      },
+    );
+    const plugin = join(config, 'marketplace', 'plugins', 'hive-wake');
+    const hooks = JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')) as {
+      modules: string[];
+      hooks: Record<string, { matcher?: string; hooks: { command: string }[] }[]>;
+    };
+    expect(hooks.modules).toEqual(['./register.js']);
+    const commands = Object.values(hooks.hooks).flatMap((m) => m.flatMap((h) => h.hooks));
+    expect(commands.map((h) => h.command)).toEqual([
+      `'/opt/my node/bin/node' '/opt/hive'\\''s/main.js' claude hook session-start`,
+      `'/opt/my node/bin/node' '/opt/hive'\\''s/main.js' claude hook post-tool-use`,
+    ]);
+    const path = readFileSync(join(plugin, 'hooks', 'hivectl-path.js'), 'utf8');
+    expect(path).toContain(JSON.stringify(['/opt/my node/bin/node', "/opt/hive's/main.js"]));
+    const { HIVECTL } = (await import(join(plugin, 'hooks', 'hivectl-path.js'))) as {
+      HIVECTL: string[];
+    };
+    expect(HIVECTL).toEqual(['/opt/my node/bin/node', "/opt/hive's/main.js"]);
+    for (const file of ['register.js', 'controller.js', 'event-line.js']) {
+      expect(statSync(join(plugin, 'hooks', file)).isFile()).toBe(true);
+    }
+    expect(readFileSync(join(plugin, 'skills', 'hive-session', 'SKILL.md'), 'utf8')).toContain(
+      'name: hive-session',
+    );
+  });
+
+  it("keeps $& and $' in the hivectl path literal in the hook commands", async () => {
+    await runClaudeInstall(
+      { server: SERVER, enrollmentCredential: credentialFile(), project: undefined },
+      { ...deps(), hivectl: { command: "/opt/a$&b/c$'d/hivectl", args: [] } },
+    );
+    const hooks = readFileSync(
+      join(config, 'marketplace', 'plugins', 'hive-wake', 'hooks', 'hooks.json'),
+      'utf8',
+    );
+    const commands = (
+      JSON.parse(hooks) as { hooks: Record<string, { hooks: { command: string }[] }[]> }
+    ).hooks;
+    expect(commands['SessionStart']?.[0]?.hooks[0]?.command).toBe(
+      `'/opt/a$&b/c$'\\''d/hivectl' claude hook session-start`,
+    );
+  });
+
   it('is idempotent: refreshes the credential, tolerates "already installed" and never duplicates the .gitignore line', async () => {
     await runClaudeInstall(
       { server: SERVER, enrollmentCredential: credentialFile(), project: undefined },

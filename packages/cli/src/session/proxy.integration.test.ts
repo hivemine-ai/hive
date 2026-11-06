@@ -179,7 +179,13 @@ describe('mcp proxy against a real Hive', () => {
     const w = await bootWorld();
     install(w);
     const session = await openSession();
-    await registerAs(session);
+    const registered = structured<Record<string, unknown>>(await registerAs(session));
+    const handle = (
+      readPrivateJson(statePaths(configDir).proxy(CLAUDE_PID)) as {
+        proxyHandle: string;
+      }
+    ).proxyHandle;
+    expect(registered['proxy_handle']).toBe(handle);
 
     const current = await status(session);
     expect(current).toEqual({
@@ -189,6 +195,7 @@ describe('mcp proxy against a real Hive', () => {
       hive: w.url,
       project: projectDir,
       mode: 'interactive',
+      proxy_handle: handle,
       last_error: null,
     });
     const token = persistedToken();

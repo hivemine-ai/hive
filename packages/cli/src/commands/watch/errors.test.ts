@@ -17,6 +17,10 @@ describe('mapWatchError', () => {
     ['WATCH_ONCE_FAILED', EXIT_INTERNAL],
     ['WATCH_SERVER_URL_MISSING', EXIT_USER_ERROR],
     ['WATCH_INVALID_OPTION', EXIT_USER_ERROR],
+    ['WATCH_SESSION_NAME_IN_USE', EXIT_PRECONDITION],
+    ['WATCH_SESSION_REGISTER_REJECTED', EXIT_PRECONDITION],
+    ['WATCH_STATE_FILE_INSECURE', EXIT_PRECONDITION],
+    ['WATCH_ATTACH_TARGET_NOT_FOUND', EXIT_USER_ERROR],
   ])('%s exits with %i and leads the message with its code', (code, exit) => {
     const mapped = mapWatchError(new WatchError(code, 'detail'));
     expect(mapped.code).toBe(exit);

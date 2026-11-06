@@ -80,4 +80,21 @@ describe('worker recipe claude-wake.sh', () => {
     const r = run({ HIVE_EVENT_COUNT: '1', HIVE_WORKER_ALLOWED_TOOLS: 'bypassPermissions' });
     expect(r.status).toBe(2);
   });
+
+  it('with HIVE_MCP_CONFIG_FILE (watch --inline-mcp-config) loads only that MCP config', () => {
+    const r = run({ HIVE_EVENT_COUNT: '1', HIVE_MCP_CONFIG_FILE: '/state/harness/x.mcp.json' });
+    expect(r.status).toBe(0);
+    const { argv } = JSON.parse(readFileSync(argvFile, 'utf8'));
+    expect(argv.slice(-3)).toEqual([
+      '--mcp-config',
+      '/state/harness/x.mcp.json',
+      '--strict-mcp-config',
+    ]);
+  });
+
+  it('without HIVE_MCP_CONFIG_FILE adds no MCP config flag (the plugin provides the proxy)', () => {
+    run({ HIVE_EVENT_COUNT: '1' });
+    const { argv } = JSON.parse(readFileSync(argvFile, 'utf8'));
+    expect(argv).not.toContain('--mcp-config');
+  });
 });

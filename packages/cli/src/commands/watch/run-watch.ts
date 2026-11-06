@@ -43,7 +43,7 @@ export async function runWatch(input: WatchInput, io: WatchIo): Promise<number> 
         program: input.exec.program,
         args: input.exec.args,
         baseEnv: io.env,
-        credential,
+        secrets: () => [credential],
         stopTimeoutMs: input.execStopTimeoutMs,
         stderr: (text) => io.stderr(text),
       })

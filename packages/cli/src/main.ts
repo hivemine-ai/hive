@@ -33,6 +33,13 @@ async function main(argv: string[]): Promise<number> {
     return runMcpProxy();
   }
 
+  // Fast path: the plugin's command hooks run at every session start and must
+  // never delay it.
+  if (argv.length === 5 && argv[2] === 'claude' && argv[3] === 'hook') {
+    const { runClaudeHook } = await import('./commands/claude/hooks.js');
+    return runClaudeHook(argv[4] ?? '');
+  }
+
   const { buildProgram, closeRuntime } = await import('./program.js');
   const { program, getExitCode } = buildProgram();
   try {
