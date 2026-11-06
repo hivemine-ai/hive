@@ -194,6 +194,13 @@ describe('requestOperation', () => {
     [{ method: 'subscriptions/listen' }, 'subscriptions_listen'],
     [{ method: 'server/discover' }, 'server_discover'],
     [null, 'unknown'],
+    [toolCall('register_session'), 'tools_call:register_session'],
+    // Bounded for the logs: a name or method the server does not know is never echoed.
+    [toolCall('x'.repeat(500)), 'tools_call:<other>'],
+    [toolCall('session_status'), 'tools_call:<other>'],
+    [{ method: 'tools/call', params: { name: 42 } }, 'tools_call:<other>'],
+    [{ method: 'y'.repeat(500) }, 'other'],
+    [{ method: 'ping' }, 'ping'],
   ])('names %j as %s', (body, operation) => {
     expect(requestOperation(body)).toBe(operation);
   });

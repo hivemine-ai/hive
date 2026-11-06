@@ -26,21 +26,51 @@ export interface AuthenticatedRequest {
 
 export const REGISTER_SESSION_TOOL = 'register_session';
 
+// The log field `operation` is client-controlled input, so it only ever carries names
+// the server knows.
+const KNOWN_TOOLS: ReadonlySet<string> = new Set([
+  'get_agent_config',
+  'send_message',
+  'reply_to',
+  'read_mailbox',
+  'mark_read',
+  'check_unread_messages',
+  'list_agents',
+  'get_agent_status',
+  REGISTER_SESSION_TOOL,
+]);
+const OTHER_METHODS: ReadonlySet<string> = new Set([
+  'ping',
+  'notifications/initialized',
+  'notifications/cancelled',
+  'completion/complete',
+  'logging/setLevel',
+  'prompts/list',
+  'prompts/get',
+  'initialize',
+]);
+
 /**
  * Name of the operation a JSON-RPC body asks for, as the scope binding and its
  * `operation` log field call it: `tools_call:<name>`, `tools_list`, `resources`,
- * `subscriptions_listen`, `server_discover`, or the raw method otherwise.
+ * `subscriptions_listen`, `server_discover`, another known method, or a bounded
+ * placeholder (`tools_call:<other>`, `other`, `unknown`) for anything else.
  */
 export function requestOperation(body: unknown): string {
   const rpc = body as { method?: unknown; params?: { name?: unknown } } | null | undefined;
   const method = rpc?.method;
   if (typeof method !== 'string') return 'unknown';
-  if (method === 'tools/call') return `tools_call:${String(rpc?.params?.name)}`;
+  if (method === 'tools/call') {
+    const name = rpc?.params?.name;
+    return typeof name === 'string' && KNOWN_TOOLS.has(name)
+      ? `tools_call:${name}`
+      : 'tools_call:<other>';
+  }
   if (method === 'tools/list') return 'tools_list';
   if (method.startsWith('resources/')) return 'resources';
   if (method === 'subscriptions/listen') return 'subscriptions_listen';
   if (method === 'server/discover') return 'server_discover';
-  return method;
+  return OTHER_METHODS.has(method) ? method : 'other';
 }
 
 // What an enrollment credential may do (ADR-026): register, and detect a version skew.

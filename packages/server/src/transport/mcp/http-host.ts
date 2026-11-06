@@ -41,6 +41,7 @@ import {
   MCP_ERR_ENROLLMENT_RATE_LIMITED,
   MCP_ERR_FORBIDDEN,
   MCP_ERR_INTERNAL,
+  MCP_ERR_UNAUTHORIZED,
 } from './error-codes.js';
 import { mapDomainError } from './error-mapper.js';
 import { isAllowedByOriginGuard } from './origin-guard.js';
@@ -50,6 +51,7 @@ import type { WireError } from './types.js';
 const LISTEN_METHOD = 'subscriptions/listen';
 const DISCOVER_METHOD = 'server/discover';
 const LEASE_REQUEST_HEADER = 'hive-listen-lease';
+const BEARER_SHAPE = /^[Bb]earer\s+\S+/;
 
 /**
  * Plug-in point for the `subscriptions/listen` edge. The SDK router neither checks who
@@ -186,6 +188,23 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
     if (!allowed) {
       deps.logger.warn({ event: 'mcp_origin_rejected' }, 'origin or host not allowed');
       return reply.code(403).send();
+    }
+
+    // Without a well-formed Bearer there is nothing to verify: refuse before the body is
+    // read, so an anonymous request never makes the server parse up to the body limit.
+    if (!BEARER_SHAPE.test(headerString(req.headers.authorization) ?? '')) {
+      deps.logger.warn(
+        { event: 'mcp_auth_failed', domainCode: 'CREDENTIAL_MISSING', subCode: null },
+        'authentication required',
+      );
+      return reply
+        .code(401)
+        .type('application/json')
+        .send({
+          jsonrpc: '2.0',
+          error: { code: MCP_ERR_UNAUTHORIZED, message: 'authentication required' },
+          id: null,
+        });
     }
   });
 

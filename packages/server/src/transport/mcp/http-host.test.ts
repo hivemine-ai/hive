@@ -165,6 +165,58 @@ interface RpcError {
   error: { code: number; message: string; data?: unknown };
 }
 
+// A request without a well-formed Bearer is refused before fastify reads its body, so an
+// anonymous client cannot make the server parse up to the body limit.
+describe('Bearer pre-check before the body is read', () => {
+  function rawPost(url: string, body: string, authorization?: string): Promise<Response> {
+    return fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': VERSION,
+        ...(authorization !== undefined && { authorization }),
+      },
+      body,
+    });
+  }
+
+  it.each([undefined, 'Basic abc', 'Bearer ', 'Bearer'])(
+    'answers 401 -32001 to invalid JSON when the Authorization header is %j',
+    async (authorization) => {
+      const verify = vi.fn(() => Promise.resolve(IDENTITY));
+      const url = await startHost({ verify });
+
+      const res = await rawPost(url, '{not json', authorization);
+
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as RpcError).error).toEqual({
+        code: -32001,
+        message: 'authentication required',
+      });
+      expect(verify).not.toHaveBeenCalled();
+    },
+  );
+
+  it('answers 401 to a body over the limit without a token', async () => {
+    const url = await startHost();
+
+    const res = await rawPost(url, `{"x":"${'a'.repeat(5 * 1024 * 1024)}"}`);
+
+    expect(res.status).toBe(401);
+  });
+
+  it('keeps 400 for invalid JSON with a Bearer: the token is checked once the body is parsed', async () => {
+    const verify = vi.fn(() => Promise.reject(new AuthError('CREDENTIAL_INAUTHENTIC')));
+    const url = await startHost({ verify });
+
+    const res = await rawPost(url, '{not json', 'Bearer not-a-real-token');
+
+    expect(res.status).toBe(400);
+    expect(verify).not.toHaveBeenCalled();
+  });
+});
+
 describe('auth at the edge', () => {
   it('answers an auth failure with 401 and -32001', async () => {
     const url = await startHost({
