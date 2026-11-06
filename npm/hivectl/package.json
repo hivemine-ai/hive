@@ -22,6 +22,7 @@
   },
   "files": [
     "bin/",
+    "claude-plugin/",
     "install.js",
     "README.md"
   ],

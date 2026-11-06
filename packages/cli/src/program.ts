@@ -15,6 +15,7 @@ import { runListAgents } from './commands/agent/list.js';
 import type { AgentState } from './commands/agent/list.js';
 import { runReleaseAgent } from './commands/agent/release.js';
 import { runRevokeAgent } from './commands/agent/revoke.js';
+import { registerClaudeCommands } from './commands/claude/index.js';
 import { registerConfigGroup } from './commands/config/index.js';
 import { runIssueCredential } from './commands/credential/issue.js';
 import { runIssueEnrollmentCredential } from './commands/credential/issue-enrollment.js';
@@ -652,6 +653,9 @@ export function buildProgram(): BuildProgramResult {
 
   // ── mcp proxy (local stdio MCP server per Claude Code session, ADR-026) ──
   registerMcpCommand(program, lifecycleHooks);
+
+  // ── claude install | uninstall (ADR-026; local, no runtime) ─────────────
+  registerClaudeCommands(program, lifecycleHooks);
 
   // ── help renderer (PRY-050) ───────────────────────────────────────────
   // Attach examples + see-also metadata to the subgroups that benefit

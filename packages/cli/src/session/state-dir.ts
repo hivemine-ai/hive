@@ -54,6 +54,8 @@ export function fileSegment(name: string): string {
 export interface StatePaths {
   readonly root: string;
   enrollment(projectKey: string): string;
+  enrollmentDir: string;
+  sessionsDir(projectKey: string): string;
   pidMap(claudePid: number): string;
   proxy(claudePid: number): string;
   tokensDir(projectKey: string): string;
@@ -66,6 +68,8 @@ export function statePaths(root: string): StatePaths {
   return {
     root,
     enrollment: (key) => join(root, 'enrollment', `${key}.json`),
+    enrollmentDir: join(root, 'enrollment'),
+    sessionsDir: (key) => join(state, 'sessions', key),
     pidMap: (pid) => join(state, 'pid-map', `${String(pid)}.json`),
     proxy: (pid) => join(state, 'proxies', `${String(pid)}.json`),
     tokensDir: (key) => join(state, 'tokens', key),

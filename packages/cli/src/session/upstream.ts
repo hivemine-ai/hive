@@ -33,6 +33,8 @@ export type SessionErrorCode =
   | 'session_state_insecure_perms'
   | 'session_state_invalid'
   | 'not_registered'
+  | 'harness_state_unavailable'
+  | 'harness_mode'
   | 'upstream_error'
   | 'transport';
 
