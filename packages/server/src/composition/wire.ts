@@ -66,6 +66,7 @@ import type { CellsRepo } from '#domain/cells/index.js';
 import { parseIntEnv } from '#observability/env.js';
 import type { Logger } from '#observability/logger.js';
 import { createDb, resolveDbConfigFromEnv } from '#persistence/db.js';
+import { assertNoPendingMigrations } from '#persistence/migrate.js';
 import type { Database } from '#persistence/schema.js';
 
 import { createCellsHookAdapter } from './cells-hook-adapter.js';
@@ -363,6 +364,14 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     throw new Error(
       `No signing keypairs found in ${cfg.keysDir}. Run 'hivectl init' first to bootstrap the Hive.`,
     );
+  }
+  // INC-2026-010: refuse to serve a schema older than this binary. Read-only check; the
+  // operator backs up and runs `hivectl migrate up` (serve never migrates implicitly).
+  try {
+    await assertNoPendingMigrations(db);
+  } catch (err) {
+    await db.destroy();
+    throw err;
   }
   // ADR-026: revocation rows outlive their token by the holder-proof window.
   const enrollmentConfig = resolveEnrollmentConfigFromEnv(process.env);

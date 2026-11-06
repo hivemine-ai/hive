@@ -21,7 +21,7 @@ It does **not** implement: the operator CLI (that is `@hive/cli`), Docker / prod
 
 The package barrel (`./src/index.ts`) exports:
 
-- **Persistence:** `createDb`, `resolveDbConfigFromEnv`, `migrateToLatest`, `migrateDown`, `acquireLock`, `releaseLock`, `sweepExpiredLocks`, `dateToIso` and friends.
+- **Persistence:** `createDb`, `resolveDbConfigFromEnv`, `migrateToLatest`, `migrateDown`, `listPendingMigrations`, `assertNoPendingMigrations` (`PendingMigrationsError`), `acquireLock`, `releaseLock`, `sweepExpiredLocks`, `dateToIso` and friends.
 - **Auth domain:** `AuthError`, `isAuthError`, `createVerifier`, `createIssuer`, `createRotator`, `createRevoker`, `createParticipantsReadRepo`, `createParticipantsWriteRepo`, `loadBlocklist`, `requireAdminCaller`, `generateKeypair`, `writeKeypairToDisk`, `loadAllKeypairs`, `assertPrivatePemPerms`, `buildJwkSet`, plus types: `SigningKey`, `IdentityContext`, `CallerContext`, `Participant`, `Hivekeeper`, `Agent`.
 - **Cells domain:** `createCellsRepo`, `createSender`, `createReader`, `createCellEvents`, `CellError`, `isCellError`, `mapKindToOwnerKind`, plus types: `Cell`, `Message`, `MessageView`, `MessageType`, `MessageState`, `CellState`, `SendMessageInput`, `SendResult`, `ReadMailboxInput`, `MarkReadInput`, `MarkReadResult`, `RetentionPolicy`, `SummarizeUnreadResult`.
 - **Visibility domain:** `createVisibilityEngine`, `createVisibilityEngineForProduction`, `stubVisibilityEngine`, plus types: `VisibilityEngine`, `CanSendInput`, `CanSeeInput`, `DenialReason`, `SenderClass`, `RecipientClass`.

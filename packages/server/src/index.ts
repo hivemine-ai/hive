@@ -43,7 +43,15 @@ export {
 } from './persistence/type-mappers.js';
 export type { ValidateJsonTextOptions } from './persistence/type-mappers.js';
 
-export { migrateToLatest, migrateDown } from './persistence/migrate.js';
+export {
+  migrateToLatest,
+  migrateDown,
+  listPendingMigrations,
+  assertNoPendingMigrations,
+  PendingMigrationsError,
+  isPendingMigrationsError,
+} from './persistence/migrate.js';
+export { ALL_MIGRATIONS } from './persistence/migrations/index.js';
 export type { MigrateOptions } from './persistence/migrate.js';
 
 export { createLogger } from './observability/logger.js';
