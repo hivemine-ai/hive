@@ -73,11 +73,16 @@ export type {
   RevokeCredentialResult,
 } from './credentials/revoker.js';
 
-export { createEnrollment } from './credentials/enrollment.js';
+export {
+  createEnrollment,
+  validateDescription,
+  validateEnrollmentName,
+} from './credentials/enrollment.js';
 export type {
   Enrollment,
   EnrollmentDeps,
   IssueEnrollmentCredentialInput,
+  RenewWorkerTokenInput,
 } from './credentials/enrollment.js';
 
 export { createCredentialsReadRepo } from './credentials/repository.js';

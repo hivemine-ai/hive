@@ -19,7 +19,7 @@ import {
   type HttpHostOptions,
   type ListenEdge,
 } from './http-host.js';
-import { createMcpTransport } from './server.js';
+import { createMcpTransport, type McpTransportDeps } from './server.js';
 
 const VERSION = '2026-07-28';
 const PARTICIPANT_ID = '01900000-0000-7000-8000-000000000001';
@@ -64,6 +64,8 @@ async function startHost(options: StubOptions = {}): Promise<string> {
     presenceRegistry: {} as PresenceRegistry,
     logger,
     listAgentsMaxPageSize: 100,
+    enrollment: {} as McpTransportDeps['enrollment'],
+    rebindParticipantStreams: () => 0,
   });
   current = createHttpHost(
     {

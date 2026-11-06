@@ -456,7 +456,7 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     expect(body.error?.message).toMatch(/invalid input/);
   });
 
-  it('PRY-030 AC-5 (closes the v0.1 catalog): tools/list exposes exactly 8 tools and includes get_agent_status', async () => {
+  it('tools/list with a Worker token exposes the 9 tools, never the reserved session_status', async () => {
     const listRpc = await rpc(world.baseUrl, world.jwtA, {
       jsonrpc: '2.0',
       id: 2,
@@ -464,7 +464,7 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     });
     const result = listRpc.body?.result as { tools: Array<{ name: string }> };
     expect(result.tools).toBeDefined();
-    expect(result.tools.length).toBe(8);
+    expect(result.tools.length).toBe(9);
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       'check_unread_messages',
@@ -473,9 +473,11 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
       'list_agents',
       'mark_read',
       'read_mailbox',
+      'register_session',
       'reply_to',
       'send_message',
     ]);
+    expect(names).not.toContain('session_status');
   });
 
   it('PRY-029 AC-2 + AC-9: list_agents returns visible agents with the wire shape and excludes hivekeepers', async () => {
@@ -676,7 +678,7 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
 
   // zod-to-json-schema silently returns an empty schema with zod 4 while every other
   // test stays green, so each published schema is pinned here.
-  it('publishes the JSON Schema of each of the 8 tools', async () => {
+  it('publishes the JSON Schema of each of the 9 tools', async () => {
     const outcome = await rpc(world.baseUrl, world.jwtA, {
       jsonrpc: '2.0',
       id: 1,
@@ -728,6 +730,10 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
       mark_read: { properties: ['message_ids'], required: ['message_ids'] },
       list_agents: { properties: ['filter', 'pagination'], required: [] },
       get_agent_status: { properties: ['participant'], required: ['participant'] },
+      register_session: {
+        properties: ['capabilities', 'description', 'name'],
+        required: ['description', 'name'],
+      },
     };
     expect(tools.map((t) => t.name).sort()).toEqual(Object.keys(expected).sort());
     for (const [name, shape] of Object.entries(expected)) {
@@ -747,6 +753,13 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
       'message_id',
       'stored_at',
     ]);
+
+    const register = schemaOf('register_session').raw as {
+      description: { minLength: number; maxLength: number };
+      capabilities: { type: string; items: { type: string } };
+    };
+    expect(register.description).toMatchObject({ minLength: 1, maxLength: 280 });
+    expect(register.capabilities).toMatchObject({ type: 'array', items: { type: 'string' } });
   });
 
   it('resources/list and resources/read serve the caller mailbox metadata, never bodies', async () => {
@@ -963,7 +976,7 @@ describe('MCP smoke E2E (PRY-006 Slice 0)', () => {
     const b = await connect(world.jwtB);
     try {
       expect(a.getNegotiatedProtocolVersion()).toBe(PROTOCOL_VERSION);
-      expect((await a.listTools()).tools).toHaveLength(8);
+      expect((await a.listTools()).tools).toHaveLength(9);
 
       const config = await call<{ participant_id: string }>(a, 'get_agent_config');
       expect(config.participant_id).toBe(world.workerAId);

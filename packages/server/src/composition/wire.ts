@@ -69,6 +69,7 @@ import type { Database } from '#persistence/schema.js';
 
 import { createCellsHookAdapter } from './cells-hook-adapter.js';
 import { createNotificationsForProduction } from './notifications-factory.js';
+import type { PresenceRegistry } from '#domain/notifications/index.js';
 import {
   SNAPSHOT_HIVE_VERSION,
   createSnapshotWriter,
@@ -82,6 +83,11 @@ import { createHttpHost } from '#transport/mcp/http-host.js';
 import type { HttpHost } from '#transport/mcp/http-host.js';
 
 export interface WireConfig {
+  /**
+   * Worker token TTL of register_session. From HIVE_WORKER_TOKEN_TTL_SECONDS; the
+   * override is a test seam that goes below the 60 s floor of the env var.
+   */
+  workerTokenTtlMs?: number;
   /** Default `0.0.0.0`. */
   httpHost?: string;
   /** Default {@link HIVE_DEFAULT_HTTP_PORT} (`8443`). */
@@ -132,6 +138,8 @@ export interface Wire {
   _participantsWriteRepo(): ParticipantsWriteRepo;
   /** Test/diagnostic — exposes the cell events (asserts wiring). */
   _cellEvents(): ReturnType<typeof createCellEvents>;
+  /** Test/diagnostic — exposes the presence registry (holder liveness). */
+  _presenceRegistry(): PresenceRegistry;
 }
 
 export function resolveWireConfigFromEnv(
@@ -139,6 +147,8 @@ export function resolveWireConfigFromEnv(
   overrides: WireConfig = {},
 ): Required<WireConfig> {
   return {
+    workerTokenTtlMs:
+      overrides.workerTokenTtlMs ?? resolveEnrollmentConfigFromEnv(env).workerTokenTtlMs,
     httpHost: overrides.httpHost ?? env['HIVE_MCP_HTTP_HOST'] ?? '0.0.0.0',
     httpPort:
       overrides.httpPort ??
@@ -290,7 +300,8 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     );
   }
   // ADR-026: revocation rows outlive their token by the holder-proof window.
-  const { holderProofWindowDays } = resolveEnrollmentConfigFromEnv(process.env);
+  const enrollmentConfig = resolveEnrollmentConfigFromEnv(process.env);
+  const { holderProofWindowDays } = enrollmentConfig;
   const blocklist = createBlocklist(db, { holderProofWindowDays });
   const revocationPurger = createRevocationPurger({
     blocklist,
@@ -376,6 +387,22 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     stateSignal: participantStateSignal,
   });
 
+  // ADR-026: the Auth primitives of register_session. New Worker tokens are signed with
+  // the active key, as hivectl does.
+  const enrollment = createEnrollment({
+    signingKey: signingKeys.values().next().value as SigningKey,
+    participantsRepo,
+    hiveStableIdentifier: hiveRow.id,
+    db,
+    logger,
+    dialect: dbConfig.dialect,
+    cellsHook: createCellsHookAdapter(cellsRepo),
+    enrollmentTtlMs: enrollmentConfig.enrollmentTtlMs,
+    hiveMaxAgents: enrollmentConfig.hiveMaxAgents,
+    workerTokenTtlMs: cfg.workerTokenTtlMs,
+    holderProofWindowDays,
+  });
+
   // 7. MCP transport.
   const mcpTransport = createMcpTransport({
     participantsRepo,
@@ -386,6 +413,8 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     presenceRegistry: notifications.presenceRegistry,
     logger,
     listAgentsMaxPageSize: cfg.listAgentsMaxPageSize,
+    enrollment,
+    rebindParticipantStreams: () => 0,
   });
 
   const listenStreams = createListenStreams({
@@ -517,6 +546,10 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
     _cellEvents() {
       return cellEvents;
+    },
+
+    _presenceRegistry() {
+      return notifications.presenceRegistry;
     },
   };
 }

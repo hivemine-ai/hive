@@ -283,6 +283,91 @@ describe(`Worker tokens (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
     });
   });
 
+  // ADR-026: the renewal primitive of register_session (issueWorkerToken in renew mode
+  // plus the optional update of description and capabilities, in one transaction).
+  describe('renewWorkerToken', () => {
+    async function agentDetails() {
+      return world.db
+        .selectFrom('agents')
+        .select(['description', 'capabilities', 'last_worker_jti'])
+        .where('id', '=', agentId)
+        .executeTakeFirstOrThrow();
+    }
+
+    it('renews with CAS and updates description and capabilities in the same transaction', async () => {
+      const first = await create();
+
+      const renewed = await enrollment.renewWorkerToken({
+        agentId,
+        presentedJti: first.jti,
+        description: 'Reviews pull requests',
+        capabilities: ['review'],
+      });
+
+      const agent = await agentDetails();
+      expect(agent.last_worker_jti).toBe(renewed.jti);
+      expect(agent.description).toBe('Reviews pull requests');
+      expect(JSON.parse(agent.capabilities)).toEqual(['review']);
+      expect(await revocationReason(first.jti)).toBeUndefined();
+    });
+
+    it('leaves description and capabilities alone when they are not given', async () => {
+      await world.db
+        .updateTable('agents')
+        .set({ description: 'before', capabilities: '["a"]' })
+        .where('id', '=', agentId)
+        .execute();
+      const first = await create();
+
+      await enrollment.renewWorkerToken({ agentId, presentedJti: first.jti });
+
+      const agent = await agentDetails();
+      expect(agent.description).toBe('before');
+      expect(JSON.parse(agent.capabilities)).toEqual(['a']);
+    });
+
+    it('rejects an invalid description with INVALID_INPUT{description_invalid} before issuing', async () => {
+      const first = await create();
+      const rowsBefore = await workerTokenRows();
+
+      await expectAuthError(
+        enrollment.renewWorkerToken({ agentId, presentedJti: first.jti, description: 'a\nb' }),
+        'INVALID_INPUT',
+        'description_invalid',
+      );
+      expect(await workerTokenRows()).toBe(rowsBefore);
+    });
+
+    it('rolls the description back when the proof lost the CAS', async () => {
+      const first = await create();
+      await renew(first.jti);
+
+      await expectAuthError(
+        enrollment.renewWorkerToken({ agentId, presentedJti: first.jti, description: 'stolen' }),
+        'CREDENTIAL_INAUTHENTIC',
+        'holder_proof_superseded',
+      );
+      expect((await agentDetails()).description).not.toBe('stolen');
+    });
+
+    it('of two concurrent renewals with the same proof exactly one wins', async () => {
+      const first = await create();
+
+      const results = await Promise.allSettled([
+        enrollment.renewWorkerToken({ agentId, presentedJti: first.jti, description: 'one' }),
+        enrollment.renewWorkerToken({ agentId, presentedJti: first.jti, description: 'two' }),
+      ]);
+
+      const won = results.filter((r) => r.status === 'fulfilled');
+      expect(won).toHaveLength(1);
+      const winner = (won[0] as PromiseFulfilledResult<IssuedCredential>).value;
+      const agent = await agentDetails();
+      expect(agent.last_worker_jti).toBe(winner.jti);
+      // Only the winner's update survives.
+      expect(agent.description).toBe(results[0]?.status === 'fulfilled' ? 'one' : 'two');
+    });
+  });
+
   describe('verifyRenewalBearer', () => {
     it('accepts the last token while it is still valid and marks the identity as a renewal', async () => {
       const token = await create();

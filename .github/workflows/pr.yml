@@ -84,6 +84,7 @@ jobs:
   # PRY-085: the per-sender unread cap is enforced under concurrency with a Postgres advisory
   # lock; SQLite serializes writes, so only a real Postgres proves the race is closed.
   # PRY-090: the ADR-026 schema delta and the enrollment concurrency tests run here too.
+  # PRY-091: so do the register_session suites over the HTTP wire.
   postgres:
     name: per-sender cap on Postgres
     runs-on: ubuntu-latest
@@ -130,3 +131,7 @@ jobs:
       # Each suite recreates the `public` schema, so the files must not run in parallel.
       - name: Enrollment schema and auth tests (Postgres)
         run: pnpm --filter @hive/server exec vitest run src/persistence/migrate.enrollment.test.ts src/domain/auth/credentials/enrollment.worker-token.test.ts src/domain/auth/credentials/enrollment.registration.test.ts src/domain/auth/credentials/enrollment.cascade.test.ts src/persistence/migrate.audit-enrollment.test.ts --no-file-parallelism --reporter=verbose
+
+      # PRY-091: register_session over the real HTTP wire, with concurrent requests.
+      - name: register_session tests (Postgres)
+        run: pnpm --filter @hive/server exec vitest run src/transport/mcp/register-session.smoke.test.ts --no-file-parallelism --reporter=verbose

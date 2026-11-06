@@ -23,7 +23,7 @@ import { MCP_ERR_INVALID_PARAMS } from './error-codes.js';
 import { toProtocolError } from './error-mapper.js';
 import { createReferenceResolver } from './reference-resolver.js';
 import { registerMailboxResources } from './resources.js';
-import { createToolCatalog, type ToolDefinition } from './tools/catalog.js';
+import { createToolCatalog, type ToolCatalogDeps, type ToolDefinition } from './tools/catalog.js';
 
 export interface McpTransportDeps {
   participantsRepo: ParticipantsReadRepo;
@@ -37,10 +37,14 @@ export interface McpTransportDeps {
   instructions?: string;
   /** Hard cap server-side for `list_agents.pagination.limit`. From HIVE_MCP_LIST_AGENTS_MAX_PAGE_SIZE. */
   listAgentsMaxPageSize: number;
+  /** ADR-026: the Auth primitives of `register_session`. */
+  enrollment: ToolCatalogDeps['enrollment'];
+  /** ADR-026: `listen-stream.ts` re-binds the open streams of a renewed Agent. */
+  rebindParticipantStreams: ToolCatalogDeps['rebindParticipantStreams'];
 }
 
 export interface McpTransport {
-  /** Tool catalog (the 8 tools of the product spec, in a deterministic order). */
+  /** Tool catalog (the 9 tools of the product spec, in a deterministic order). */
   toolCatalog: ToolDefinition[];
   /** Factory for `createMcpHandler`: one fresh server instance per request. */
   buildServer(): McpServer;
@@ -74,6 +78,9 @@ export function createMcpTransport(deps: McpTransportDeps): McpTransport {
     visibilityEngine: deps.visibilityEngine,
     presenceRegistry: deps.presenceRegistry,
     maxPageSize: deps.listAgentsMaxPageSize,
+    enrollment: deps.enrollment,
+    rebindParticipantStreams: deps.rebindParticipantStreams,
+    logger: deps.logger,
   });
 
   const toolList = toolCatalog.map((t) => ({
