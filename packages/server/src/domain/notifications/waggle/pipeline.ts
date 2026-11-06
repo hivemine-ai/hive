@@ -44,7 +44,7 @@ export interface Pipeline {
 
 export function createPipeline(deps: PipelineDeps): Pipeline {
   function logSuppressed(payload: {
-    subCode: 'suspended' | 'revoked';
+    subCode: 'suspended' | 'retired' | 'revoked';
     messageId: UUIDv7;
     recipientId: UUIDv7;
     fromParticipantId: UUIDv7;

@@ -13,6 +13,12 @@ export interface RawWatchOptions {
   probeTimeout?: string;
   /** Operands after `--`. Only valid with `--exec`. */
   execArgs: string[];
+  /** Session modes (ADR-026): see session-input.ts. */
+  sessionName?: string;
+  sessionDescription?: string;
+  stateFile?: string;
+  inlineMcpConfig?: boolean;
+  attachSession?: string;
 }
 
 export interface WatchInput {
@@ -47,7 +53,7 @@ function parseInteger(name: string, raw: string, min: number): number {
   return value;
 }
 
-function parseServer(raw: string | undefined): string {
+export function parseServer(raw: string | undefined): string {
   if (raw === undefined || raw === '') {
     throw new WatchError(
       'WATCH_SERVER_URL_MISSING',
@@ -97,6 +103,33 @@ export function resolveWatchInput(
   }
   const server = parseServer(raw.server ?? env['HIVE_WATCH_SERVER_URL']);
 
+  const timings = resolveTimings(raw, env);
+
+  return {
+    server,
+    credentialFile:
+      raw.credentialFile ??
+      env['HIVE_WATCH_CREDENTIAL_FILE'] ??
+      defaultCredentialPath(platform, env, home),
+    once: raw.once === true,
+    exec: raw.exec === undefined ? undefined : { program: raw.exec, args: raw.execArgs },
+    ...timings,
+  };
+}
+
+export interface WatchTimings {
+  silenceTimeoutMs: number;
+  probeTimeoutMs: number;
+  authRetryMaxMs: number;
+  execMaxRetries: number;
+  execStopTimeoutMs: number;
+}
+
+/** Flags and environment shared by every mode that opens a stream or runs `--exec`. */
+export function resolveTimings(
+  raw: Pick<RawWatchOptions, 'silenceTimeout' | 'probeTimeout'>,
+  env: NodeJS.ProcessEnv,
+): WatchTimings {
   const silenceSeconds = parseInteger(
     '--silence-timeout',
     raw.silenceTimeout ??
@@ -132,13 +165,6 @@ export function resolveWatchInput(
   );
 
   return {
-    server,
-    credentialFile:
-      raw.credentialFile ??
-      env['HIVE_WATCH_CREDENTIAL_FILE'] ??
-      defaultCredentialPath(platform, env, home),
-    once: raw.once === true,
-    exec: raw.exec === undefined ? undefined : { program: raw.exec, args: raw.execArgs },
     silenceTimeoutMs: silenceSeconds * 1000,
     probeTimeoutMs: probeSeconds * 1000,
     authRetryMaxMs: authRetrySeconds * 1000,

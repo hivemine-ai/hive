@@ -36,6 +36,7 @@ function buildStubSender(): { sender: Sender; state: StubSenderState } {
   const state: StubSenderState = { receivedCalls: [] };
 
   const sender: Sender = {
+    depositSystemNotification: () => Promise.reject(new Error('not used here')),
     sendMessage(input: SendMessageInput): Promise<SendResult> {
       state.receivedCalls.push(input);
       if (state.rejectWith) return Promise.reject(state.rejectWith);
@@ -242,6 +243,28 @@ describe('reply_to tool — handler', () => {
     const cellErr = captured as CellError;
     expect(cellErr.code).toBe('INVALID_INPUT');
     expect(cellErr.subCode).toBe('reply_target_not_in_caller_cell');
+    expect(senderState.receivedCalls).toHaveLength(0);
+  });
+
+  it('refuses a reply to a system notification with RECIPIENT_UNREACHABLE{system_sender}', async () => {
+    const HIVE_ID = '01900000-0000-7000-8000-0000000000ff';
+    const { sender, state: senderState } = buildStubSender();
+    const { repo } = buildStubCellsRepo({
+      message: buildOriginalMessage({ fromParticipantId: HIVE_ID, type: 'notification' }),
+    });
+    const handler = createReplyToHandler({ sender, cellsRepo: repo });
+    const ctx = {
+      identity: { participantId: CALLER_ID, hiveId: HIVE_ID },
+      requestId: '01900000-0000-7000-8000-fffffffffff0',
+    } as unknown as RequestContext;
+
+    const err = await handler(
+      { message_id: ORIGINAL_MESSAGE_ID, type: 'response', body: 'thanks' },
+      ctx,
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(CellError);
+    expect(err).toMatchObject({ code: 'RECIPIENT_UNREACHABLE', subCode: 'system_sender' });
     expect(senderState.receivedCalls).toHaveLength(0);
   });
 

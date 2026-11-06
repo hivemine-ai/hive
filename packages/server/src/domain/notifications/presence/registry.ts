@@ -65,7 +65,11 @@ export interface PresenceRegistryConfig {
    * closes the suspension/subscribe race. Without it the snapshot state is used.
    */
   participantsRepo?: Pick<ParticipantsReadRepo, 'getParticipantState'>;
+  /** HIVE_PRESENCE_CLAIM_RESERVATION_MS: life of a `claimHolder` reservation. Default 10 s. */
+  claimReservationMs?: number;
 }
+
+export type ClaimHolderResult = { outcome: 'granted' } | { outcome: 'in_use' };
 
 export interface PresenceRegistry {
   /**
@@ -93,11 +97,30 @@ export interface PresenceRegistry {
   ): Promise<void>;
   /** `open` streams of the participant, for a replay per stream on resume. */
   listOpenStreams(participantId: UUIDv7): ReadyHookInput[];
-  /** Forced close of every stream of the participant (revocation / suspension). Idempotent. */
+  /** Forced close of every stream of the participant (revocation, suspension, retirement). Idempotent. */
   closeParticipantStreams(
     participantId: UUIDv7,
-    reason: Extract<StreamCloseReason, 'participant_revoked' | 'participant_suspended'>,
+    reason: Extract<
+      StreamCloseReason,
+      'participant_revoked' | 'participant_suspended' | 'participant_retired'
+    >,
   ): void;
+  /**
+   * ADR-026. Pure and synchronous: true iff the participant has at least one `open`
+   * entry. A leased handle closes itself when the lease runs out, so an `open` entry
+   * is lease-less or holds a live lease; a `pending` one does not count.
+   */
+  isHolderLive(participantId: UUIDv7): boolean;
+  /**
+   * ADR-026. Serialization point of a name claim on an offline holder. Synchronous, so
+   * two concurrent claims are ordered by the event loop and exactly one is `granted`.
+   * In order: a live holder → `in_use`; a live reservation of another claimId →
+   * `in_use`; otherwise installs the reservation → `granted`. Idempotent per claimId,
+   * without extending the reservation. Never throws.
+   */
+  claimHolder(participantId: UUIDv7, claimId: UUIDv7): ClaimHolderResult;
+  /** Frees the reservation if it belongs to `claimId`. Idempotent; no-op otherwise. */
+  releaseClaim(participantId: UUIDv7, claimId: UUIDv7): void;
   /** Closes every stream with `shutdown`, empties the registry and rejects later subscribes. Idempotent. */
   shutdown(): void;
   /** Test helper — live entry count (pending + open) for a participant. */
@@ -105,12 +128,16 @@ export interface PresenceRegistry {
 }
 
 const DEFAULT_MAX_SESSIONS = 16;
+const DEFAULT_CLAIM_RESERVATION_MS = 10_000;
 
 export function createPresenceRegistry(config: PresenceRegistryConfig = {}): PresenceRegistry {
   const presenceMap = new Map<UUIDv7, ParticipantPresence>();
   const maxSessions = config.maxSessionsPerParticipant ?? DEFAULT_MAX_SESSIONS;
   const now = config.now ?? ((): Date => new Date());
   const logger = config.logger;
+  const claimReservationMs = config.claimReservationMs ?? DEFAULT_CLAIM_RESERVATION_MS;
+  // A reservation is consumed by the claimant's ready(), released, or simply expires.
+  const reservations = new Map<UUIDv7, { claimId: UUIDv7; expiresAtMs: number }>();
   let isShutDown = false;
 
   function openCount(presence: ParticipantPresence | undefined): number {
@@ -301,6 +328,7 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
           if (found === undefined || found.entry.state === 'open') return;
           const wasOnline = openCount(found.presence) > 0;
           found.entry.state = 'open';
+          reservations.delete(participantId);
           if (!wasOnline) {
             logger?.info(
               {
@@ -385,6 +413,25 @@ export function createPresenceRegistry(config: PresenceRegistryConfig = {}): Pre
       return Array.from(presence.subscriberByConnection.values())
         .filter((sub) => sub.state === 'open')
         .map((sub) => ({ participantId, subscriptionId: sub.subscriptionId, handle: sub.handle }));
+    },
+
+    isHolderLive(participantId) {
+      return openCount(presenceMap.get(participantId)) > 0;
+    },
+
+    claimHolder(participantId, claimId) {
+      if (openCount(presenceMap.get(participantId)) > 0) return { outcome: 'in_use' };
+      const nowMs = now().getTime();
+      const current = reservations.get(participantId);
+      if (current !== undefined && current.expiresAtMs > nowMs) {
+        return current.claimId === claimId ? { outcome: 'granted' } : { outcome: 'in_use' };
+      }
+      reservations.set(participantId, { claimId, expiresAtMs: nowMs + claimReservationMs });
+      return { outcome: 'granted' };
+    },
+
+    releaseClaim(participantId, claimId) {
+      if (reservations.get(participantId)?.claimId === claimId) reservations.delete(participantId);
     },
 
     closeParticipantStreams(participantId, reason) {

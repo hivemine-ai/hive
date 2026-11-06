@@ -9,8 +9,11 @@ export interface AgentSummary {
   name: string;
   type: 'worker' | 'scout';
   owner_id: string;
-  state: 'active' | 'suspended';
+  // ADR-026: 'retired' only reaches the wire with `include_retired`.
+  state: 'active' | 'suspended' | 'retired';
   capabilities: string[];
+  /** ADR-026: declared by the Agent itself; untrusted text, `""` when it has none. */
+  description: string;
 }
 
 export interface AgentListView {
@@ -85,11 +88,12 @@ function projectAgent(agent: Agent): AgentSummary {
     // resolution: replaces the prior `as 'active' | 'suspended'` escape hatch).
     state: assertWireState(agent.state),
     capabilities: agent.capabilities,
+    description: agent.description ?? '',
   };
 }
 
-function assertWireState(state: Agent['state']): 'active' | 'suspended' {
-  if (state === 'active' || state === 'suspended') return state;
+function assertWireState(state: Agent['state']): 'active' | 'suspended' | 'retired' {
+  if (state !== 'revoked') return state;
   throw new CellError('INVALID_INPUT', { subCode: 'agent_revoked_in_projection' });
 }
 

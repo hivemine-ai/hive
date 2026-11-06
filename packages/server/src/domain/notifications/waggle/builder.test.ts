@@ -158,4 +158,17 @@ describe('createBuilder', () => {
       expect(replay?.coalescedCount).toBe(0);
     });
   });
+
+  it('renders the Hive id as the fixed sender label system (ADR-026)', async () => {
+    const hiveId = uuidv7();
+    const sender = uuidv7();
+    const builder = createBuilder({
+      cellsRepo: fakeCellsRepo({ unreadCount: 2, distinctSenderIds: [hiveId, sender] }),
+      systemSenderId: hiveId,
+    });
+
+    const result = await builder.buildReplayWaggle({ cellId: uuidv7(), recipientId: uuidv7() });
+
+    expect(result?.senderIds).toEqual(['system', sender]);
+  });
 });

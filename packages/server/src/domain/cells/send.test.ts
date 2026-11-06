@@ -1320,3 +1320,103 @@ describe('createSender / cell_ttl_no_enforce warn (PRY-025, ADR-016)', () => {
     expect(ttlEvents.length).toBe(0);
   });
 });
+
+// ADR-026: the Hive itself writes to the Cell of an owner (new enrollment Agent, repeated
+// registration rejections). The sender is `hives.id`, which is no participant.
+describe('createSender / depositSystemNotification', () => {
+  let world: SendWorld;
+  const SYSTEM = { kind: 'system' } as const;
+
+  beforeEach(async () => {
+    world = await seedSendWorld();
+  });
+
+  afterEach(async () => {
+    await world.db.destroy();
+  });
+
+  it('stores a notification from hives.id, skipping visibility, and emits messageStored', async () => {
+    const { sender } = buildSender(world, { visibility: ALWAYS_DENY });
+    const stored: MessageStoredEvent[] = [];
+    world.events.on('messageStored', (event) => {
+      stored.push(event);
+    });
+
+    const result = await sender.depositSystemNotification(
+      { recipientId: world.workerA, body: 'Hive: hello', action: { kind: 'agent_enrolled' } },
+      SYSTEM,
+    );
+
+    const row = await world.db
+      .selectFrom('messages')
+      .selectAll()
+      .where('id', '=', result.messageId)
+      .executeTakeFirstOrThrow();
+    expect(row).toMatchObject({
+      cell_id: world.cellA,
+      from_participant_id: world.hiveId,
+      to_participant_id: world.workerA,
+      type: 'notification',
+      body: 'Hive: hello',
+      state: 'stored',
+    });
+    expect(JSON.parse(row.action as string)).toEqual({ kind: 'agent_enrolled' });
+    expect(result.replayed).toBe(false);
+    expect(stored).toEqual([
+      expect.objectContaining({ messageId: result.messageId, fromParticipantId: world.hiveId }),
+    ]);
+  });
+
+  it('does not count against the per-sender quota', async () => {
+    const { sender } = buildSender(world, { config: { maxUnreadPerSender: 1 } });
+
+    await sender.depositSystemNotification({ recipientId: world.workerA, body: 'one' }, SYSTEM);
+    await sender.depositSystemNotification({ recipientId: world.workerA, body: 'two' }, SYSTEM);
+
+    const rows = await world.db
+      .selectFrom('messages')
+      .select('id')
+      .where('cell_id', '=', world.cellA)
+      .execute();
+    expect(rows).toHaveLength(2);
+  });
+
+  it('fails with RECIPIENT_UNREACHABLE when the Cell is missing or closed', async () => {
+    const { sender } = buildSender(world);
+    await world.db
+      .updateTable('cells')
+      .set({ state: 'closed' })
+      .where('id', '=', world.cellA)
+      .execute();
+
+    for (const recipientId of [world.workerA, uuidv7()]) {
+      const err = await sender
+        .depositSystemNotification({ recipientId, body: 'x' }, SYSTEM)
+        .catch((e: unknown) => e);
+      expect(isCellError(err) && err.code).toBe('RECIPIENT_UNREACHABLE');
+    }
+  });
+
+  it('validates the body like sendMessage', async () => {
+    const { sender } = buildSender(world, { config: { maxBodyBytes: 4 } });
+
+    const err = await sender
+      .depositSystemNotification({ recipientId: world.workerA, body: 'too long' }, SYSTEM)
+      .catch((e: unknown) => e);
+
+    expect(isCellError(err) && err.subCode).toBe('body_too_large');
+  });
+
+  it('refuses an authenticated caller: only the system writes as the Hive', async () => {
+    const { sender } = buildSender(world);
+
+    const err = await sender
+      .depositSystemNotification(
+        { recipientId: world.workerA, body: 'x' },
+        { kind: 'authenticated', identity: buildContext(world, world.workerB) },
+      )
+      .catch((e: unknown) => e);
+
+    expect(isCellError(err) && err.code).toBe('INSUFFICIENT_PRIVILEGE');
+  });
+});

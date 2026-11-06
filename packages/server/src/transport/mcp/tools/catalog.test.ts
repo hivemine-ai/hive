@@ -30,7 +30,7 @@ const ADR_REF = /\bADR-\d+\b/;
 const INC_REF = /\bINC-\d{4}-\d+\b/;
 
 describe('MCP tool catalog metadata — no internal refs leak to user-facing strings', () => {
-  it('exposes 8 tools (Slice 0 + Slice 2 catalog complete per v0.1)', () => {
+  it('exposes 9 tools, register_session last, and never the reserved session_status', () => {
     const catalog = buildCatalogForMetadata();
     expect(catalog.map((t) => t.name)).toEqual([
       'get_agent_config',
@@ -41,7 +41,9 @@ describe('MCP tool catalog metadata — no internal refs leak to user-facing str
       'check_unread_messages',
       'list_agents',
       'get_agent_status',
+      'register_session',
     ]);
+    expect(catalog.map((t) => t.name)).not.toContain('session_status');
   });
 
   it('every tool has a non-empty title and description', () => {

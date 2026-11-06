@@ -12,7 +12,7 @@
 // in-tree `createCellEvents` (Cell Store) already satisfies this; if it is
 // ever swapped for an async-emit lib the race analysis must be revisited.
 
-import type { ParticipantStateChange, ParticipantsReadRepo } from '#domain/auth/index.js';
+import type { ParticipantStateChange, ParticipantsReadRepo, UUIDv7 } from '#domain/auth/index.js';
 import type { CellEvents, CellsRepo } from '#domain/cells/index.js';
 import {
   createBuilder,
@@ -38,6 +38,8 @@ export interface NotificationsFactoryDeps {
   cellsRepo: CellsRepo;
   participantsRepo: ParticipantsReadRepo;
   logger: Logger;
+  /** ADR-026: the Hive id, the sender of system notifications. */
+  hiveId?: UUIDv7;
 }
 
 export interface NotificationsFactoryOptions {
@@ -51,6 +53,8 @@ export interface NotificationsFactoryOptions {
   senderWakeupsPerWindow?: number;
   /** Default 60000ms (provisional). */
   senderWindowMs?: number;
+  /** Default 10000ms (provisional). */
+  claimReservationMs?: number;
 }
 
 export interface Notifications {
@@ -71,6 +75,7 @@ const DEFAULT_REPLAY_DELAY_MS = 0;
 const DEFAULT_MAX_SESSIONS = 16;
 const DEFAULT_SENDER_WAKEUPS_PER_WINDOW = 5;
 const DEFAULT_SENDER_WINDOW_MS = 60_000;
+const DEFAULT_CLAIM_RESERVATION_MS = 10_000;
 
 export function resolveNotificationsConfig(
   env: NodeJS.ProcessEnv,
@@ -81,6 +86,7 @@ export function resolveNotificationsConfig(
   maxSessionsPerParticipant: number;
   senderWakeupsPerWindow: number;
   senderWindowMs: number;
+  claimReservationMs: number;
 } {
   const quietWindowMs =
     options.quietWindowMs ??
@@ -113,6 +119,12 @@ export function resolveNotificationsConfig(
       name: 'HIVE_WAGGLE_SENDER_WINDOW_MS',
       min: 1,
     });
+  const claimReservationMs =
+    options.claimReservationMs ??
+    parseIntEnv(env['HIVE_PRESENCE_CLAIM_RESERVATION_MS'], DEFAULT_CLAIM_RESERVATION_MS, {
+      name: 'HIVE_PRESENCE_CLAIM_RESERVATION_MS',
+      min: 1,
+    });
   if (senderWindowMs < quietWindowMs) {
     throw new Error(
       `HIVE_WAGGLE_SENDER_WINDOW_MS (${String(senderWindowMs)}) must be >= HIVE_WAGGLE_QUIET_WINDOW_MS (${String(quietWindowMs)})`,
@@ -125,6 +137,7 @@ export function resolveNotificationsConfig(
     maxSessionsPerParticipant,
     senderWakeupsPerWindow,
     senderWindowMs,
+    claimReservationMs,
   };
 }
 
@@ -139,7 +152,10 @@ export function createNotificationsForProduction(
 ): Notifications {
   const config = resolveNotificationsConfig(process.env, options);
 
-  const builder = createBuilder({ cellsRepo: deps.cellsRepo });
+  const builder = createBuilder({
+    cellsRepo: deps.cellsRepo,
+    ...(deps.hiveId !== undefined && { systemSenderId: deps.hiveId }),
+  });
 
   // Forward reference: the registry calls the replay on ready(), and the replay asks
   // the registry whether the stream is still open before delivering.
@@ -147,6 +163,7 @@ export function createNotificationsForProduction(
 
   const presenceRegistry = createPresenceRegistry({
     maxSessionsPerParticipant: config.maxSessionsPerParticipant,
+    claimReservationMs: config.claimReservationMs,
     logger: deps.logger,
     participantsRepo: deps.participantsRepo,
     onReady: ({ participantId, subscriptionId, handle }) => {
@@ -225,10 +242,7 @@ export function createNotificationsForProduction(
         }
         return;
       }
-      presenceRegistry.closeParticipantStreams(
-        participantId,
-        newState === 'suspended' ? 'participant_suspended' : 'participant_revoked',
-      );
+      presenceRegistry.closeParticipantStreams(participantId, `participant_${newState}`);
     },
     stop() {
       senderThrottle.stop();

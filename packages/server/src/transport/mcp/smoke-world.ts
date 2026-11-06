@@ -5,6 +5,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { sql } from 'kysely';
 import { v7 as uuidv7 } from 'uuid';
 
 import {
@@ -38,6 +39,9 @@ export interface SmokeWorld {
   wire: Wire;
   baseUrl: string;
   dbUrl: string;
+  dbConfig: DbConfig;
+  hiveId: UUIDv7;
+  signingKey: SigningKey;
   jwtA: string;
   jwtB: string;
   jwtAdmin: string;
@@ -51,6 +55,8 @@ export interface SmokeWorldOptions {
   /** Default 300 s. */
   credentialTtlMs?: number;
   wire?: WireConfig;
+  /** Postgres instead of a SQLite file. The `public` schema is dropped and recreated. */
+  pgUrl?: string;
 }
 
 export async function seedSmokeWorld(opts: SmokeWorldOptions = {}): Promise<SmokeWorld> {
@@ -60,12 +66,15 @@ export async function seedSmokeWorld(opts: SmokeWorldOptions = {}): Promise<Smok
   const keysDir = path.join(workDir, 'keys');
   await fs.mkdir(keysDir, { recursive: true });
 
-  const dbConfig: DbConfig = {
-    dialect: 'sqlite',
-    url: `sqlite:${dbPath}`,
-    sqliteWal: false,
-  };
+  const dbConfig: DbConfig =
+    opts.pgUrl !== undefined && opts.pgUrl !== ''
+      ? { dialect: 'postgres', url: opts.pgUrl }
+      : { dialect: 'sqlite', url: `sqlite:${dbPath}`, sqliteWal: false };
   const db = createDb(dbConfig);
+  if (dbConfig.dialect === 'postgres') {
+    await sql`drop schema if exists public cascade`.execute(db);
+    await sql`create schema public`.execute(db);
+  }
   await migrateToLatest(db);
 
   // ── signing key (real Ed25519) ──
@@ -161,8 +170,8 @@ export async function seedSmokeWorld(opts: SmokeWorldOptions = {}): Promise<Smok
 
   // ── wire (production composition root) ──
   // Set env so the wire reads from the same DB + keys dir.
-  process.env['HIVE_DB_DIALECT'] = 'sqlite';
-  process.env['HIVE_DB_URL'] = `sqlite:${dbPath}`;
+  process.env['HIVE_DB_DIALECT'] = dbConfig.dialect;
+  process.env['HIVE_DB_URL'] = dbConfig.url;
 
   const logger = opts.logger ?? createLogger({ level: 'silent' });
   const wire = await buildWire(
@@ -186,6 +195,9 @@ export async function seedSmokeWorld(opts: SmokeWorldOptions = {}): Promise<Smok
     wire,
     baseUrl,
     dbUrl: dbConfig.url,
+    dbConfig,
+    hiveId,
+    signingKey,
     jwtA: credA.jwt,
     jwtB: credB.jwt,
     jwtAdmin: credAdmin.jwt,

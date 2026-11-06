@@ -121,7 +121,7 @@ Running `hivectl` with no arguments renders a local snapshot view in three frame
 ```
 $ hivectl
 
-    ⬢ ⬢ ⬢    hivectl  ·  v0.2.2  ·  apache-2.0
+    ⬢ ⬢ ⬢    hivectl  ·  v0.3.0  ·  apache-2.0
   ⬢ ⬢ ⬢ ⬢ ⬢  open-source MCP server for collaborative AI agents
     ⬢ ⬢ ⬢    snapshot 12s ago · ~/.local/state/hive/status.json
 
@@ -169,7 +169,7 @@ In pretty mode (`--output table`, the default for an interactive TTY) `init` ren
 
 ```
        ⬢ ⬢ ⬢ ⬢
-     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      hivectl   ·   v0.2.2
+     ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      hivectl   ·   v0.3.0
    ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢ ⬢
      ⬢ ⬢ ⬢ ⬢ ⬢ ⬢      bootstrapping a fresh Hive
        ⬢ ⬢ ⬢ ⬢        apache-2.0  ·  hivemine-ai/hive
@@ -241,11 +241,16 @@ hivectl agent create --owner <email-or-uuid> --name <name> --type worker|scout
                      [--emit-credential] [--credential-ttl <duration>]
                      [--output-credential <path>]
 hivectl agent list   [--owner <email-or-uuid>] [--type worker|scout]
-                     [--state active|suspended|revoked] [--limit N] [--cursor <c>]
+                     [--state active|suspended|retired|revoked] [--limit N] [--cursor <c>]
 hivectl agent revoke <agent-ref> --yes
+hivectl agent release <agent-ref> --operator-id <owner-email-or-uuid> --yes
 ```
 
 `create` cascades to a new Cell (cross-domain hook). `revoke` cascades to closing the Agent's Cell.
+
+`list` shows every state, `retired` included (unlike `list_agents` over MCP), with the `origin` of each agent (`manual`, or `enrollment` for a session registered with `register_session`) and its `lastConnectedAt`; `--output json` adds `enrolledVia`.
+
+`release` frees the name of a session agent whose holder still looks alive, for example a stream without a lease (ADR-026). It revokes every Worker token of the agent that is valid or inside the holder-proof window (`HIVE_HOLDER_PROOF_WINDOW_DAYS`), so the holder can neither call nor renew; the agent keeps its state and the next `register_session` with the name claims it. `hivectl` runs in another process, so a live stream drops on the server's next re-verification (`HIVE_MCP_REVERIFY_INTERVAL_SECONDS`, 60 s) or when its lease expires; until then the name still answers `name_in_use`. Only the owner may release: `--operator-id` must be the agent's owner, otherwise (or without it) the command exits `EXIT_PERMISSION (5)` with `release_owner_only`. A manual or revoked agent exits `EXIT_PRECONDITION (4)`. With no token left it succeeds with `no active holder`. Audit: `admin_agent_release` with the owner as actor and `revokedHolderTokens`.
 
 `<agent-ref>` accepts two input forms (per [ADR-020](https://github.com/hivemine-ai/hive-vault)):
 
@@ -257,11 +262,19 @@ hivectl agent revoke <agent-ref> --yes
 ```
 hivectl credential issue   --participant-id <email-or-uuid> [--ttl <duration>]
                            [--reason <text>] [--output-credential <path>]
+hivectl credential issue   --enrollment --owner <email-or-uuid> [--name-prefix <p>]
+                           [--max-agents N] [--ttl <duration>] [--reason <text>]
+                           --output-credential <path>
 hivectl credential rotate  <jti-or-active-ref> [--ttl <duration>] [--yes]
                            [--output-credential <path>]
-hivectl credential revoke  <jti-or-active-ref> [--reason <text>] [--yes]
+hivectl credential revoke  <jti-or-active-ref> [--reason <text>] [--revoke-agents] [--yes]
 hivectl credential list    <participant-ref> [--limit N]
 ```
+
+**Enrollment credentials** (ADR-026). `credential issue --enrollment` issues a credential that registers Claude Code sessions as Workers of `--owner` (the `register_session` tool ships in v0.3.0). It is a long-lived secret, so `--output-credential` is mandatory and the JWT never goes to stdout. `--name-prefix` must follow the agent name syntax (lowercase letter, then lowercase letters, digits or `-`); every registered name must start with it. `--max-agents` caps the active Agents registered through it and cannot exceed `HIVE_ENROLLMENT_MAX_AGENTS`. Default TTL: `HIVE_ENROLLMENT_CREDENTIAL_TTL_DAYS` (90 days). Invalid values exit with `EXIT_USER_ERROR (1)` (`name_prefix_invalid`, `max_agents_invalid`, `max_agents_exceeds_hive_limit`).
+
+- `credential rotate` on an enrollment issues one with the same scope, prefix and cap (`--output-credential` is mandatory). Sessions already registered keep renewing their Worker tokens; the old credential no longer registers new ones. Installed folders keep the old credential until you install the new one.
+- `credential revoke` on an enrollment also revokes every Worker token issued through it, so those sessions stop at their next request. `--revoke-agents` also revokes its Agents (active, retired or suspended), closing their Cells. `--revoke-agents` on any other credential exits with `EXIT_USER_ERROR (1)` (`revoke_agents_requires_enrollment`).
 
 `<jti-or-active-ref>` (per ADR-020 / PRY-041) accepts:
 
@@ -313,7 +326,7 @@ Bind-address precedence (highest wins): `--host` flag → `HIVE_MCP_HTTP_HOST` e
 
 By default `serve` boots in **3 phases** for human operators sitting at a terminal:
 
-1. **Boot banner + sub-block** — the compact identity banner (`⬢ ⬢ ⬢ hivectl · v0.2.2 · apache-2.0` + tagline + `starting hive · <hive-name>`) followed by 3 metadata rows (`bind`, `database`, `log level`). The hive name comes from the on-disk status snapshot (per [ADR-022](https://github.com/hivemine-ai/hive-vault)) — fresh installs without an `init` yet show `starting hive` (no suffix). The `database` row strips Postgres credentials (`postgres://hive:***@db.example.com:5432/hivedb` is rendered as `postgres · hive@db.example.com:5432/hivedb`).
+1. **Boot banner + sub-block** — the compact identity banner (`⬢ ⬢ ⬢ hivectl · v0.3.0 · apache-2.0` + tagline + `starting hive · <hive-name>`) followed by 3 metadata rows (`bind`, `database`, `log level`). The hive name comes from the on-disk status snapshot (per [ADR-022](https://github.com/hivemine-ai/hive-vault)) — fresh installs without an `init` yet show `starting hive` (no suffix). The `database` row strips Postgres credentials (`postgres://hive:***@db.example.com:5432/hivedb` is rendered as `postgres · hive@db.example.com:5432/hivedb`).
 2. **Live log stream** — every pino log line is reformatted to the canonical shape `hh:mm:ss.mmm␣␣LEVEL␣␣module.path␣␣message␣␣k=v…`. Level chips (`INFO ` / `DEBUG` / `WARN ` / `ERROR`) are 5 chars wide, padded right; the module column is padded to a width determined at boot (default 20 chars when no namespaces are known); separators are 2 spaces between segments. The log emitter on the server side is unchanged — pino still emits raw JSON internally, the formatter is read-only of that JSON line.
 3. **Readiness line** — once the HTTP listener is bound and answering health probes, a single line `⬡ ready · http://<host>:<port>` prints in the OK colour. After this, the live log stream continues showing actual traffic.
 
@@ -402,6 +415,8 @@ Listens to one participant's mailbox and prints a metadata line per event. Unlik
 | `HIVE_AUTH_KEYS_DIR`                      | `./var/keys`                    | Directory for Ed25519 PEMs. Override with `--keys-dir` on `init`. |
 | `HIVE_AUTH_CREDENTIAL_DEFAULT_TTL_DAYS`   | `365`                           | Default TTL when `--ttl` is omitted.                              |
 | `HIVE_AUTH_SNAPSHOT_MAX_BYTES`            | `16384`                         | Cap on the credential snapshot payload.                           |
+| `HIVE_ENROLLMENT_MAX_AGENTS`              | `10`                            | Ceiling of `--max-agents`; cap of an enrollment without it.       |
+| `HIVE_ENROLLMENT_CREDENTIAL_TTL_DAYS`     | `90`                            | Default TTL of `credential issue --enrollment` (at least `1`).    |
 | `HIVE_CLI_LOG_LEVEL`                      | `warn`                          | pino log level. Override with `--verbose` for `debug`.            |
 | `HIVE_CLI_DEFAULT_OUTPUT`                 | `auto` (table if TTY else json) | Override with `--output table                                     | json | yaml`. |
 | `HIVE_CLI_AUDIT_OPERATOR_NOTE_MAX_LENGTH` | `256`                           | Truncates `--operator-note` after this many chars.                |

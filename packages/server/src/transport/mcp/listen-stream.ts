@@ -16,7 +16,7 @@
 
 import { v7 as uuidv7 } from 'uuid';
 
-import type { IdentityContext, Verifier } from '#domain/auth/index.js';
+import type { IdentityContext, UUIDv7, Verifier } from '#domain/auth/index.js';
 import type { CellsRepo } from '#domain/cells/index.js';
 import { isWaggleError } from '#domain/notifications/index.js';
 import type {
@@ -55,6 +55,15 @@ export interface ListenStreams extends ListenEdge {
    * `presenceRegistry.shutdown()`: streams without presence are not in the registry.
    */
   stop(): void;
+  /**
+   * ADR-026: after a register_session renewal, every open presence stream of the
+   * participant takes the `jti` and `exp` of the new token, for its close-on-expiry and
+   * its re-verification. Returns how many streams were re-bound (0 is valid).
+   */
+  rebindParticipantStreams(
+    participantId: UUIDv7,
+    credential: { jti: UUIDv7; expiresAt: Date },
+  ): number;
   /** One pass over the open streams. Public for tests. */
   reverifyOpenStreams(): Promise<void>;
   /** Test helper — streams being tracked. */
@@ -62,8 +71,11 @@ export interface ListenStreams extends ListenEdge {
 }
 
 interface OpenStream {
-  handle: SubscriberHandle;
+  handle: StreamHandle;
   identity: IdentityContext;
+  countsAsPresence: boolean;
+  /** The token the stream lives on: the one it was opened with, or the last re-bound. */
+  credential: { jti: UUIDv7; expiresAt: Date | undefined };
 }
 
 export const LEASE_RESPONSE_HEADER = 'hive-listen-lease-ms';
@@ -86,6 +98,7 @@ const REVERIFY_CLOSE_REASON = {
   participant_not_found: 'participant_revoked',
   participant_revoked: 'participant_revoked',
   participant_suspended: 'participant_suspended',
+  participant_retired: 'participant_retired',
 } as const;
 
 function requestedSubscriptions(body: unknown): unknown {
@@ -102,6 +115,7 @@ function rpcId(body: unknown): string | number {
 function subscribeFailureReason(subCode: string | undefined): StreamCloseReason {
   if (subCode === 'registry_shut_down') return 'shutdown';
   if (subCode === 'suspended') return 'participant_suspended';
+  if (subCode === 'retired') return 'participant_retired';
   return 'participant_revoked';
 }
 
@@ -125,7 +139,7 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
     streamId: string,
     subscribesOwnMailbox: boolean,
     resourceSubscriptionsCount: number,
-  ): SubscriberHandle {
+  ): StreamHandle {
     const { body, identity, requestId, raw, abort } = input;
     const leaseKey =
       deps.leaseMs !== null &&
@@ -163,7 +177,15 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
       { event: 'mcp_listen_opened', ...fields, resourceSubscriptionsCount, leaseMs, requestId },
       'listen stream opened',
     );
-    open.set(handle.connectionId, { handle, identity });
+    open.set(handle.connectionId, {
+      handle,
+      identity,
+      countsAsPresence: subscribesOwnMailbox,
+      credential: {
+        jti: identity.snapshot.credentialJti,
+        expiresAt: identity.snapshot.credentialExpiresAt,
+      },
+    });
     const openedAt = Date.now();
     handle.onClose((closeReason) => {
       open.delete(handle.connectionId);
@@ -220,12 +242,12 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
     if (reverifying) return;
     reverifying = true;
     try {
-      for (const { handle, identity } of Array.from(open.values())) {
+      for (const { handle, identity, credential } of Array.from(open.values())) {
         try {
           const verdict = await deps.verifier.reverifyStream({
-            jti: identity.snapshot.credentialJti,
+            jti: credential.jti,
             participantId: identity.participantId,
-            credentialExpiresAt: identity.snapshot.credentialExpiresAt ?? NO_EXPIRY,
+            credentialExpiresAt: credential.expiresAt ?? NO_EXPIRY,
           });
           if (!verdict.ok) handle.close(REVERIFY_CLOSE_REASON[verdict.reason]);
         } catch (err) {
@@ -289,6 +311,17 @@ export function createListenStreams(deps: ListenStreamsDeps): ListenStreams {
 
     renewLease({ key, identity }) {
       return leases.get(leaseSlot(identity.participantId, key))?.renewLease() ?? false;
+    },
+
+    rebindParticipantStreams(participantId, credential) {
+      let rebound = 0;
+      for (const stream of open.values()) {
+        if (!stream.countsAsPresence || stream.identity.participantId !== participantId) continue;
+        stream.credential = { jti: credential.jti, expiresAt: credential.expiresAt };
+        stream.handle.rearmCredentialExpiry(credential.expiresAt);
+        rebound += 1;
+      }
+      return rebound;
     },
 
     reverifyOpenStreams,

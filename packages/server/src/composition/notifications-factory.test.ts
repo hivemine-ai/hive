@@ -65,6 +65,16 @@ describe('resolveNotificationsConfig', () => {
     expect(config.maxSessionsPerParticipant).toBe(4);
   });
 
+  it('reads HIVE_PRESENCE_CLAIM_RESERVATION_MS, default 10 s (ADR-026)', () => {
+    expect(resolveNotificationsConfig({}).claimReservationMs).toBe(10_000);
+    expect(
+      resolveNotificationsConfig({ HIVE_PRESENCE_CLAIM_RESERVATION_MS: '2500' }).claimReservationMs,
+    ).toBe(2500);
+    expect(() => resolveNotificationsConfig({ HIVE_PRESENCE_CLAIM_RESERVATION_MS: '0' })).toThrow(
+      /must be >= 1/,
+    );
+  });
+
   it('non-numeric env throws', () => {
     expect(() => resolveNotificationsConfig({ HIVE_WAGGLE_QUIET_WINDOW_MS: 'oops' })).toThrow(
       /must be an integer/,
@@ -85,6 +95,7 @@ describe('resolveNotificationsConfig', () => {
       HIVE_PRESENCE_HEARTBEAT_TIMEOUT_MS: '1000',
     });
     expect(Object.keys(config).sort()).toEqual([
+      'claimReservationMs',
       'maxSessionsPerParticipant',
       'quietWindowMs',
       'replayDelayMs',
@@ -109,6 +120,27 @@ describe('createNotificationsForProduction wiring', () => {
     expect(result.consolidator).toBeDefined();
     expect(result.replay).toBeDefined();
   });
+
+  it.each([
+    ['suspended', 'participant_suspended'],
+    ['retired', 'participant_retired'],
+    ['revoked', 'participant_revoked'],
+  ] as const)(
+    'a %s state change closes the streams of the participant with %s',
+    (newState, reason) => {
+      const result = createNotificationsForProduction({
+        cellEvents: createCellEvents(),
+        cellsRepo: fakeCellsRepo(),
+        participantsRepo: fakeParticipantsRepo(),
+        logger: silentLogger(),
+      });
+      const close = vi.spyOn(result.presenceRegistry, 'closeParticipantStreams');
+
+      result.handleParticipantStateChanged({ participantId: 'agent-1', newState });
+
+      expect(close).toHaveBeenCalledWith('agent-1', reason);
+    },
+  );
 
   it('subscribes pipeline.handleMessageStored to cellEvents.messageStored', () => {
     const cellEvents = createCellEvents();

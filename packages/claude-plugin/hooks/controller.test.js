@@ -83,7 +83,7 @@ function setup(overrides = {}) {
     ...overrides,
   };
   const controller = createController({
-    options: { hivectl: 'hivectl', server: 'http://hive/mcp', credentialFile: '/c/cred' },
+    options: { hivectl: ['hivectl'], sessionId: 'sid-1' },
     host,
   });
   return {
@@ -104,24 +104,17 @@ function setup(overrides = {}) {
 }
 
 describe('launching watch', () => {
-  it('spawns hivectl watch with the server and credential file, never the credential', async () => {
+  it('spawns hivectl watch --attach-session with the session id, and no credential', async () => {
     const t = setup();
     t.controller.start();
     await flush();
-    expect(t.calls.spawn[0]).toEqual([
-      'hivectl',
-      'watch',
-      '--server',
-      'http://hive/mcp',
-      '--credential-file',
-      '/c/cred',
-    ]);
+    expect(t.calls.spawn[0]).toEqual(['hivectl', 'watch', '--attach-session', 'sid-1']);
   });
 
-  it('omits --credential-file when none is configured', async () => {
+  it('runs hivectl through the command prefix fixed by claude install (node plus script)', async () => {
     const calls = [];
     const controller = createController({
-      options: { hivectl: 'hivectl', server: 'http://hive/mcp', credentialFile: '' },
+      options: { hivectl: ['/opt/node', '/opt/hivectl/main.js'], sessionId: 'sid-9' },
       host: {
         spawn: (argv) => {
           calls.push(argv);
@@ -136,7 +129,13 @@ describe('launching watch', () => {
     });
     controller.start();
     await flush();
-    expect(calls[0]).toEqual(['hivectl', 'watch', '--server', 'http://hive/mcp']);
+    expect(calls[0]).toEqual([
+      '/opt/node',
+      '/opt/hivectl/main.js',
+      'watch',
+      '--attach-session',
+      'sid-9',
+    ]);
   });
 
   it('does not start a second watch', async () => {
@@ -218,15 +217,7 @@ describe('the pending flag', () => {
     await flush();
     t.controller.onTurnComplete();
     await flush();
-    expect(t.calls.run[0]).toEqual([
-      'hivectl',
-      'watch',
-      '--once',
-      '--server',
-      'http://hive/mcp',
-      '--credential-file',
-      '/c/cred',
-    ]);
+    expect(t.calls.run[0]).toEqual(['hivectl', 'watch', '--once', '--attach-session', 'sid-1']);
     expect(t.calls.submit).toHaveLength(1);
     expect(t.calls.submit[0]).toContain('3 unread');
   });
@@ -756,5 +747,94 @@ describe('stop()', () => {
     t.procs[0].push('stdout', line('e1'));
     await flush();
     expect(t.calls.submit).toHaveLength(0);
+  });
+});
+
+describe('retarget (session id changed by /clear or /resume)', () => {
+  it('stops the current watch and starts one for the new session id at once, without backoff', async () => {
+    const t = setup();
+    t.controller.start();
+    await flush();
+    t.controller.retarget('sid-2');
+    await flush();
+    expect(t.procs[0].killed).toBe(true);
+    expect(t.calls.spawn[1]).toEqual(['hivectl', 'watch', '--attach-session', 'sid-2']);
+    expect(t.calls.sleeps).toEqual([]);
+  });
+
+  it('does nothing for the same session id', async () => {
+    const t = setup();
+    t.controller.start();
+    await flush();
+    t.controller.retarget('sid-1');
+    await flush();
+    expect(t.procs[0].killed).toBe(false);
+    expect(t.calls.spawn).toHaveLength(1);
+  });
+
+  it('points --once at the new session id', async () => {
+    const t = setup();
+    t.controller.start();
+    await flush();
+    t.controller.retarget('sid-2');
+    await flush();
+    t.procs[1].push('stdout', line('e1'));
+    await flush();
+    t.procs[1].push('stdout', line('e2'));
+    await flush();
+    t.controller.onTurnComplete();
+    await flush();
+    expect(t.calls.run.at(-1)).toEqual(['hivectl', 'watch', '--once', '--attach-session', 'sid-2']);
+  });
+
+  it('starts watch again for the new id after it had stopped for good', async () => {
+    const t = setup();
+    t.controller.start();
+    await flush();
+    t.procs[0].push('stderr', 'error: WATCH_ATTACH_TARGET_NOT_FOUND: no session\n');
+    t.procs[0].exit(1);
+    await flush();
+    expect(t.calls.toast).toHaveLength(1);
+    t.controller.retarget('sid-2');
+    await flush();
+    expect(t.calls.spawn[1]).toEqual(['hivectl', 'watch', '--attach-session', 'sid-2']);
+  });
+
+  it('before start only records the id', async () => {
+    const t = setup();
+    t.controller.retarget('sid-3');
+    await flush();
+    expect(t.calls.spawn).toEqual([]);
+    t.controller.start();
+    await flush();
+    expect(t.calls.spawn[0]).toEqual(['hivectl', 'watch', '--attach-session', 'sid-3']);
+  });
+
+  it('cuts the restart backoff short: a retarget during the sleep after a crash spawns at once', async () => {
+    const t = setup();
+    t.hold.on = true;
+    t.controller.start();
+    await flush();
+    t.procs[0].exit(2);
+    await flush();
+    expect(t.calls.sleeps).toEqual([1000]);
+    t.controller.retarget('sid-2');
+    await flush();
+    expect(t.calls.spawn[1]).toEqual(['hivectl', 'watch', '--attach-session', 'sid-2']);
+  });
+
+  it('a retarget without a running child leaves no pending restart: the next crash still backs off', async () => {
+    const t = setup();
+    t.hold.on = true;
+    t.controller.start();
+    await flush();
+    t.procs[0].exit(2);
+    await flush();
+    t.controller.retarget('sid-2');
+    await flush();
+    t.procs[1].exit(2);
+    await flush();
+    expect(t.calls.sleeps).toHaveLength(2);
+    expect(t.calls.spawn).toHaveLength(2);
   });
 });

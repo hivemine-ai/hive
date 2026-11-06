@@ -73,6 +73,9 @@ export const DEFAULT_REDACT_PATHS: ReadonlyArray<string> = [
   '*.body',
   '*.params.body',
   '*.arguments.body',
+  // ADR-026: the Worker token returned by register_session (the tool result).
+  '*.result.token',
+  '*.structuredContent.token',
 ];
 
 /**

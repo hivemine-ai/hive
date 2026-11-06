@@ -1,1 +1,20 @@
-{ "modules": ["./register.js"] }
+{
+  "modules": ["./register.js"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "hivectl claude hook session-start", "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__plugin_hive-wake_hive__(register_session|session_status)",
+        "hooks": [
+          { "type": "command", "command": "hivectl claude hook post-tool-use", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

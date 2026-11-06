@@ -53,6 +53,11 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
     createdAt: new Date('2026-04-01T00:00:00Z'),
     revokedAt: null,
     lastConnectedAt: null,
+    origin: 'manual',
+    enrolledVia: null,
+    description: null,
+    retiredAt: null,
+    lastWorkerJti: null,
     ...overrides,
   };
 }
@@ -184,6 +189,7 @@ describe('createGetAgentStatusHandler', () => {
       participant_id: TARGET_ID,
       presence: 'online',
       last_connected_at: lastRequestAt.toISOString(),
+      description: '',
     });
   });
 
@@ -229,6 +235,7 @@ describe('createGetAgentStatusHandler', () => {
       participant_id: TARGET_ID,
       presence: 'offline',
       last_connected_at: persisted.toISOString(),
+      description: '',
     });
   });
 
@@ -319,6 +326,28 @@ describe('createGetAgentStatusHandler', () => {
     const handler = createGetAgentStatusHandler(deps);
     const out = await invoke(handler, { participant: 'admin@test-hive' }, makeCtx());
     expect(out.last_connected_at).toBeNull();
+  });
+
+  it('adds the description of an Agent target, empty when it has none (ADR-026)', async () => {
+    const declared = createGetAgentStatusHandler(
+      buildDeps({ agent: makeAgent({ description: 'Reviews pull requests' }) }),
+    );
+    const blank = createGetAgentStatusHandler(
+      buildDeps({ agent: makeAgent({ description: null }) }),
+    );
+
+    expect((await declared({ participant: TARGET_ID }, makeCtx())).description).toBe(
+      'Reviews pull requests',
+    );
+    expect((await blank({ participant: TARGET_ID }, makeCtx())).description).toBe('');
+  });
+
+  it('omits description for a Hivekeeper target', async () => {
+    const handler = createGetAgentStatusHandler(buildDeps({ agent: null }));
+
+    const out = await handler({ participant: TARGET_ID }, makeCtx());
+
+    expect(out).not.toHaveProperty('description');
   });
 
   it('thrown error has the expected CellError shape (isCellError true)', async () => {

@@ -55,6 +55,8 @@ export interface StreamHandleDeps {
 export interface StreamHandle extends SubscriberHandle {
   /** Restarts the lease. False when the stream has no lease or is already closed. */
   renewLease(): boolean;
+  /** ADR-026: moves the close-on-expiry to the `exp` of a renewed token. No-op once closed. */
+  rearmCredentialExpiry(expiresAt: Date): void;
 }
 
 /** Forced closes the client must see as a clean end, so it reconnects. */
@@ -297,6 +299,12 @@ export function createStreamHandle(deps: StreamHandleDeps): StreamHandle {
 
     close(reason) {
       terminate(reason);
+    },
+
+    rearmCredentialExpiry(expiresAt) {
+      if (closeReason !== undefined) return;
+      clearTimeout(expiryTimer);
+      armExpiry(expiresAt);
     },
 
     renewLease() {

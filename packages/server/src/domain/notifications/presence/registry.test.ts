@@ -752,3 +752,127 @@ describe('presence events', () => {
     expect(names).not.toContain('presence_subscribe_success');
   });
 });
+
+// ADR-026: holder liveness and the claim reservation of register_session.
+describe('isHolderLive / claimHolder / releaseClaim', () => {
+  const RESERVATION_MS = 10_000;
+
+  function buildWithClock(): { registry: PresenceRegistry; advance: (ms: number) => void } {
+    let nowMs = Date.parse('2026-11-06T12:00:00.000Z');
+    const registry = createPresenceRegistry({
+      now: () => new Date(nowMs),
+      claimReservationMs: RESERVATION_MS,
+    });
+    return {
+      registry,
+      advance: (ms) => {
+        nowMs += ms;
+      },
+    };
+  }
+
+  async function openStream(registry: PresenceRegistry, ctx: IdentityContext): Promise<MockHandle> {
+    const handle = mockHandle(ctx);
+    const subscription = await registry.subscribe({ callerContext: ctx, handle });
+    subscription.ready();
+    return handle;
+  }
+
+  it('isHolderLive is true only while an open entry exists', async () => {
+    const { registry } = buildWithClock();
+    const ctx = activeContext();
+    expect(registry.isHolderLive(ctx.participantId)).toBe(false);
+
+    const handle = mockHandle(ctx);
+    const subscription = await registry.subscribe({ callerContext: ctx, handle });
+    expect(registry.isHolderLive(ctx.participantId)).toBe(false);
+
+    subscription.ready();
+    expect(registry.isHolderLive(ctx.participantId)).toBe(true);
+
+    handle.triggerClose('lease_expired');
+    expect(registry.isHolderLive(ctx.participantId)).toBe(false);
+  });
+
+  it('claimHolder answers in_use while the holder has an open stream', async () => {
+    const { registry } = buildWithClock();
+    const ctx = activeContext();
+    await openStream(registry, ctx);
+
+    expect(registry.claimHolder(ctx.participantId, uuidv7())).toEqual({ outcome: 'in_use' });
+  });
+
+  it('grants one of two claims on an offline holder; the other gets in_use', () => {
+    const { registry } = buildWithClock();
+    const agentId = uuidv7();
+
+    const first = registry.claimHolder(agentId, uuidv7());
+    const second = registry.claimHolder(agentId, uuidv7());
+
+    expect(first).toEqual({ outcome: 'granted' });
+    expect(second).toEqual({ outcome: 'in_use' });
+  });
+
+  it('is idempotent per claimId and does not extend the reservation', () => {
+    const { registry, advance } = buildWithClock();
+    const agentId = uuidv7();
+    const claimId = uuidv7();
+
+    expect(registry.claimHolder(agentId, claimId)).toEqual({ outcome: 'granted' });
+    advance(RESERVATION_MS - 1);
+    expect(registry.claimHolder(agentId, claimId)).toEqual({ outcome: 'granted' });
+    advance(1);
+    // The first reservation expired at its original time, so another claim wins.
+    expect(registry.claimHolder(agentId, uuidv7())).toEqual({ outcome: 'granted' });
+  });
+
+  it('lets a new claim win once the reservation expired without a stream', () => {
+    const { registry, advance } = buildWithClock();
+    const agentId = uuidv7();
+    registry.claimHolder(agentId, uuidv7());
+
+    advance(RESERVATION_MS - 1);
+    expect(registry.claimHolder(agentId, uuidv7())).toEqual({ outcome: 'in_use' });
+    advance(1);
+    expect(registry.claimHolder(agentId, uuidv7())).toEqual({ outcome: 'granted' });
+  });
+
+  it('releaseClaim frees only the reservation of that claimId, idempotently', () => {
+    const { registry } = buildWithClock();
+    const agentId = uuidv7();
+    const claimId = uuidv7();
+    registry.claimHolder(agentId, claimId);
+
+    registry.releaseClaim(agentId, uuidv7());
+    expect(registry.claimHolder(agentId, uuidv7())).toEqual({ outcome: 'in_use' });
+
+    registry.releaseClaim(agentId, claimId);
+    registry.releaseClaim(agentId, claimId);
+    expect(registry.claimHolder(agentId, uuidv7())).toEqual({ outcome: 'granted' });
+  });
+
+  it('ready() of the claimant consumes the reservation: the stream is the holder now', async () => {
+    const { registry } = buildWithClock();
+    const ctx = activeContext();
+    const claimId = uuidv7();
+    registry.claimHolder(ctx.participantId, claimId);
+
+    const handle = await openStream(registry, ctx);
+    handle.triggerClose('client_closed');
+
+    // Without the reservation the offline holder is claimable again right away.
+    expect(registry.claimHolder(ctx.participantId, uuidv7())).toEqual({ outcome: 'granted' });
+  });
+
+  it('defaults the reservation to 10 s', () => {
+    let nowMs = 0;
+    const registry = createPresenceRegistry({ now: () => new Date(nowMs) });
+    const agentId = uuidv7();
+    registry.claimHolder(agentId, uuidv7());
+
+    nowMs = 9_999;
+    expect(registry.claimHolder(agentId, uuidv7())).toEqual({ outcome: 'in_use' });
+    nowMs = 10_000;
+    expect(registry.claimHolder(agentId, uuidv7())).toEqual({ outcome: 'granted' });
+  });
+});

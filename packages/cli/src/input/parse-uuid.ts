@@ -1,5 +1,5 @@
-// UUID v7 validation. Per [[ADR-005 - Formato del identificador opaco para
-// participantes en Hive v0.1]] all participant IDs are UUID v7. Validation is
+// UUID v7 validation. Per ADR-005 (opaque participant identifier format for
+// Hive v0.1) all participant IDs are UUID v7. Validation is
 // case-insensitive; canonical output is lowercase.
 
 import type { UUIDv7 } from '@hive/server';

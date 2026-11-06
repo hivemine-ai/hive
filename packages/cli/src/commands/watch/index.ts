@@ -2,6 +2,8 @@
 // client of the Hive MCP server: no database, no runtime, no operator trust
 // anchor. It authenticates as the participant that owns the credential file.
 
+import { homedir } from 'node:os';
+
 import type { Command } from 'commander';
 
 import { EXIT_INTERRUPTED } from '#error/exit-codes.js';
@@ -10,6 +12,9 @@ import { mapWatchError } from './errors.js';
 import { resolveWatchInput } from './input.js';
 import { runWatchOnce } from './run-once.js';
 import { runWatch } from './run-watch.js';
+import { runAttach } from './run-attach.js';
+import { runHarness } from './run-harness.js';
+import { isSessionMode, resolveSessionWatchInput } from './session-input.js';
 
 export interface WatchCommandHooks {
   setExitCode(code: number): void;
@@ -22,6 +27,11 @@ interface WatchCliOptions {
   once?: boolean;
   silenceTimeout?: string;
   probeTimeout?: string;
+  sessionName?: string;
+  sessionDescription?: string;
+  stateFile?: string;
+  inlineMcpConfig?: boolean;
+  attachSession?: string;
 }
 
 /** SIGINT and SIGTERM abort once; a second signal forces the exit. */
@@ -63,29 +73,58 @@ export function registerWatchCommand(program: Command, hooks: WatchCommandHooks)
       'reconnect after this long without any byte (default 45)',
     )
     .option('--probe-timeout <seconds>', 'timeout of the connectivity probe, below 60 (default 20)')
+    .option(
+      '--session-name <name>',
+      'harness mode: register this named session with the folder enrollment and run --exec children',
+    )
+    .option('--session-description <text>', 'harness mode: one-line description of the session')
+    .option('--state-file <path>', 'harness mode: where to write the state file of the children')
+    .option(
+      '--inline-mcp-config',
+      'harness mode: also write an MCP config for `claude -p --mcp-config "$HIVE_MCP_CONFIG_FILE"`',
+    )
+    .option(
+      '--attach-session <session_id>',
+      'consume the stream of the proxy of this Claude Code session (launched by the hive-wake plugin)',
+    )
     .argument('[exec-args...]', 'arguments for the --exec program, after `--`')
     .action(async (execArgs: string[], opts: WatchCliOptions) => {
       const signals = installSignalAbort();
       try {
-        const input = resolveWatchInput(
-          {
-            ...(opts.server !== undefined ? { server: opts.server } : {}),
-            ...(opts.credentialFile !== undefined ? { credentialFile: opts.credentialFile } : {}),
-            ...(opts.exec !== undefined ? { exec: opts.exec } : {}),
-            ...(opts.once !== undefined ? { once: opts.once } : {}),
-            ...(opts.silenceTimeout !== undefined ? { silenceTimeout: opts.silenceTimeout } : {}),
-            ...(opts.probeTimeout !== undefined ? { probeTimeout: opts.probeTimeout } : {}),
-            execArgs,
-          },
-          process.env,
-        );
+        const raw = {
+          ...(opts.server !== undefined ? { server: opts.server } : {}),
+          ...(opts.credentialFile !== undefined ? { credentialFile: opts.credentialFile } : {}),
+          ...(opts.exec !== undefined ? { exec: opts.exec } : {}),
+          ...(opts.once !== undefined ? { once: opts.once } : {}),
+          ...(opts.silenceTimeout !== undefined ? { silenceTimeout: opts.silenceTimeout } : {}),
+          ...(opts.probeTimeout !== undefined ? { probeTimeout: opts.probeTimeout } : {}),
+          ...(opts.sessionName !== undefined ? { sessionName: opts.sessionName } : {}),
+          ...(opts.sessionDescription !== undefined
+            ? { sessionDescription: opts.sessionDescription }
+            : {}),
+          ...(opts.stateFile !== undefined ? { stateFile: opts.stateFile } : {}),
+          ...(opts.inlineMcpConfig !== undefined ? { inlineMcpConfig: opts.inlineMcpConfig } : {}),
+          ...(opts.attachSession !== undefined ? { attachSession: opts.attachSession } : {}),
+          execArgs,
+        };
         const io = {
           stdout: (text: string) => void process.stdout.write(text),
           stderr: (text: string) => void process.stderr.write(text),
           env: process.env,
           signal: signals.signal,
         };
-        const code = input.once ? await runWatchOnce(input, io) : await runWatch(input, io);
+        let code: number;
+        if (isSessionMode(raw)) {
+          const input = resolveSessionWatchInput(raw, process.env);
+          const sessionIo = { ...io, cwd: process.cwd(), home: homedir() };
+          code =
+            input.kind === 'harness'
+              ? await runHarness(input, sessionIo)
+              : await runAttach(input, sessionIo);
+        } else {
+          const input = resolveWatchInput(raw, process.env);
+          code = input.once ? await runWatchOnce(input, io) : await runWatch(input, io);
+        }
         hooks.setExitCode(code);
       } catch (err) {
         const mapped = mapWatchError(err);

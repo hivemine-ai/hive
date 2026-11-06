@@ -6,13 +6,20 @@ export type CliErrorCode =
   | 'HIVE_ALREADY_INITIALIZED'
   | 'OPERATOR_ID_INVALID'
   | 'OPERATOR_ID_NOT_ADMIN'
+  // ADR-026 `agent release`: --operator-id missing or not the owner of the Agent.
+  | 'OPERATOR_ID_NOT_OWNER'
   | 'CONFIRMATION_DECLINED'
   | 'INTERRUPTED'
   | 'CONFIG_INVALID'
   | 'UNSUPPORTED_PLATFORM'
   | 'ROOT_REQUIRED'
   | 'WORKING_DIR_PERMISSION'
-  | 'SERVICE_NOT_INSTALLED';
+  | 'SERVICE_NOT_INSTALLED'
+  | 'INVALID_INPUT'
+  | 'SESSION_STATE_INSECURE_PERMS'
+  | 'NOT_AN_ENROLLMENT_CREDENTIAL'
+  | 'CLAUDE_CLI_NOT_FOUND'
+  | 'CLAUDE_PLUGIN_COMMAND_FAILED';
 
 export interface CliErrorOptions {
   subCode?: string;

@@ -66,7 +66,25 @@ export { createRotator } from './credentials/rotator.js';
 export type { Rotator, RotatorDeps, RotateCredentialInput } from './credentials/rotator.js';
 
 export { createRevoker } from './credentials/revoker.js';
-export type { Revoker, RevokerDeps, RevokeCredentialInput } from './credentials/revoker.js';
+export type {
+  Revoker,
+  RevokerDeps,
+  RevokeCredentialInput,
+  RevokeCredentialResult,
+} from './credentials/revoker.js';
+
+export {
+  createEnrollment,
+  validateDescription,
+  validateEnrollmentName,
+} from './credentials/enrollment.js';
+export type {
+  Enrollment,
+  EnrollmentDeps,
+  IssueEnrollmentCredentialInput,
+  RenewWorkerTokenInput,
+  ReviveRetiredAgentInput,
+} from './credentials/enrollment.js';
 
 export { createCredentialsReadRepo } from './credentials/repository.js';
 export type { CredentialRow, CredentialsReadRepo } from './credentials/repository.js';
@@ -87,6 +105,17 @@ export type {
   ParticipantsWriteRepo,
   ParticipantsWriteRepoOptions,
 } from './participants/repository.write.js';
+
+export {
+  EnrollmentRetentionPassError,
+  createEnrollmentRetention,
+} from './participants/retention.js';
+export type {
+  EnrollmentRetention,
+  EnrollmentRetentionDeps,
+  EnrollmentRetentionPass,
+  EnrollmentRetentionResult,
+} from './participants/retention.js';
 
 export { noopCellsHook } from './participants/cells-hook.js';
 export type {

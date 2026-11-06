@@ -28,15 +28,7 @@ export async function buildOperatorActor(
   opts: GlobalCliOpts,
   runtime: CliRuntime,
 ): Promise<OperatorActor> {
-  const detail: Record<string, unknown> = { cliVersion: HIVE_VERSION };
-
-  if (opts.operatorNote !== undefined) {
-    detail['operatorNote'] = truncate(opts.operatorNote, OPERATOR_NOTE_MAX_LENGTH);
-  }
-  const osUser = process.env['USER'];
-  if (osUser !== undefined && osUser !== '') {
-    detail['osUser'] = osUser;
-  }
+  const detail = buildOperatorDetail(opts);
 
   if (opts.operatorId !== undefined) {
     const operatorUuid = await resolveOperatorIdSafely(opts.operatorId, runtime);
@@ -54,6 +46,19 @@ export async function buildOperatorActor(
   }
 
   return { actorId: null, actorKind: 'system', detail };
+}
+
+/** The CLI anchor of an audit row: cli version, OS user and the --operator-note. */
+export function buildOperatorDetail(opts: GlobalCliOpts): Record<string, unknown> {
+  const detail: Record<string, unknown> = { cliVersion: HIVE_VERSION };
+  if (opts.operatorNote !== undefined) {
+    detail['operatorNote'] = truncate(opts.operatorNote, OPERATOR_NOTE_MAX_LENGTH);
+  }
+  const osUser = process.env['USER'];
+  if (osUser !== undefined && osUser !== '') {
+    detail['osUser'] = osUser;
+  }
+  return detail;
 }
 
 /**

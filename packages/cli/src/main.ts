@@ -26,6 +26,20 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  // Fast path: `hivectl mcp proxy` is launched by Claude Code per session and
+  // must answer `server/discover` within 5 s, with stdout reserved for MCP.
+  if (argv.length === 4 && argv[2] === 'mcp' && argv[3] === 'proxy') {
+    const { runMcpProxy } = await import('./commands/mcp/proxy.js');
+    return runMcpProxy();
+  }
+
+  // Fast path: the plugin's command hooks run at every session start and must
+  // never delay it.
+  if (argv.length === 5 && argv[2] === 'claude' && argv[3] === 'hook') {
+    const { runClaudeHook } = await import('./commands/claude/hooks.js');
+    return runClaudeHook(argv[4] ?? '');
+  }
+
   const { buildProgram, closeRuntime } = await import('./program.js');
   const { program, getExitCode } = buildProgram();
   try {

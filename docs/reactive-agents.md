@@ -6,11 +6,11 @@ How to make an agent react to mail without polling. Hive pushes a metadata event
 
 ## Choose a route
 
-| You run                                          | Use                                                                                                              | Wakes with                           |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| An interactive Claude Code session you keep open | The `hive-wake` plugin, loaded with `claude --plugin-dir` ([plugin README](../packages/claude-plugin/README.md)) | A new turn in the same session       |
-| A headless worker                                | `hivectl watch --exec` with `claude -p --resume` ([recipe](hivectl-watch.md#worker-recipe-claude--p---resume))   | One `claude -p` run per event        |
-| Another agent or your own program                | `hivectl watch` and read its stdout, or `--once` from a cron job ([reference](hivectl-watch.md))                 | Whatever you build on the event line |
+| You run                                          | Use                                                                                                                                                   | Wakes with                           |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| An interactive Claude Code session you keep open | The `hive-wake` plugin, installed with `hivectl claude install` ([sessions guide](claude-code-sessions.md))                                           | A new turn in the same session       |
+| A headless worker                                | `hivectl watch --session-name … --exec` (harness) or `--exec` with `claude -p --resume` ([recipe](hivectl-watch.md#worker-recipe-claude--p---resume)) | One `claude -p` run per event        |
+| Another agent or your own program                | `hivectl watch` and read its stdout, or `--once` from a cron job ([reference](hivectl-watch.md))                                                      | Whatever you build on the event line |
 
 All three depend on `hivectl watch`: while its connection is open the participant is `online`; when it stops, the participant is `offline` even if it keeps calling tools.
 
@@ -18,7 +18,7 @@ All three depend on `hivectl watch`: while its connection is open the participan
 
 - **A Hive that serves `subscriptions/listen`** (v0.2.0 or newer) and a dedicated credential for the agent, kept in a `0600` file inside a `0700` folder. Issue it with `hivectl credential issue --participant-id <agent-uuid> --ttl <duration> --output-credential <file>`, where `<agent-uuid>` is the agent's UUID v7 as printed by `hivectl agent create` or shown by `hivectl agent list`.
 - **`hivectl` on the machine that runs the agent.** The plugin does not bundle it.
-- **Claude Code 2.1.232 or newer** for the plugin (2.1.274 or newer if you do not enable feature flags), registered with Hive as an ordinary HTTP MCP server. Do **not** set `MCP_SDK_GENERATION=v1` or `MCP_PROTOCOL_NEGOTIATION=legacy`: they make Claude Code use the retired protocol and it cannot connect to Hive.
+- **Claude Code 2.1.318 or newer** for the plugin, installed in the folder with `hivectl claude install` and an enrollment credential (the plugin's local proxy is the Hive MCP server of the session). Do **not** set `MCP_SDK_GENERATION=v1` or `MCP_PROTOCOL_NEGOTIATION=legacy`: they make Claude Code use the retired protocol and it cannot connect to Hive.
 - **For the worker recipe, an API key** for the worker (`ANTHROPIC_API_KEY`), a Claude Code session id to resume, and the list of tools it may use without asking. Each event is billed as one `claude -p` call.
 
 ## What it costs and what it does not do
@@ -34,9 +34,9 @@ All three depend on `hivectl watch`: while its connection is open the participan
 - **macOS and the local network.** The hive-wake plugin launches `hivectl watch` from the agent host app, so that app needs the permission. On macOS 15 and later, connections to local-network addresses (for example `10.x.x.x`, `192.168.x.x`, `*.local`) are subject to the Local Network privacy permission of the app that launches `hivectl` (Terminal, iTerm, an IDE, the Claude Code desktop app, and so on). If `hivectl` or `hivectl watch` fails with `fetch failed` against a LAN server, enable that app in System Settings > Privacy & Security > Local Network. Public hostnames, public IPs and `localhost` are unaffected. This is a property of the launching app, not of the single-binary `hivectl`.
 - **Revocation takes up to one re-check interval to close a stream.** A credential or agent revoked with `hivectl` is rejected on the next request, but an already open stream is closed by the periodic pass: by default within 60 s (`HIVE_MCP_REVERIFY_INTERVAL_SECONDS`). Lower it if you need a tighter window.
 - **`hivectl` cannot suspend or resume an agent.** There is no `suspend` command in this version. To cut an agent off, revoke it: `hivectl agent revoke` or `hivectl credential revoke`.
-- **The plugin is not tied to Claude Code's life.** A `watch` left behind after a hard kill of Claude Code keeps the participant `online`. See the [plugin README](../packages/claude-plugin/README.md#known-limit-watch-is-not-tied-to-claude-codes-life).
+- **The stream belongs to the session's proxy.** The waker (`watch --attach-session`) only reads the proxy's local channel, so a waker left behind does not keep the participant `online`; the proxy closes the stream when Claude Code exits, even after a `kill -9`.
 - **Claude Code gives a server 5 seconds** to answer `server/discover`. A slow Hive leaves the session without Hive tools, so keep the server close and responsive.
-- **Mods are an early-access surface of Claude Code** and can change between releases. The plugin is a directory of this repository, loaded per session with `--plugin-dir`; there is no marketplace listing.
+- **Mods are an early-access surface of Claude Code** and can change between releases. The plugin ships in the `@hivemine/hivectl` npm package and `hivectl claude install` installs it from a local `directory` marketplace; there is no public marketplace listing.
 
 ## Security
 

@@ -12,19 +12,25 @@ import { HIVE_VERSION } from '@hive/shared';
 import { runAuditQuery } from './commands/audit/query.js';
 import { runCreateAgent } from './commands/agent/create.js';
 import { runListAgents } from './commands/agent/list.js';
+import type { AgentState } from './commands/agent/list.js';
+import { runReleaseAgent } from './commands/agent/release.js';
 import { runRevokeAgent } from './commands/agent/revoke.js';
+import { registerClaudeCommands } from './commands/claude/index.js';
 import { registerConfigGroup } from './commands/config/index.js';
 import { runIssueCredential } from './commands/credential/issue.js';
+import { runIssueEnrollmentCredential } from './commands/credential/issue-enrollment.js';
 import { runListCredentials } from './commands/credential/list.js';
 import { runRevokeCredential } from './commands/credential/revoke.js';
 import { runRotateCredential } from './commands/credential/rotate.js';
 import { runListKeepers } from './commands/hive/list-keepers.js';
 import { runCreateHivekeeper } from './commands/hivekeeper/create.js';
 import { runInit } from './commands/init.js';
+import { registerMcpCommand } from './commands/mcp/proxy.js';
 import { performMigrate } from './commands/migrate.js';
 import { parseLogLevel, runServe } from './commands/serve.js';
 import { registerServiceGroup } from './commands/service/index.js';
 import { registerWatchCommand } from './commands/watch/index.js';
+import { CliError } from '#error/cli-error.js';
 import { mapErrorToExit } from '#error/handler.js';
 import { asOptionalNumber, asOptionalString, asString, asStringArray } from './input/coerce.js';
 import { formatOutput, formatOutputList, resolveOutputMode } from './output/format.js';
@@ -35,10 +41,12 @@ import {
   createHivekeeperSchema,
   initSchema,
   issueCredentialSchema,
+  issueEnrollmentCredentialSchema,
   listAgentsSchema,
   listCredentialsSchema,
   listKeepersSchema,
   migrateSchema,
+  releaseAgentSchema,
   revokeAgentSchema,
   revokeCredentialSchema,
   rotateCredentialSchema,
@@ -372,7 +380,7 @@ export function buildProgram(): BuildProgramResult {
     .description('List Agents in the Hive.')
     .option('--owner <ref>', 'restrict to one owner (email or UUIDv7)')
     .option('--type <type>', "'worker' or 'scout'")
-    .option('--state <state>', "'active' | 'suspended' | 'revoked'")
+    .option('--state <state>', "'active' | 'suspended' | 'retired' | 'revoked'")
     .option('--limit <n>', 'maximum rows per page', '50')
     .option('--cursor <cursor>', 'opaque pagination cursor from a previous page')
     .action(async (cmdOpts: Record<string, unknown>) => {
@@ -387,8 +395,7 @@ export function buildProgram(): BuildProgramResult {
             globals: s.globals,
             owner: asOptionalString(cmdOpts['owner']),
             type: typeStr === undefined ? undefined : (typeStr as 'worker' | 'scout'),
-            state:
-              stateStr === undefined ? undefined : (stateStr as 'active' | 'suspended' | 'revoked'),
+            state: stateStr === undefined ? undefined : (stateStr as AgentState),
             limit: asOptionalNumber(cmdOpts['limit']),
             cursor: asOptionalString(cmdOpts['cursor']),
           });
@@ -414,24 +421,90 @@ export function buildProgram(): BuildProgramResult {
       );
     });
 
-  // ── credential ────────────────────────────────────────────────────────
-  const credential = program.command('credential').description('Credential lifecycle.');
-  credential
-    .command('issue')
-    .description('Issue a new credential for a participant.')
-    .requiredOption('--participant-id <ref>', 'participant (email or UUIDv7)')
-    .option('--ttl <duration>', 'credential TTL')
-    .option('--reason <text>', 'free-form audit reason')
-    .option('--output-credential <path>', 'write JWT to this file (perms 0600)')
-    .action(async (cmdOpts: Record<string, unknown>) => {
+  agent
+    .command('release <agent-ref>')
+    .description(
+      'Free the name of a session agent: revoke every Worker token of its holder (owner-only: --operator-id must be the owner). Requires --yes.',
+    )
+    .action(async (agentRef: string) => {
       const s = state();
       await runHandler(
         s,
         async () => {
           const runtime = await getRuntime(s.logger);
+          return runReleaseAgent(runtime, { globals: s.globals, agentRef });
+        },
+        (value, mode) => formatOutput(value, { mode, schema: releaseAgentSchema }),
+      );
+    });
+
+  // ── credential ────────────────────────────────────────────────────────
+  const credential = program.command('credential').description('Credential lifecycle.');
+  credential
+    .command('issue')
+    .description(
+      'Issue a new credential for a participant, or with --enrollment an enrollment ' +
+        'credential that registers Claude Code sessions as Workers of --owner.',
+    )
+    .option('--participant-id <ref>', 'participant (email or UUIDv7)')
+    .option('--enrollment', 'issue an enrollment credential (scope enroll)', false)
+    .option('--owner <ref>', 'with --enrollment: owner Hivekeeper (email or UUIDv7)')
+    .option('--name-prefix <prefix>', 'with --enrollment: required prefix of agent names')
+    .option(
+      '--max-agents <n>',
+      'with --enrollment: active agents allowed (<= HIVE_ENROLLMENT_MAX_AGENTS)',
+    )
+    .option('--ttl <duration>', 'credential TTL')
+    .option('--reason <text>', 'free-form audit reason')
+    .option('--output-credential <path>', 'write JWT to this file (perms 0600)')
+    .action(async (cmdOpts: Record<string, unknown>) => {
+      const s = state();
+      if (cmdOpts['enrollment'] === true) {
+        await runHandler(
+          s,
+          async () => {
+            if (cmdOpts['participantId'] !== undefined) {
+              throw new CliError('CONFIG_INVALID', {
+                subCode: 'enrollment_excludes_participant_id',
+                message: '--enrollment cannot be combined with --participant-id',
+              });
+            }
+            const owner = asOptionalString(cmdOpts['owner']);
+            if (owner === undefined) {
+              throw new CliError('CONFIG_INVALID', {
+                subCode: 'enrollment_requires_owner',
+                message: '--enrollment requires --owner <email-or-uuid>',
+              });
+            }
+            const runtime = await getRuntime(s.logger);
+            return runIssueEnrollmentCredential(runtime, {
+              globals: s.globals,
+              ownerRef: owner,
+              namePrefix: asOptionalString(cmdOpts['namePrefix']),
+              maxAgents: asOptionalString(cmdOpts['maxAgents']),
+              ttl: asOptionalString(cmdOpts['ttl']),
+              reason: asOptionalString(cmdOpts['reason']),
+              outputCredential: asOptionalString(cmdOpts['outputCredential']),
+            });
+          },
+          (value, mode) => formatOutput(value, { mode, schema: issueEnrollmentCredentialSchema }),
+        );
+        return;
+      }
+      await runHandler(
+        s,
+        async () => {
+          const participantId = asOptionalString(cmdOpts['participantId']);
+          if (participantId === undefined) {
+            throw new CliError('CONFIG_INVALID', {
+              subCode: 'participant_id_required',
+              message: '--participant-id <ref> is required (or use --enrollment --owner <ref>)',
+            });
+          }
+          const runtime = await getRuntime(s.logger);
           return runIssueCredential(runtime, {
             globals: s.globals,
-            participantRef: asString(cmdOpts['participantId']),
+            participantRef: participantId,
             ttl: asOptionalString(cmdOpts['ttl']),
             reason: asOptionalString(cmdOpts['reason']),
             outputCredential: asOptionalString(cmdOpts['outputCredential']),
@@ -473,6 +546,11 @@ export function buildProgram(): BuildProgramResult {
         'currently-active credential.',
     )
     .option('--reason <text>', 'free-form audit reason')
+    .option(
+      '--revoke-agents',
+      'enrollment credentials only: also revoke the agents registered through it',
+      false,
+    )
     .action(async (jti: string, cmdOpts: Record<string, unknown>) => {
       const s = state();
       await runHandler(
@@ -483,6 +561,7 @@ export function buildProgram(): BuildProgramResult {
             globals: s.globals,
             jti,
             reason: asOptionalString(cmdOpts['reason']),
+            revokeAgents: cmdOpts['revokeAgents'] === true,
           });
         },
         (value, mode) => formatOutput(value, { mode, schema: revokeCredentialSchema }),
@@ -571,6 +650,12 @@ export function buildProgram(): BuildProgramResult {
   // Not a domain command: no runtime, no database. It owns its own error
   // mapping and signal handling so stdout stays reserved for event lines.
   registerWatchCommand(program, lifecycleHooks);
+
+  // ── mcp proxy (local stdio MCP server per Claude Code session, ADR-026) ──
+  registerMcpCommand(program, lifecycleHooks);
+
+  // ── claude install | uninstall (ADR-026; local, no runtime) ─────────────
+  registerClaudeCommands(program, lifecycleHooks);
 
   // ── help renderer (PRY-050) ───────────────────────────────────────────
   // Attach examples + see-also metadata to the subgroups that benefit

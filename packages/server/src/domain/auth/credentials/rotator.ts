@@ -5,18 +5,20 @@
 //   - A second rotation that lost the race on the same jti rolls back and fails.
 
 import type { Kysely } from 'kysely';
-import { v7 as uuidv7 } from 'uuid';
-import * as jose from 'jose';
 
 import type { Logger } from '#observability/logger.js';
-import type { Database, JsonText } from '#persistence/schema.js';
-import { dateToIso, jsonStringify, validateJsonText } from '#persistence/type-mappers.js';
+import type { Database } from '#persistence/schema.js';
+import { dateToIso, jsonParse } from '#persistence/type-mappers.js';
 import { AuthError } from '../errors.js';
 import type { SigningKey } from '#domain/auth/keys/keypair-store.js';
 import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
-import type { Duration, IssuedCredential, ParticipantKind, UUIDv7 } from '../types.js';
+import type { Duration, IssuedCredential, UUIDv7 } from '../types.js';
 
 import type { Blocklist } from './blocklist.js';
+import { mintCredential } from './issuer.js';
+import type { MintInput } from './issuer.js';
+
+const DEFAULT_ENROLLMENT_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 export interface RotateCredentialInput {
   currentJti: UUIDv7;
@@ -30,6 +32,8 @@ export interface RotatorDeps {
   blocklist: Blocklist;
   hiveStableIdentifier: UUIDv7;
   defaultTtlMs: Duration;
+  // ADR-026: default TTL when the rotated credential is an enrollment. Default 90 days.
+  enrollmentTtlMs?: Duration;
   snapshotMaxBytes?: number;
   db: Kysely<Database>;
   now?: () => Date;
@@ -41,7 +45,6 @@ export interface Rotator {
 }
 
 export function createRotator(deps: RotatorDeps): Rotator {
-  const snapshotMaxBytes = deps.snapshotMaxBytes ?? 16 * 1024;
   const now = deps.now ?? (() => new Date());
 
   return {
@@ -54,7 +57,7 @@ export function createRotator(deps: RotatorDeps): Rotator {
       // Locate the current credential to derive the participant being rotated.
       const currentRow = await deps.db
         .selectFrom('credentials')
-        .select(['participant_id', 'expires_at'])
+        .select(['participant_id', 'expires_at', 'scope', 'snapshot'])
         .where('jti', '=', input.currentJti)
         .executeTakeFirst();
       if (!currentRow) {
@@ -75,73 +78,34 @@ export function createRotator(deps: RotatorDeps): Rotator {
         throw new AuthError('PARTICIPANT_NOT_ACTIVE', { subCode: state });
       }
 
+      // ADR-026: an enrollment rotates into an enrollment with the same claims.
+      const enrollment =
+        currentRow.scope === 'enroll' ? enrollmentClaims(currentRow.snapshot) : undefined;
       const issuedAt = now();
-      const newJti = uuidv7();
-      const ttlMs = input.ttl ?? deps.defaultTtlMs;
-      const expiresAt = new Date(issuedAt.getTime() + ttlMs);
-      const iat = Math.floor(issuedAt.getTime() / 1000);
-      const exp = Math.floor(expiresAt.getTime() / 1000);
-
-      const kind: ParticipantKind =
-        participant.kind === 'hivekeeper' ? 'hivekeeper' : participant.agent.type;
-      const participantId =
-        participant.kind === 'hivekeeper' ? participant.hivekeeper.id : participant.agent.id;
-      const hiveId =
-        participant.kind === 'hivekeeper'
-          ? participant.hivekeeper.hiveId
-          : participant.agent.hiveId;
-      const colonyId =
-        participant.kind === 'hivekeeper'
-          ? participant.hivekeeper.colonyId
-          : participant.agent.colonyId;
-
-      const payload: jose.JWTPayload & {
-        kind: ParticipantKind;
-        hive_id: UUIDv7;
-        colony_id: UUIDv7;
-        owner_id?: UUIDv7;
-        capabilities?: string[];
-      } = {
-        sub: participantId,
-        iss: deps.hiveStableIdentifier,
-        aud: deps.hiveStableIdentifier,
-        iat,
-        nbf: iat,
-        exp,
-        jti: newJti,
-        kind,
-        hive_id: hiveId,
-        colony_id: colonyId,
+      const mintInput: MintInput = {
+        participant,
+        ttlMs:
+          input.ttl ??
+          (enrollment ? (deps.enrollmentTtlMs ?? DEFAULT_ENROLLMENT_TTL_MS) : deps.defaultTtlMs),
+        issuedBy: input.requestedBy ?? null,
+        ...(enrollment ? { enrollment } : {}),
       };
-      if (participant.kind === 'agent') {
-        payload.owner_id = participant.agent.ownerId;
-        payload.capabilities = participant.agent.capabilities;
-      }
-
-      const snapshotJson: JsonText = jsonStringify(payload);
-      validateJsonText(snapshotJson, { maxBytes: snapshotMaxBytes });
-
-      const jwt = await new jose.SignJWT(payload)
-        .setProtectedHeader({ alg: 'EdDSA', kid: deps.signingKey.kid, typ: 'JWT' })
-        .sign(deps.signingKey.privateKey);
 
       // Atomic: insert new credential + revoke old in a single transaction.
-      await deps.db.transaction().execute(async (tx) => {
-        await tx
-          .insertInto('credentials')
-          .values({
-            jti: newJti,
-            participant_id: participantId,
-            participant_kind: kind,
-            kid: deps.signingKey.kid,
-            issued_at: dateToIso(issuedAt),
-            not_before: dateToIso(issuedAt),
-            expires_at: dateToIso(expiresAt),
-            snapshot: snapshotJson,
-            issued_by: input.requestedBy ?? null,
-            revoked_at: null,
-          })
-          .execute();
+      const issued = await deps.db.transaction().execute(async (tx) => {
+        const credential = await mintCredential(
+          {
+            signingKey: deps.signingKey,
+            hiveStableIdentifier: deps.hiveStableIdentifier,
+            db: deps.db,
+            now: () => issuedAt,
+            ...(deps.snapshotMaxBytes !== undefined
+              ? { snapshotMaxBytes: deps.snapshotMaxBytes }
+              : {}),
+          },
+          mintInput,
+          tx,
+        );
 
         const revocation = await tx
           .insertInto('credential_revocations')
@@ -165,30 +129,32 @@ export function createRotator(deps: RotatorDeps): Rotator {
           .set({ revoked_at: dateToIso(issuedAt) })
           .where('jti', '=', input.currentJti)
           .execute();
+        return credential;
       });
 
       if (deps.logger) {
         deps.logger.info(
           {
             event: 'auth_credential_rotated',
-            participantId,
-            kind,
+            participantId: issued.participantId,
             previousJti: input.currentJti,
-            newJti,
+            newJti: issued.jti,
             kid: deps.signingKey.kid,
-            expiresAt: dateToIso(expiresAt),
+            expiresAt: dateToIso(issued.expiresAt),
           },
           'auth credential rotated',
         );
       }
 
-      return {
-        jti: newJti,
-        jwt,
-        expiresAt,
-        participantId,
-        kid: deps.signingKey.kid,
-      };
+      return issued;
     },
+  };
+}
+
+function enrollmentClaims(snapshot: string): NonNullable<MintInput['enrollment']> {
+  const claims = jsonParse<{ name_prefix?: unknown; max_agents?: unknown }>(snapshot);
+  return {
+    ...(typeof claims.name_prefix === 'string' ? { namePrefix: claims.name_prefix } : {}),
+    ...(typeof claims.max_agents === 'number' ? { maxAgents: claims.max_agents } : {}),
   };
 }

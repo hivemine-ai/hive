@@ -31,6 +31,11 @@ function buildAgent(overrides: Partial<Agent> = {}): Agent {
     createdAt: FIXED_DATE,
     revokedAt: null,
     lastConnectedAt: null,
+    origin: 'manual',
+    enrolledVia: null,
+    description: null,
+    retiredAt: null,
+    lastWorkerJti: null,
     ...overrides,
   };
 }
@@ -164,13 +169,14 @@ describe('adaptAgentList', () => {
     expect(summary.capabilities).toEqual(['summarize', 'translate']);
   });
 
-  it('output shape has exactly the fields: capabilities, id, name, owner_id, state, type (AC-9)', () => {
+  it('output shape has exactly the fields: capabilities, description, id, name, owner_id, state, type (AC-9)', () => {
     const result = adaptAgentList({ agents: [buildAgent()], nextCursor: null });
     const summary = result.agents[0];
     expect(summary).toBeDefined();
     if (!summary) return;
     expect(Object.keys(summary).sort()).toEqual([
       'capabilities',
+      'description',
       'id',
       'name',
       'owner_id',
@@ -202,6 +208,14 @@ describe('adaptAgentList', () => {
     expect(summary.type).toBe('scout');
     expect(summary.state).toBe('suspended');
     expect(summary.capabilities).toEqual(['search']);
+  });
+
+  it('projects a retired Agent with its literal state (ADR-026, include_retired)', () => {
+    const result = adaptAgentList({
+      agents: [buildAgent({ state: 'retired', retiredAt: new Date() })],
+      nextCursor: null,
+    });
+    expect(result.agents[0]?.state).toBe('retired');
   });
 
   it('returns next_cursor as opaque string when nextCursor is non-null', () => {
@@ -237,5 +251,19 @@ describe('adaptAgentList', () => {
     expect(result.agents).toHaveLength(2);
     expect(result.agents[0]?.name).toBe('a1');
     expect(result.agents[1]?.name).toBe('a2');
+  });
+});
+
+describe('adaptAgentList — description (ADR-026)', () => {
+  it('carries the declared description, or an empty string when the Agent has none', () => {
+    const view = adaptAgentList({
+      agents: [
+        buildAgent({ description: 'Reviews pull requests' }),
+        buildAgent({ description: null }),
+      ],
+      nextCursor: null,
+    });
+
+    expect(view.agents.map((a) => a.description)).toEqual(['Reviews pull requests', '']);
   });
 });

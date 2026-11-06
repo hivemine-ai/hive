@@ -46,6 +46,8 @@ export interface ListAgentsFilter {
   ownerId?: UUIDv7;
   type?: 'worker' | 'scout';
   state?: ParticipantState;
+  /** Any of these states (ADR-026: `list_agents` hides `retired` unless asked). */
+  states?: ParticipantState[];
   /**
    * Substring match against the JSON-stringified `capabilities` text column. Cross-
    * dialect via `LIKE '%' || ? || '%'`. False positives are possible if the query
@@ -108,6 +110,11 @@ function rowToAgent(row: Selectable<AgentsTable>): Agent {
     createdAt: isoToDate(row.created_at),
     revokedAt: row.revoked_at ? isoToDate(row.revoked_at) : null,
     lastConnectedAt: row.last_connected_at ? isoToDate(row.last_connected_at) : null,
+    origin: row.origin,
+    enrolledVia: row.enrolled_via,
+    description: row.description,
+    retiredAt: row.retired_at ? isoToDate(row.retired_at) : null,
+    lastWorkerJti: row.last_worker_jti,
   };
 }
 
@@ -311,6 +318,9 @@ export function createParticipantsReadRepo(
       }
       if (filter.state !== undefined) {
         query = query.where('state', '=', filter.state);
+      }
+      if (filter.states !== undefined) {
+        query = query.where('state', 'in', filter.states);
       }
       if (filter.capability !== undefined) {
         // Substring match against the JSON-stringified capabilities array. `LIKE`

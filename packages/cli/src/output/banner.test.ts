@@ -86,7 +86,7 @@ describe('banner.expanded', () => {
   });
 
   it('matches the design system frame byte-for-byte in NO_COLOR mode', () => {
-    // Per [[hivectl — Operator Experience]] § Ceremonial del init — see
+    // Per [[hivectl — Operator Experience]], section on the init ceremony — see
     // the 07c hivectl v3.html design reference. Banner is immutable;
     // any diff here means a spec amend was required.
     expect(expanded()).toBe(

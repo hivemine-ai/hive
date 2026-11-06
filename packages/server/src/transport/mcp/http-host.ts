@@ -29,8 +29,20 @@ import { getRequestIdFromLogger, type Logger } from '#observability/logger.js';
 import { attachRequestIdHook } from '#observability/request-id.js';
 import type { Database } from '#persistence/schema.js';
 
-import { toAuthInfo, verifyBearerHeader, type LastConnectedRefresher } from './auth-binding.js';
-import { MCP_ERR_INTERNAL } from './error-codes.js';
+import {
+  REGISTER_SESSION_TOOL,
+  requestOperation,
+  toAuthInfo,
+  verifyBearerHeader,
+  type LastConnectedRefresher,
+} from './auth-binding.js';
+import type { RegisterRateLimiter } from './enrollment-guards.js';
+import {
+  MCP_ERR_ENROLLMENT_RATE_LIMITED,
+  MCP_ERR_FORBIDDEN,
+  MCP_ERR_INTERNAL,
+  MCP_ERR_UNAUTHORIZED,
+} from './error-codes.js';
 import { mapDomainError } from './error-mapper.js';
 import { isAllowedByOriginGuard } from './origin-guard.js';
 import type { McpTransport } from './server.js';
@@ -39,6 +51,7 @@ import type { WireError } from './types.js';
 const LISTEN_METHOD = 'subscriptions/listen';
 const DISCOVER_METHOD = 'server/discover';
 const LEASE_REQUEST_HEADER = 'hive-listen-lease';
+const BEARER_SHAPE = /^[Bb]earer\s+\S+/;
 
 /**
  * Plug-in point for the `subscriptions/listen` edge. The SDK router neither checks who
@@ -78,12 +91,14 @@ export interface ListenBinding {
 
 export interface HttpHostDeps {
   mcpTransport: McpTransport;
-  verifier: Pick<Verifier, 'verify'>;
+  verifier: Pick<Verifier, 'verify' | 'verifyRenewalBearer'>;
   lastConnected: LastConnectedRefresher;
   db: Kysely<Database>;
   signingKeysProvider: () => Iterable<SigningKey>;
   logger: Logger;
   listenEdge?: ListenEdge;
+  /** ADR-026: limit of register_session per enrollment jti, or per Agent on a renewal. */
+  registerRateLimiter?: RegisterRateLimiter;
 }
 
 export interface HttpHostOptions {
@@ -175,20 +190,63 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
       return reply.code(403).send();
     }
 
+    // Without a well-formed Bearer there is nothing to verify: refuse before the body is
+    // read, so an anonymous request never makes the server parse up to the body limit.
+    if (!BEARER_SHAPE.test(headerString(req.headers.authorization) ?? '')) {
+      deps.logger.warn(
+        { event: 'mcp_auth_failed', domainCode: 'CREDENTIAL_MISSING', subCode: null },
+        'authentication required',
+      );
+      return reply
+        .code(401)
+        .type('application/json')
+        .send({
+          jsonrpc: '2.0',
+          error: { code: MCP_ERR_UNAUTHORIZED, message: 'authentication required' },
+          id: null,
+        });
+    }
+  });
+
+  // The Bearer is checked once the body is parsed: the scope binding and the renewal
+  // route of `register_session` depend on the method and tool the body asks for.
+  app.addHook('preHandler', async (req, reply) => {
+    if (req.method !== 'POST' || req.routeOptions.url !== mcpPath) return;
+
     try {
-      const auth = await verifyBearerHeader(deps.verifier, headerString(req.headers.authorization));
+      const auth = await verifyBearerHeader(
+        deps.verifier,
+        headerString(req.headers.authorization),
+        req.body,
+      );
       identities.set(req, auth.identity);
-      deps.lastConnected.refresh(auth.identity);
+      // An enrollment credential is a Hivekeeper's; a renewal stamps the Agent itself.
+      if (auth.identity.snapshot.scope === undefined && auth.identity.snapshot.renewal !== true) {
+        deps.lastConnected.refresh(auth.identity);
+      }
     } catch (err) {
       const mapped = mapDomainError(err);
+      const outOfScope = isAuthError(err) && err.subCode === 'scoped_credential';
       deps.logger.warn(
         {
           event: 'mcp_auth_failed',
           domainCode: mapped.domainCode,
           subCode: mapped.subCode,
+          ...(outOfScope && { operation: requestOperation(req.body) }),
         },
         mapped.wire.message,
       );
+      // An authentic credential outside its scope is a 403, not a 401 (ADR-026).
+      if (outOfScope) {
+        return reply
+          .code(403)
+          .type('application/json')
+          .send({
+            jsonrpc: '2.0',
+            error: { code: MCP_ERR_FORBIDDEN, message: 'credential out of scope' },
+            id: null,
+          });
+      }
       // Only a real auth verdict is a 401. An infrastructure failure must not tell
       // a client with a valid credential that its credential is bad.
       return reply
@@ -212,6 +270,33 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
     const body = req.body;
     const method = rpcMethod(body);
     const isListen = method === LISTEN_METHOD;
+    const isRegister = requestOperation(body) === `tools_call:${REGISTER_SESSION_TOOL}`;
+    if (isRegister && deps.registerRateLimiter) {
+      // Before the domain: an exceeded key never reaches register_session.
+      const keyKind = identity.snapshot.scope === 'enroll' ? 'enrollment_jti' : 'agent_id';
+      const key =
+        keyKind === 'enrollment_jti' ? identity.snapshot.credentialJti : identity.participantId;
+      const verdict = deps.registerRateLimiter.hit(`${keyKind}:${key}`);
+      if (!verdict.allowed) {
+        deps.logger.warn(
+          {
+            event: 'mcp_enrollment_rate_limited',
+            keyKind,
+            retryAfterSeconds: verdict.retryAfterSeconds,
+          },
+          'register_session rate limited',
+        );
+        return reply
+          .code(429)
+          .header('retry-after', String(verdict.retryAfterSeconds))
+          .type('application/json')
+          .send({
+            jsonrpc: '2.0',
+            error: { code: MCP_ERR_ENROLLMENT_RATE_LIMITED, message: 'too many registrations' },
+            id: rpcId(body),
+          });
+      }
+    }
     const leaseKey = headerString(req.headers[LEASE_REQUEST_HEADER]);
     if (method === DISCOVER_METHOD && leaseKey !== undefined) {
       const renewed = deps.listenEdge?.renewLease({ key: leaseKey, identity }) ?? false;
@@ -276,7 +361,11 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
         })
       : undefined;
 
-    raw.writeHead(response.status, Object.fromEntries(response.headers));
+    raw.writeHead(response.status, {
+      ...Object.fromEntries(response.headers),
+      // The result carries a Worker token.
+      ...(isRegister && { 'cache-control': 'no-store' }),
+    });
     if (!response.body) {
       raw.end();
       return;

@@ -271,3 +271,70 @@ describe('warnIfAllowedHostsEmpty (PRY-085)', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 });
+
+describe('resolveWireConfigFromEnv — register_session guards (ADR-026)', () => {
+  it('defaults to 30 registrations per 60 s and an alert at 5 rejections in 10 min', () => {
+    expect(resolveWireConfigFromEnv({})).toMatchObject({
+      enrollmentRegisterRateLimit: 30,
+      enrollmentRegisterRateWindowSeconds: 60,
+      enrollmentRejectAlertThreshold: 5,
+      enrollmentRejectAlertWindowMinutes: 10,
+    });
+  });
+
+  it('reads the env vars, with 0 disabling the limit and the alert', () => {
+    expect(
+      resolveWireConfigFromEnv({
+        HIVE_ENROLLMENT_REGISTER_RATE_LIMIT: '0',
+        HIVE_ENROLLMENT_REGISTER_RATE_WINDOW_SECONDS: '5',
+        HIVE_ENROLLMENT_REJECT_ALERT_THRESHOLD: '0',
+        HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES: '1',
+      }),
+    ).toMatchObject({
+      enrollmentRegisterRateLimit: 0,
+      enrollmentRegisterRateWindowSeconds: 5,
+      enrollmentRejectAlertThreshold: 0,
+      enrollmentRejectAlertWindowMinutes: 1,
+    });
+  });
+
+  it.each([
+    ['HIVE_ENROLLMENT_REGISTER_RATE_WINDOW_SECONDS', '0'],
+    ['HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES', '0'],
+    ['HIVE_ENROLLMENT_REGISTER_RATE_LIMIT', '-1'],
+  ])('fails fast on %s=%s', (name, value) => {
+    expect(() => resolveWireConfigFromEnv({ [name]: value })).toThrow(name);
+  });
+});
+
+describe('resolveWireConfigFromEnv — enrollment retention (PRY-094)', () => {
+  it('defaults to 30 days of retention, 60 of grace and an hourly run', () => {
+    expect(resolveWireConfigFromEnv({})).toMatchObject({
+      enrollmentRetentionDays: 30,
+      enrollmentGraceDays: 60,
+      enrollmentRetentionIntervalSeconds: 3600,
+    });
+  });
+
+  it('reads the env vars, accepts 0 and rejects negatives or fractions by name', () => {
+    expect(
+      resolveWireConfigFromEnv({
+        HIVE_ENROLLMENT_RETENTION_DAYS: '0',
+        HIVE_ENROLLMENT_GRACE_DAYS: '0',
+        HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS: '0',
+      }),
+    ).toMatchObject({
+      enrollmentRetentionDays: 0,
+      enrollmentGraceDays: 0,
+      enrollmentRetentionIntervalSeconds: 0,
+    });
+    for (const name of [
+      'HIVE_ENROLLMENT_RETENTION_DAYS',
+      'HIVE_ENROLLMENT_GRACE_DAYS',
+      'HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS',
+    ]) {
+      expect(() => resolveWireConfigFromEnv({ [name]: '-1' })).toThrow(name);
+      expect(() => resolveWireConfigFromEnv({ [name]: '1.5' })).toThrow(name);
+    }
+  });
+});

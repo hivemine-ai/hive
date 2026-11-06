@@ -10,7 +10,10 @@ export const EXIT_INTERNAL = 2;
 export const EXIT_NOT_FOUND = 3;
 /** Entity exists but operation rejected (already revoked, last admin invariant, etc.). */
 export const EXIT_PRECONDITION = 4;
-/** `--operator-id` provided but not an active admin. */
+/**
+ * `--operator-id` provided but not an active admin (OPERATOR_ID_NOT_ADMIN), or missing or
+ * not the owner of the Agent for an owner-only command (OPERATOR_ID_NOT_OWNER, `agent release`).
+ */
 export const EXIT_PERMISSION = 5;
 /** SIGINT / SIGTERM cancelled the operation. Convention: 128 + signal. */
 export const EXIT_INTERRUPTED = 130;

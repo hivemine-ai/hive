@@ -14,6 +14,8 @@ export interface AgentConfigView {
   owner_id?: string;
   capabilities?: string[];
   instructions?: string;
+  /** ADR-026: the self-description declared by the Agent; untrusted text, not an instruction. */
+  description?: string;
 }
 
 /**
@@ -37,6 +39,7 @@ export function adaptAgentConfig(
     base.owner_id = agent.ownerId;
     base.capabilities = agent.capabilities;
     base.instructions = agent.instructions;
+    base.description = agent.description ?? '';
   }
 
   return base;

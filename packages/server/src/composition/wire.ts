@@ -34,12 +34,15 @@ import {
   createRotator,
   loadAllKeypairs,
   createBlocklist,
+  createEnrollment,
+  createEnrollmentRetention,
   createRevocationPurger,
   createVerifier,
 } from '#domain/auth/index.js';
 import type {
   Blocklist,
   CredentialsReadRepo,
+  Enrollment,
   Issuer,
   ParticipantsReadRepo,
   ParticipantsWriteRepo,
@@ -49,6 +52,8 @@ import type {
   UUIDv7,
 } from '#domain/auth/index.js';
 import { createAuditRecorder, createAuditRepo } from '#domain/audit/index.js';
+import { resolveEnrollmentConfigFromEnv } from './enrollment-config.js';
+import type { EnrollmentConfig } from './enrollment-config.js';
 import type { AuditRecorder } from '#domain/audit/index.js';
 import {
   createCellsRepo,
@@ -64,7 +69,10 @@ import { createDb, resolveDbConfigFromEnv } from '#persistence/db.js';
 import type { Database } from '#persistence/schema.js';
 
 import { createCellsHookAdapter } from './cells-hook-adapter.js';
+import { createEnrollmentRetentionJob } from './enrollment-retention-job.js';
+import type { EnrollmentRetentionJob } from './enrollment-retention-job.js';
 import { createNotificationsForProduction } from './notifications-factory.js';
+import type { PresenceRegistry } from '#domain/notifications/index.js';
 import {
   SNAPSHOT_HIVE_VERSION,
   createSnapshotWriter,
@@ -72,12 +80,21 @@ import {
 } from './snapshot-writer.js';
 import { createVisibilityEngineForProduction } from './visibility-engine-factory.js';
 import { createLastConnectedRefresher } from '#transport/mcp/auth-binding.js';
-import { createListenStreams } from '#transport/mcp/listen-stream.js';
+import {
+  createRegisterRateLimiter,
+  createRejectAlertCounter,
+} from '#transport/mcp/enrollment-guards.js';
+import { createListenStreams, type ListenStreams } from '#transport/mcp/listen-stream.js';
 import { createMcpTransport } from '#transport/mcp/server.js';
 import { createHttpHost } from '#transport/mcp/http-host.js';
 import type { HttpHost } from '#transport/mcp/http-host.js';
 
 export interface WireConfig {
+  /**
+   * Worker token TTL of register_session. From HIVE_WORKER_TOKEN_TTL_SECONDS; the
+   * override is a test seam that goes below the 60 s floor of the env var.
+   */
+  workerTokenTtlMs?: number;
   /** Default `0.0.0.0`. */
   httpHost?: string;
   /** Default {@link HIVE_DEFAULT_HTTP_PORT} (`8443`). */
@@ -111,6 +128,20 @@ export interface WireConfig {
   maxUnreadPerSender?: number;
   /** From HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS. Default 3600. 0 disables the purge. */
   revocationPurgeIntervalSeconds?: number;
+  /** From HIVE_ENROLLMENT_REGISTER_RATE_LIMIT. Default 30 per window. 0 disables it. */
+  enrollmentRegisterRateLimit?: number;
+  /** From HIVE_ENROLLMENT_REGISTER_RATE_WINDOW_SECONDS. Default 60. */
+  enrollmentRegisterRateWindowSeconds?: number;
+  /** From HIVE_ENROLLMENT_REJECT_ALERT_THRESHOLD. Default 5. 0 disables the alert. */
+  enrollmentRejectAlertThreshold?: number;
+  /** From HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES. Default 10. */
+  enrollmentRejectAlertWindowMinutes?: number;
+  /** From HIVE_ENROLLMENT_RETENTION_DAYS. Default 30. 0 never retires. */
+  enrollmentRetentionDays?: number;
+  /** From HIVE_ENROLLMENT_GRACE_DAYS. Default 60. 0 keeps retired Agents indefinitely. */
+  enrollmentGraceDays?: number;
+  /** From HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS. Default 3600. 0 never schedules the job. */
+  enrollmentRetentionIntervalSeconds?: number;
 }
 
 export interface WireDeps {
@@ -128,6 +159,10 @@ export interface Wire {
   _participantsWriteRepo(): ParticipantsWriteRepo;
   /** Test/diagnostic — exposes the cell events (asserts wiring). */
   _cellEvents(): ReturnType<typeof createCellEvents>;
+  /** Test/diagnostic — exposes the presence registry (holder liveness). */
+  _presenceRegistry(): PresenceRegistry;
+  /** Test/diagnostic — the scheduled enrollment retention job (`runOnce(now)`). */
+  _enrollmentRetention(): EnrollmentRetentionJob;
 }
 
 export function resolveWireConfigFromEnv(
@@ -135,6 +170,50 @@ export function resolveWireConfigFromEnv(
   overrides: WireConfig = {},
 ): Required<WireConfig> {
   return {
+    workerTokenTtlMs:
+      overrides.workerTokenTtlMs ?? resolveEnrollmentConfigFromEnv(env).workerTokenTtlMs,
+    enrollmentRegisterRateLimit:
+      overrides.enrollmentRegisterRateLimit ??
+      parseIntEnv(env['HIVE_ENROLLMENT_REGISTER_RATE_LIMIT'], 30, {
+        name: 'HIVE_ENROLLMENT_REGISTER_RATE_LIMIT',
+        min: 0,
+      }),
+    enrollmentRegisterRateWindowSeconds:
+      overrides.enrollmentRegisterRateWindowSeconds ??
+      parseIntEnv(env['HIVE_ENROLLMENT_REGISTER_RATE_WINDOW_SECONDS'], 60, {
+        name: 'HIVE_ENROLLMENT_REGISTER_RATE_WINDOW_SECONDS',
+        min: 1,
+      }),
+    enrollmentRejectAlertThreshold:
+      overrides.enrollmentRejectAlertThreshold ??
+      parseIntEnv(env['HIVE_ENROLLMENT_REJECT_ALERT_THRESHOLD'], 5, {
+        name: 'HIVE_ENROLLMENT_REJECT_ALERT_THRESHOLD',
+        min: 0,
+      }),
+    enrollmentRejectAlertWindowMinutes:
+      overrides.enrollmentRejectAlertWindowMinutes ??
+      parseIntEnv(env['HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES'], 10, {
+        name: 'HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES',
+        min: 1,
+      }),
+    enrollmentRetentionDays:
+      overrides.enrollmentRetentionDays ??
+      parseIntEnv(env['HIVE_ENROLLMENT_RETENTION_DAYS'], 30, {
+        name: 'HIVE_ENROLLMENT_RETENTION_DAYS',
+        min: 0,
+      }),
+    enrollmentGraceDays:
+      overrides.enrollmentGraceDays ??
+      parseIntEnv(env['HIVE_ENROLLMENT_GRACE_DAYS'], 60, {
+        name: 'HIVE_ENROLLMENT_GRACE_DAYS',
+        min: 0,
+      }),
+    enrollmentRetentionIntervalSeconds:
+      overrides.enrollmentRetentionIntervalSeconds ??
+      parseIntEnv(env['HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS'], 3600, {
+        name: 'HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS',
+        min: 0,
+      }),
     httpHost: overrides.httpHost ?? env['HIVE_MCP_HTTP_HOST'] ?? '0.0.0.0',
     httpPort:
       overrides.httpPort ??
@@ -285,7 +364,10 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       `No signing keypairs found in ${cfg.keysDir}. Run 'hivectl init' first to bootstrap the Hive.`,
     );
   }
-  const blocklist = createBlocklist(db);
+  // ADR-026: revocation rows outlive their token by the holder-proof window.
+  const enrollmentConfig = resolveEnrollmentConfigFromEnv(process.env);
+  const { holderProofWindowDays } = enrollmentConfig;
+  const blocklist = createBlocklist(db, { holderProofWindowDays });
   const revocationPurger = createRevocationPurger({
     blocklist,
     logger,
@@ -304,6 +386,9 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     participantsRepo,
     hiveStableIdentifier: hiveRow.id,
     logger,
+    // ADR-026: verifyRenewalBearer, the holder proof of a register_session renewal.
+    db,
+    holderProofWindowDays,
   });
 
   // 3. Cell Store.
@@ -354,6 +439,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     cellsRepo,
     participantsRepo,
     logger,
+    hiveId: hiveRow.id,
   });
 
   // State changes made in this process close or replay streams right away. Changes made
@@ -366,8 +452,33 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     cellsHook: createCellsHookAdapter(cellsRepo),
     stateSignal: participantStateSignal,
   });
+  const auditRecorder = createAuditRecorder({
+    auditRepo: createAuditRepo(db),
+    logger,
+    onAfterRecord: () => snapshotWriter.writeRefresh(),
+  });
 
-  // 7. MCP transport.
+  // ADR-026: the Auth primitives of register_session. New Worker tokens are signed with
+  // the active key, as hivectl does.
+  const enrollment = createEnrollment({
+    signingKey: signingKeys.values().next().value as SigningKey,
+    participantsRepo,
+    hiveStableIdentifier: hiveRow.id,
+    db,
+    logger,
+    dialect: dbConfig.dialect,
+    cellsHook: createCellsHookAdapter(cellsRepo),
+    // A revival signals 'active', which replays on the holder's open streams.
+    stateSignal: participantStateSignal,
+    enrollmentTtlMs: enrollmentConfig.enrollmentTtlMs,
+    hiveMaxAgents: enrollmentConfig.hiveMaxAgents,
+    workerTokenTtlMs: cfg.workerTokenTtlMs,
+    holderProofWindowDays,
+  });
+
+  // 7. MCP transport. Forward reference: a renewal re-binds the streams of the listen
+  // edge, which is built from the transport's serverInfo.
+  let listenStreamsRef: ListenStreams | null = null;
   const mcpTransport = createMcpTransport({
     participantsRepo,
     cellsRepo,
@@ -377,6 +488,15 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     presenceRegistry: notifications.presenceRegistry,
     logger,
     listAgentsMaxPageSize: cfg.listAgentsMaxPageSize,
+    enrollment,
+    rebindParticipantStreams: (participantId, credential) =>
+      listenStreamsRef?.rebindParticipantStreams(participantId, credential) ?? 0,
+    rejectAlerts: createRejectAlertCounter({
+      threshold: cfg.enrollmentRejectAlertThreshold,
+      windowMinutes: cfg.enrollmentRejectAlertWindowMinutes,
+    }),
+    rejectAlertWindowMinutes: cfg.enrollmentRejectAlertWindowMinutes,
+    auditRecorder,
   });
 
   const listenStreams = createListenStreams({
@@ -390,6 +510,30 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     reverifyIntervalSeconds: cfg.reverifyIntervalSeconds,
     leaseMs: cfg.listenLeaseMs > 0 ? cfg.listenLeaseMs : null,
   });
+  listenStreamsRef = listenStreams;
+
+  // 13c. ADR-026 enrollment retention job. After the state signal wiring, so its
+  // 'retired' and 'revoked' transitions close streams; a live holder is never retired.
+  const enrollmentRetention = createEnrollmentRetention({
+    db,
+    retentionDays: cfg.enrollmentRetentionDays,
+    graceDays: cfg.enrollmentGraceDays,
+    holderProofWindowDays,
+    cellsHook: createCellsHookAdapter(cellsRepo),
+    stateSignal: participantStateSignal,
+    auditRecorder,
+    logger,
+  });
+  const enrollmentRetentionJob = createEnrollmentRetentionJob({
+    run: (now) =>
+      enrollmentRetention.runEnrollmentRetention(
+        now,
+        { kind: 'system' },
+        { isHolderLive: (agentId) => notifications.presenceRegistry.isHolderLive(agentId) },
+      ),
+    intervalSeconds: cfg.enrollmentRetentionIntervalSeconds,
+    logger,
+  });
 
   // 8. HTTP host.
   const httpHost = createHttpHost(
@@ -398,6 +542,10 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       verifier,
       listenEdge: listenStreams,
       lastConnected: createLastConnectedRefresher({ participantsRepo, logger }),
+      registerRateLimiter: createRegisterRateLimiter({
+        limit: cfg.enrollmentRegisterRateLimit,
+        windowSeconds: cfg.enrollmentRegisterRateWindowSeconds,
+      }),
       db,
       signingKeysProvider: () => signingKeys.values() as Iterable<SigningKey>,
       logger,
@@ -417,6 +565,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       listenStreams.start();
       warnIfAllowedHostsEmpty(logger, cfg.allowedHosts);
       revocationPurger.start();
+      enrollmentRetentionJob.start();
       await httpHost.start();
       logger.info(
         { event: 'wire_started', host: cfg.httpHost, port: httpHost.port(), mcpPath: cfg.mcpPath },
@@ -462,6 +611,16 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       revocationPurger.stop();
       notifications.stop();
       const drainMs = Math.max(1, cfg.shutdownDrainTimeoutSeconds) * 1000;
+      // Cancels the timer and waits for a run in progress, bounded by the drain.
+      await stopWithDrainTimeout(enrollmentRetentionJob.stop(), drainMs, (err) => {
+        logger.warn(
+          {
+            event: 'wire_retention_stop_failed',
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'enrollment retention job stop failed',
+        );
+      });
       await stopWithDrainTimeout(httpHost.stop(), drainMs, (err) => {
         logger.error(
           { event: 'wire_stop_failed', err: err instanceof Error ? err.message : String(err) },
@@ -508,6 +667,14 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
     _cellEvents() {
       return cellEvents;
+    },
+
+    _presenceRegistry() {
+      return notifications.presenceRegistry;
+    },
+
+    _enrollmentRetention() {
+      return enrollmentRetentionJob;
     },
   };
 }
@@ -608,6 +775,7 @@ export interface CliResolvedConfig {
   keysDir: string;
   snapshotMaxBytes: number;
   defaultCredentialTtlMs: number;
+  enrollment: EnrollmentConfig;
 }
 
 export function resolveCliConfigFromEnv(
@@ -627,6 +795,7 @@ export function resolveCliConfigFromEnv(
         min: 1,
       }),
     defaultCredentialTtlMs: overrides.defaultCredentialTtlMs ?? days * 24 * 60 * 60 * 1000,
+    enrollment: resolveEnrollmentConfigFromEnv(env),
   };
 }
 
@@ -652,6 +821,8 @@ export interface CliRuntime {
   issuer: Issuer;
   rotator: Rotator;
   revoker: Revoker;
+  // ADR-026: issue enrollment credentials (`credential issue --enrollment`).
+  enrollment: Enrollment;
   auditRecorder: AuditRecorder;
   signingKeys: Map<string, SigningKey>;
   hiveStableIdentifier: UUIDv7;
@@ -689,7 +860,8 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   // lands (Slice 1+), the active selection happens here.
   const activeSigningKey = signingKeys.values().next().value as SigningKey;
 
-  const blocklist = createBlocklist(db);
+  const { holderProofWindowDays } = config.enrollment;
+  const blocklist = createBlocklist(db, { holderProofWindowDays });
 
   const hiveRow = await db.selectFrom('hives').select(['id', 'name']).executeTakeFirst();
   if (!hiveRow) {
@@ -708,7 +880,10 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
   const credentialsRepo = createCredentialsReadRepo(db);
   const cellsRepo = createCellsRepo(db);
   const cellsHook = createCellsHookAdapter(cellsRepo);
-  const participantsWriteRepo = createParticipantsWriteRepo(db, { cellsHook });
+  const participantsWriteRepo = createParticipantsWriteRepo(db, {
+    cellsHook,
+    holderProofWindowDays,
+  });
 
   const issuer = createIssuer({
     signingKey: activeSigningKey,
@@ -724,11 +899,26 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     blocklist,
     hiveStableIdentifier: hiveRow.id,
     defaultTtlMs: config.defaultCredentialTtlMs,
+    enrollmentTtlMs: config.enrollment.enrollmentTtlMs,
     snapshotMaxBytes: config.snapshotMaxBytes,
     db,
     logger,
   });
-  const revoker = createRevoker({ db, logger });
+  const revoker = createRevoker({ db, logger, cellsHook, holderProofWindowDays });
+  const enrollment = createEnrollment({
+    signingKey: activeSigningKey,
+    participantsRepo,
+    hiveStableIdentifier: hiveRow.id,
+    snapshotMaxBytes: config.snapshotMaxBytes,
+    db,
+    logger,
+    dialect: dbConfig.dialect,
+    cellsHook,
+    enrollmentTtlMs: config.enrollment.enrollmentTtlMs,
+    hiveMaxAgents: config.enrollment.hiveMaxAgents,
+    workerTokenTtlMs: config.enrollment.workerTokenTtlMs,
+    holderProofWindowDays,
+  });
 
   const snapshotWriter = createSnapshotWriter({
     db,
@@ -755,6 +945,7 @@ export async function startCli(deps: WireDeps, overrides: CliWireConfig = {}): P
     issuer,
     rotator,
     revoker,
+    enrollment,
     auditRecorder,
     signingKeys,
     hiveStableIdentifier: hiveRow.id,

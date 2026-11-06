@@ -26,6 +26,7 @@ function buildStubSender(): { sender: Sender; state: StubSenderState } {
   const state: StubSenderState = { receivedCalls: [] };
 
   const sender: Sender = {
+    depositSystemNotification: () => Promise.reject(new Error('not used here')),
     sendMessage(input: SendMessageInput): Promise<SendResult> {
       state.receivedCalls.push(input);
       return Promise.resolve({

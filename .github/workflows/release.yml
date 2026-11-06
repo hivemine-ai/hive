@@ -115,7 +115,7 @@ jobs:
           # Intel Mac users use the Linux x64 binary via Rosetta 2; see
           # CHANGELOG.md and README.md for details. Reversible (1-line
           # re-add) when the constraint is lifted. (PRY-054)
-          - os: macos-14
+          - os: macos-15
             platform: darwin
             arch: arm64
             sea_target: darwin
@@ -789,6 +789,9 @@ jobs:
             exit 1
           fi
           echo "OK: OIDC token endpoint available"
+
+      - name: Stage the Claude Code plugin into the wrapper (ADR-026)
+        run: node npm/hivectl/stage-plugin.js
 
       - name: Pin wrapper version + optionalDependencies
         run: |

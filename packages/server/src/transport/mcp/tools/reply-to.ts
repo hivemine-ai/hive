@@ -48,6 +48,10 @@ export function createReplyToHandler(deps: ReplyToDeps) {
     if (original === null) {
       throw new CellError('INVALID_INPUT', { subCode: 'reply_target_not_in_caller_cell' });
     }
+    // A notification of the Hive (ADR-026) has no participant to answer to.
+    if (original.fromParticipantId === ctx.identity.hiveId) {
+      throw new CellError('RECIPIENT_UNREACHABLE', { subCode: 'system_sender' });
+    }
 
     const sendInput: Parameters<Sender['sendMessage']>[0] = {
       callerContext: ctx.identity,

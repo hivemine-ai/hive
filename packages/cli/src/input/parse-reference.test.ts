@@ -121,6 +121,11 @@ function makeAgent(id: string, ownerId: string, name = 'worker-a'): Agent {
     createdAt: new Date(),
     revokedAt: null,
     lastConnectedAt: null,
+    origin: 'manual',
+    enrolledVia: null,
+    description: null,
+    retiredAt: null,
+    lastWorkerJti: null,
   };
 }
 
