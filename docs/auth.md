@@ -55,6 +55,16 @@ The Hive enforces invariant **"at least one active admin Hivekeeper exists at al
 
 An **enrollment credential** (`hivectl credential issue --enrollment`) lets sessions register themselves as Worker Agents of its owner. It carries the scope `enroll`, an optional name prefix and an optional cap of active Agents, and grants nothing else: an admin operation presented with it fails with `INSUFFICIENT_PRIVILEGE` (`scoped_credential`). Each registered session gets a short-lived **Worker token** (one hour by default) that it renews before it expires by presenting its last token. The last token keeps working as proof of the holder for `HIVE_HOLDER_PROOF_WINDOW_DAYS` after it expires, so a laptop that slept for a few days resumes without registering again; a newer token, a new registration of the same Agent or a revocation invalidates that proof. Rotating an enrollment stops new registrations but lets registered sessions keep renewing; revoking it also revokes every Worker token issued through it.
 
+## Retention of session agents
+
+Agents registered through an enrollment credential (`origin = enrollment`) are retired when unused, so they do not pile up. The server runs one job every `HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS` (first run one interval after start, never two at once; a failed run logs `auth_enrollment_retention_failed` and waits for the next interval), with three passes:
+
+1. **Retire.** An `active` session agent whose last connection (or creation, if it never connected) is older than `HIVE_ENROLLMENT_RETENTION_DAYS` becomes `retired`, audited as `agent_retired` with actor `system`. An agent with an open listen stream is never retired, and a claim or renewal that refreshes it at the same moment wins. Manual agents are never touched.
+2. **End of grace.** A `retired` agent older than `HIVE_ENROLLMENT_GRACE_DAYS` becomes `revoked`, like `hivectl agent revoke`: its mailbox closes and the name can be registered again (audit `admin_agent_revoke`, actor `system`, reason `enrollment_grace_expired`).
+3. **Purge.** Rows of Worker tokens that expired before the holder-proof window are deleted.
+
+A retired agent keeps its mailbox, which keeps receiving messages. Its tokens are rejected (`PARTICIPANT_NOT_ACTIVE`, subcode `retired`) and cannot renew; `register_session` with the enrollment credential revives it with the same id. It cannot be suspended or resumed, and `hivectl agent revoke` still revokes it. With the defaults a session agent keeps its identity for 90 days without connecting.
+
 **Revocation cleanup.** Every verification reads the revocation table, so the server deletes a row once its credential has expired for longer than the holder-proof window (`exp` plus `HIVE_HOLDER_PROOF_WINDOW_DAYS`, 7 days by default, plus the 5 s clock tolerance): from then on no verification can accept the token, so the row can no longer matter. The purge runs at server start and then every hour, in batches of 1000 rows, and logs `auth_revocations_purged` with the `purged` count and `durationMs` (a failed pass logs `auth_revocations_purge_failed` and retries on the next tick). A revocation of a still-valid credential is never purged. Tune with `HIVE_AUTH_REVOCATION_PURGE_INTERVAL_SECONDS`.
 
 ### What's NOT in v0.1
@@ -100,6 +110,9 @@ Environment variables consumed at boot:
 | `HIVE_ENROLLMENT_CREDENTIAL_TTL_DAYS`         | `90`                          | Default TTL of an enrollment credential. At least `1`.                                        |
 | `HIVE_WORKER_TOKEN_TTL_SECONDS`               | `3600`                        | TTL of a Worker token issued at registration. At least `60`.                                  |
 | `HIVE_HOLDER_PROOF_WINDOW_DAYS`               | `7`                           | Days after `exp` the last Worker token can still renew. `0` = only valid tokens.              |
+| `HIVE_ENROLLMENT_RETENTION_DAYS`              | `30`                          | Days offline after which a session agent is retired. `0` = never.                             |
+| `HIVE_ENROLLMENT_GRACE_DAYS`                  | `60`                          | Days retired after which a session agent is revoked. `0` = never.                             |
+| `HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS`  | `3600`                        | Time between retention runs (server). `0` = no runs, nor the Worker token row purge.          |
 
 ## See also
 
