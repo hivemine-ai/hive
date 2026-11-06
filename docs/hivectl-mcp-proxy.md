@@ -22,6 +22,8 @@ Claude Code then writes `<folder>/.claude/settings.local.json` (`enabledPlugins`
 hivectl claude uninstall --yes  # in the same folder
 ```
 
+Run `install` again after upgrading or moving `hivectl`: the plugin copy pins the absolute path of the executable.
+
 `uninstall` removes the plugin and the marketplace from the folder's local scope, the enrollment of the folder and its `state/sessions/` and `state/tokens/`, and the plugin copy once no folder uses it. It does not revoke the credential or the agents (use `hivectl credential revoke`), does not remove the `.gitignore` line, and does not stop running sessions.
 
 Requirements: Claude Code 2.1.318 or newer (an older one only warns), `claude` on the `PATH`, and a credential file of mode `0600`.

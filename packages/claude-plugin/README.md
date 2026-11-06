@@ -27,7 +27,7 @@ The URL and the enrollment credential stay in `~/.config/hive/`, never in the fo
 ## Requirements
 
 - Claude Code **2.1.318 or newer** (validated by the PRY-089 spike and the PRY-093 smoke). Do not set `MCP_SDK_GENERATION=v1` or `MCP_PROTOCOL_NEGOTIATION=legacy`.
-- `hivectl` installed from npm (`@hivemine/hivectl`), since the plugin ships inside that package. After upgrading `hivectl`, run `hivectl claude install` again to refresh the copy.
+- `hivectl` installed from npm (`@hivemine/hivectl`), since the plugin ships inside that package. After upgrading or moving `hivectl`, run `hivectl claude install` again to refresh the copy (it pins the absolute path of the executable). `claude plugin uninstall` leaves a copy under `plugins/cache/` of the Claude Code config dir; it holds no secret and is harmless.
 - A Hive server that serves MCP `2026-07-28` with `subscriptions/listen`.
 
 ## Contract
@@ -80,8 +80,10 @@ For a headless worker, run [`worker/claude-wake.sh`](./worker/claude-wake.sh) as
 ```bash
 pnpm --filter @hive/claude-plugin test        # controller, mod wiring, contract, worker recipe
 pnpm --filter @hive/claude-plugin typecheck
-claude plugin validate packages/claude-plugin
+claude plugin validate packages/claude-plugin   # also scripts/smoke/claude-code/validate-plugin.sh
 ```
+
+The CI runners have no `claude` CLI, so the validator runs in the [Claude Code smoke](../../scripts/smoke/claude-code/README.md), not in CI.
 
 `hooks/controller.js` holds the waker logic with no host dependency; `hooks/register.js` wires it to `$.process`, `$.prompt`, `$.ui`, `$.session` and `$.env`. `hooks/hivectl-path.js` is rewritten by `claude install`. `distribution.json` lists the files that ship.
 

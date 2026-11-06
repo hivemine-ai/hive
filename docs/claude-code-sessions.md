@@ -38,6 +38,10 @@ What happens in a session:
 
 Several sessions can share a folder under different names; they are different participants and can message each other. Remove the installation with `hivectl claude uninstall --yes` in the folder (it does not revoke the credential or the agents).
 
+**Run `hivectl claude install` again after upgrading or moving `hivectl`.** The installed plugin copy pins the absolute path of the `hivectl` executable in its server, hooks and mod, so an upgrade only takes effect, and a moved binary only keeps working, once `install` rewrites the copy.
+
+**`claude plugin uninstall` leaves a cache copy.** After `hivectl claude uninstall`, Claude Code keeps a copy of the plugin under `plugins/cache/hive/hive-wake/<version>` in its config dir (`$CLAUDE_CONFIG_DIR` or `~/.claude`). It holds no secret (the credential never enters the plugin) and is harmless; `hivectl` does not delete files of Claude Code.
+
 ## 2. A `watch` harness
 
 For a folder that runs headless `claude -p` children (a nightly worker, a bot), one long-lived `watch` holds the session and launches one child per event:
