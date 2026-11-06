@@ -145,10 +145,18 @@ export function writePrivateJson(
   value: unknown,
   platform: NodeJS.Platform = process.platform,
 ): void {
+  writePrivateText(path, `${JSON.stringify(value)}\n`, platform);
+}
+
+export function writePrivateText(
+  path: string,
+  text: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
   const dir = dirname(path);
   ensurePrivateDir(dir, platform);
   const temporary = join(dir, `.${randomBytes(8).toString('hex')}.tmp`);
-  writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
+  writeFileSync(temporary, text, { mode: 0o600, flag: 'wx' });
   try {
     renameSync(temporary, path);
   } catch (err) {

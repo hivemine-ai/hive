@@ -1,3 +1,11 @@
 {
-  "files": [".claude-plugin/plugin.json"]
+  "files": [
+    ".claude-plugin/plugin.json",
+    "hooks/hooks.json",
+    "hooks/register.js",
+    "hooks/controller.js",
+    "hooks/event-line.js",
+    "hooks/hivectl-path.js",
+    "skills/hive-session/SKILL.md"
+  ]
 }
