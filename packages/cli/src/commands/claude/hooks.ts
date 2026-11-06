@@ -1,5 +1,5 @@
-// Command hooks of the hive-wake plugin (ADR-026 9.7, tech spec § "Hooks del
-// plugin"): internal, hidden subcommands `hivectl claude hook session-start |
+// Command hooks of the hive-wake plugin (ADR-026 9.7, tech spec section on
+// the plugin hooks): internal, hidden subcommands `hivectl claude hook session-start |
 // post-tool-use`, run by Claude Code with the hook JSON on stdin. They never
 // block or fail the start of a session: any error ends with exit 0, no output,
 // and one line on stderr. With the harness marker they do nothing at all.
