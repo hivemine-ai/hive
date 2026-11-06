@@ -54,8 +54,11 @@ export function createController({ options, host }) {
   /** Session id watch attaches to; changed by retarget. */
   let target = options.sessionId;
   let supervising = false;
-  /** Set by retarget: the running watch is replaced at once, without backoff. */
+  /** Set by retarget while a child runs: it is replaced at once, without backoff. */
   let restartNow = false;
+  /** Ends the restart backoff early (set while supervise sleeps). */
+  /** @type {(() => void) | undefined} */
+  let wakeBackoff;
   let stopped = false;
   let turnActive = false;
   let onceRunning = false;
@@ -238,6 +241,8 @@ export function createController({ options, host }) {
         child = host.spawn(watchArgv());
         outcome = await consume(child);
       } catch (err) {
+        child = undefined;
+        restartNow = false;
         if (stopped) return;
         const reason = err instanceof Error ? err.message : String(err);
         host.toast(
@@ -271,7 +276,11 @@ export function createController({ options, host }) {
           'hivectl watch keeps crashing; it is being restarted with backoff. Check its stderr.',
         );
       }
-      await host.sleep(backoff);
+      await new Promise((resolve) => {
+        wakeBackoff = () => resolve(undefined);
+        void host.sleep(backoff).then(resolve);
+      });
+      wakeBackoff = undefined;
       backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
     }
   }
@@ -294,6 +303,8 @@ export function createController({ options, host }) {
       if (proc !== undefined) {
         restartNow = true;
         void proc.return().catch(() => {});
+      } else if (wakeBackoff !== undefined) {
+        wakeBackoff();
       } else {
         supervise();
       }
@@ -309,6 +320,7 @@ export function createController({ options, host }) {
     async stop() {
       stopped = true;
       cancelRetry();
+      wakeBackoff?.();
       const proc = child;
       child = undefined;
       if (proc) await proc.return().catch(() => {});

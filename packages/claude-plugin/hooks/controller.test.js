@@ -809,4 +809,32 @@ describe('retarget (session id changed by /clear or /resume)', () => {
     await flush();
     expect(t.calls.spawn[0]).toEqual(['hivectl', 'watch', '--attach-session', 'sid-3']);
   });
+
+  it('cuts the restart backoff short: a retarget during the sleep after a crash spawns at once', async () => {
+    const t = setup();
+    t.hold.on = true;
+    t.controller.start();
+    await flush();
+    t.procs[0].exit(2);
+    await flush();
+    expect(t.calls.sleeps).toEqual([1000]);
+    t.controller.retarget('sid-2');
+    await flush();
+    expect(t.calls.spawn[1]).toEqual(['hivectl', 'watch', '--attach-session', 'sid-2']);
+  });
+
+  it('a retarget without a running child leaves no pending restart: the next crash still backs off', async () => {
+    const t = setup();
+    t.hold.on = true;
+    t.controller.start();
+    await flush();
+    t.procs[0].exit(2);
+    await flush();
+    t.controller.retarget('sid-2');
+    await flush();
+    t.procs[1].exit(2);
+    await flush();
+    expect(t.calls.sleeps).toHaveLength(2);
+    expect(t.calls.spawn).toHaveLength(2);
+  });
 });
