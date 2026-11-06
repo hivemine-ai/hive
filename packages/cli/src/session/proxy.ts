@@ -97,6 +97,8 @@ export type SessionStatus = {
   hive: string | null;
   project: string;
   mode: 'interactive' | 'harness';
+  /** Handle of this proxy's local channel (not a secret); null in harness mode. */
+  proxy_handle: string | null;
   last_error: { code: SessionErrorCode; message: string; at: string } | null;
 };
 
@@ -664,6 +666,7 @@ export function startProxy(config: ProxyConfig): RunningProxy {
       hive: serverUrlNow() ?? null,
       project: projectDir,
       mode,
+      proxy_handle: mode === 'interactive' ? proxyHandle : null,
       last_error: lastError,
     };
   };
@@ -702,6 +705,7 @@ export function startProxy(config: ProxyConfig): RunningProxy {
         agent_ref: outcome.registered.agentRef,
         agent_id: outcome.registered.agentId,
         expires_at: outcome.registered.expiresAt.toISOString(),
+        proxy_handle: proxyHandle,
       });
     }
     if (identity() === undefined) {
