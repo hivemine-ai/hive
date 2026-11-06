@@ -39,6 +39,7 @@ const IDENTITY = {
 
 interface StubOptions {
   verify?: Verifier['verify'];
+  verifyRenewalBearer?: Verifier['verifyRenewalBearer'];
   sender?: Partial<Sender>;
   reader?: Partial<Reader>;
   listenEdge?: ListenEdge;
@@ -67,7 +68,12 @@ async function startHost(options: StubOptions = {}): Promise<string> {
   current = createHttpHost(
     {
       mcpTransport,
-      verifier: { verify: options.verify ?? (() => Promise.resolve(IDENTITY)) },
+      verifier: {
+        verify: options.verify ?? (() => Promise.resolve(IDENTITY)),
+        verifyRenewalBearer:
+          options.verifyRenewalBearer ??
+          (() => Promise.reject(new AuthError('CREDENTIAL_EXPIRED'))),
+      },
       lastConnected: options.lastConnected ?? { refresh: () => undefined },
       db: {} as never,
       signingKeysProvider: () => [],
@@ -197,8 +203,8 @@ describe('auth at the edge', () => {
   });
 });
 
-// PRY-090 (ADR-026): until the register_session binding exists (PRY-091), a credential
-// with a scope is good for nothing on the MCP surface.
+// ADR-026 (PRY-091): an enrollment credential reaches only register_session and
+// server/discover; everything else is an authentic credential out of its scope.
 describe('scoped credentials at the edge', () => {
   const ENROLLMENT_IDENTITY = {
     ...IDENTITY,
@@ -236,20 +242,78 @@ describe('scoped credentials at the edge', () => {
         event: 'mcp_auth_failed',
         domainCode: 'INSUFFICIENT_PRIVILEGE',
         subCode: 'scoped_credential',
+        operation: 'tools_call:list_agents',
       }),
       expect.any(String),
     );
   });
 
-  it('rejects it on every other method too, server/discover included', async () => {
+  it('rejects it on tools/list, resources/* and subscriptions/listen', async () => {
     const url = await startHost({ verify: () => Promise.resolve(ENROLLMENT_IDENTITY) });
-    for (const method of ['tools/list', 'server/discover', 'resources/list']) {
+    for (const method of ['tools/list', 'resources/list', 'resources/read']) {
       const res = await post(url, method);
       expect(res.status).toBe(403);
       expect(((await res.json()) as RpcError).error.code).toBe(-32006);
     }
     const listen = await fetch(url, listenInit());
     expect(listen.status).toBe(403);
+  });
+
+  it('lets it through on server/discover and register_session', async () => {
+    const refresh = vi.fn();
+    const url = await startHost({
+      verify: () => Promise.resolve(ENROLLMENT_IDENTITY),
+      lastConnected: { refresh },
+    });
+
+    expect((await post(url, 'server/discover')).status).toBe(200);
+    const register = await callTool(url, 'register_session', {});
+    expect(register.status).not.toBe(403);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe('renewal route of register_session', () => {
+  const WORKER_BEARER = `Bearer ${Buffer.from('{"alg":"EdDSA"}').toString('base64url')}.${Buffer.from(
+    '{"sub":"agent","kind":"worker"}',
+  ).toString('base64url')}.c2ln`;
+
+  it('verifies an unscoped Bearer on register_session with verifyRenewalBearer', async () => {
+    const verify = vi.fn(() => Promise.reject(new AuthError('CREDENTIAL_EXPIRED')));
+    const verifyRenewalBearer = vi.fn(() =>
+      Promise.reject(new AuthError('CREDENTIAL_INAUTHENTIC', { subCode: 'holder_proof_expired' })),
+    );
+    const url = await startHost({ verify, verifyRenewalBearer });
+
+    const res = await post(
+      url,
+      'tools/call',
+      { name: 'register_session', arguments: {} },
+      { authorization: WORKER_BEARER },
+    );
+
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as RpcError).error.code).toBe(-32001);
+    expect(verifyRenewalBearer).toHaveBeenCalledWith(WORKER_BEARER);
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it('never routes another tool through the renewal variant', async () => {
+    const verifyRenewalBearer = vi.fn(() => Promise.resolve(IDENTITY));
+    const url = await startHost({
+      verify: () => Promise.reject(new AuthError('CREDENTIAL_EXPIRED')),
+      verifyRenewalBearer,
+    });
+
+    const res = await post(
+      url,
+      'tools/call',
+      { name: 'send_message', arguments: {} },
+      { authorization: WORKER_BEARER },
+    );
+
+    expect(res.status).toBe(401);
+    expect(verifyRenewalBearer).not.toHaveBeenCalled();
   });
 });
 

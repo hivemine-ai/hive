@@ -3,6 +3,7 @@
 // is stored between requests, so two concurrent requests can never cross identities.
 
 import type { AuthInfo } from '@modelcontextprotocol/server';
+import { decodeJwt } from 'jose';
 
 import { AuthError } from '#domain/auth/index.js';
 import type { IdentityContext, UUIDv7, Verifier } from '#domain/auth/index.js';
@@ -23,22 +24,68 @@ export interface AuthenticatedRequest {
   identity: IdentityContext;
 }
 
+export const REGISTER_SESSION_TOOL = 'register_session';
+
 /**
- * Verifies the `Authorization` header against the Auth + Identity verifier.
+ * Name of the operation a JSON-RPC body asks for, as the scope binding and its
+ * `operation` log field call it: `tools_call:<name>`, `tools_list`, `resources`,
+ * `subscriptions_listen`, `server_discover`, or the raw method otherwise.
+ */
+export function requestOperation(body: unknown): string {
+  const rpc = body as { method?: unknown; params?: { name?: unknown } } | null | undefined;
+  const method = rpc?.method;
+  if (typeof method !== 'string') return 'unknown';
+  if (method === 'tools/call') return `tools_call:${String(rpc?.params?.name)}`;
+  if (method === 'tools/list') return 'tools_list';
+  if (method.startsWith('resources/')) return 'resources';
+  if (method === 'subscriptions/listen') return 'subscriptions_listen';
+  if (method === 'server/discover') return 'server_discover';
+  return method;
+}
+
+// What an enrollment credential may do (ADR-026): register, and detect a version skew.
+const ENROLL_ALLOWED_OPERATIONS: ReadonlySet<string> = new Set([
+  `tools_call:${REGISTER_SESSION_TOOL}`,
+  'server_discover',
+]);
+
+// Routing only: the claims are read unverified to choose the verifier variant, and that
+// variant then checks everything. A Bearer that does not decode goes to `verify`.
+function bearerHasScope(authorizationHeader: string | undefined): boolean | undefined {
+  const token = authorizationHeader?.match(/^[Bb]earer\s+(.+)$/)?.[1];
+  if (token === undefined) return undefined;
+  try {
+    return decodeJwt(token)['scope'] !== undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Verifies the `Authorization` header of a request whose parsed body is `body`.
  *
- * - Returns `AuthenticatedRequest` on success.
- * - Throws the original `AuthError` from the verifier on failure (caller maps
- *   to the wire via `mapDomainError`). Infrastructure failures propagate as they are.
- * - ADR-026: a credential with a `scope` (enrollment) is authentic but covers no MCP
- *   operation yet, so it fails with INSUFFICIENT_PRIVILEGE{scoped_credential} on every
- *   method. PRY-091 narrows this to let it reach `register_session` and `server/discover`.
+ * - `register_session` with a Bearer without `scope` is a renewal: the Bearer is the
+ *   holder proof and goes to `verifyRenewalBearer` (accepted expired inside the window).
+ * - Everything else goes to `verify`. An enrollment credential (`scope = enroll`) then
+ *   passes only for `register_session` and `server/discover`; any other operation fails
+ *   with INSUFFICIENT_PRIVILEGE{scoped_credential} (wire 403, -32006).
+ * - Throws the original `AuthError` on failure (caller maps it to the wire via
+ *   `mapDomainError`). Infrastructure failures propagate as they are.
  */
 export async function verifyBearerHeader(
-  verifier: Pick<Verifier, 'verify'>,
+  verifier: Pick<Verifier, 'verify' | 'verifyRenewalBearer'>,
   authorizationHeader: string | undefined,
+  body: unknown,
 ): Promise<AuthenticatedRequest> {
+  const operation = requestOperation(body);
+  if (
+    operation === `tools_call:${REGISTER_SESSION_TOOL}` &&
+    bearerHasScope(authorizationHeader) === false
+  ) {
+    return { identity: await verifier.verifyRenewalBearer(authorizationHeader) };
+  }
   const identity = await verifier.verify(authorizationHeader);
-  if (identity.snapshot.scope !== undefined) {
+  if (identity.snapshot.scope !== undefined && !ENROLL_ALLOWED_OPERATIONS.has(operation)) {
     throw new AuthError('INSUFFICIENT_PRIVILEGE', { subCode: 'scoped_credential' });
   }
   return { identity };

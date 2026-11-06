@@ -310,6 +310,9 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     participantsRepo,
     hiveStableIdentifier: hiveRow.id,
     logger,
+    // ADR-026: verifyRenewalBearer, the holder proof of a register_session renewal.
+    db,
+    holderProofWindowDays,
   });
 
   // 3. Cell Store.

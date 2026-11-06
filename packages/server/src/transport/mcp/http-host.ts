@@ -29,7 +29,12 @@ import { getRequestIdFromLogger, type Logger } from '#observability/logger.js';
 import { attachRequestIdHook } from '#observability/request-id.js';
 import type { Database } from '#persistence/schema.js';
 
-import { toAuthInfo, verifyBearerHeader, type LastConnectedRefresher } from './auth-binding.js';
+import {
+  requestOperation,
+  toAuthInfo,
+  verifyBearerHeader,
+  type LastConnectedRefresher,
+} from './auth-binding.js';
 import { MCP_ERR_FORBIDDEN, MCP_ERR_INTERNAL } from './error-codes.js';
 import { mapDomainError } from './error-mapper.js';
 import { isAllowedByOriginGuard } from './origin-guard.js';
@@ -78,7 +83,7 @@ export interface ListenBinding {
 
 export interface HttpHostDeps {
   mcpTransport: McpTransport;
-  verifier: Pick<Verifier, 'verify'>;
+  verifier: Pick<Verifier, 'verify' | 'verifyRenewalBearer'>;
   lastConnected: LastConnectedRefresher;
   db: Kysely<Database>;
   signingKeysProvider: () => Iterable<SigningKey>;
@@ -174,23 +179,38 @@ export function createHttpHost(deps: HttpHostDeps, options: HttpHostOptions = {}
       deps.logger.warn({ event: 'mcp_origin_rejected' }, 'origin or host not allowed');
       return reply.code(403).send();
     }
+  });
+
+  // The Bearer is checked once the body is parsed: the scope binding and the renewal
+  // route of `register_session` depend on the method and tool the body asks for.
+  app.addHook('preHandler', async (req, reply) => {
+    if (req.method !== 'POST' || req.routeOptions.url !== mcpPath) return;
 
     try {
-      const auth = await verifyBearerHeader(deps.verifier, headerString(req.headers.authorization));
+      const auth = await verifyBearerHeader(
+        deps.verifier,
+        headerString(req.headers.authorization),
+        req.body,
+      );
       identities.set(req, auth.identity);
-      deps.lastConnected.refresh(auth.identity);
+      // An enrollment credential is a Hivekeeper's; a renewal stamps the Agent itself.
+      if (auth.identity.snapshot.scope === undefined && auth.identity.snapshot.renewal !== true) {
+        deps.lastConnected.refresh(auth.identity);
+      }
     } catch (err) {
       const mapped = mapDomainError(err);
+      const outOfScope = isAuthError(err) && err.subCode === 'scoped_credential';
       deps.logger.warn(
         {
           event: 'mcp_auth_failed',
           domainCode: mapped.domainCode,
           subCode: mapped.subCode,
+          ...(outOfScope && { operation: requestOperation(req.body) }),
         },
         mapped.wire.message,
       );
       // An authentic credential outside its scope is a 403, not a 401 (ADR-026).
-      if (isAuthError(err) && err.subCode === 'scoped_credential') {
+      if (outOfScope) {
         return reply
           .code(403)
           .type('application/json')
