@@ -8,10 +8,11 @@ import type { Command } from 'commander';
 
 import { EXIT_INTERRUPTED } from '#error/exit-codes.js';
 
-import { WatchError, mapWatchError } from './errors.js';
+import { mapWatchError } from './errors.js';
 import { resolveWatchInput } from './input.js';
 import { runWatchOnce } from './run-once.js';
 import { runWatch } from './run-watch.js';
+import { runAttach } from './run-attach.js';
 import { runHarness } from './run-harness.js';
 import { isSessionMode, resolveSessionWatchInput } from './session-input.js';
 
@@ -116,10 +117,10 @@ export function registerWatchCommand(program: Command, hooks: WatchCommandHooks)
         if (isSessionMode(raw)) {
           const input = resolveSessionWatchInput(raw, process.env);
           const sessionIo = { ...io, cwd: process.cwd(), home: homedir() };
-          if (input.kind !== 'harness') {
-            throw new WatchError('WATCH_INVALID_OPTION', '--attach-session is not available yet');
-          }
-          code = await runHarness(input, sessionIo);
+          code =
+            input.kind === 'harness'
+              ? await runHarness(input, sessionIo)
+              : await runAttach(input, sessionIo);
         } else {
           const input = resolveWatchInput(raw, process.env);
           code = input.once ? await runWatchOnce(input, io) : await runWatch(input, io);
