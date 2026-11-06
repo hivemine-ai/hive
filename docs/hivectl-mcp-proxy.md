@@ -51,6 +51,8 @@ Everything lives under `~/.config/hive/` (or `HIVE_CONFIG_DIR`), never inside th
 | `state/pid-map/<claudePid>.json`         | Written by the plugin hook; read by the proxy.                                                 |
 | `state/proxies/<claudePid>.json`         | Written by the proxy: handle, socket path, registered, name.                                   |
 
+The lock on `state/tokens/` is an advisory POSIX lock taken through SQLite. It is reliable on local disks; on a home directory mounted over NFS or another network filesystem, locks may not be enforced across machines or may be dropped, so two sessions could both use one name. Keep `HIVE_CONFIG_DIR` on a local disk.
+
 ## Error codes
 
 `session_status.last_error.code` and the error of `register_session`:
