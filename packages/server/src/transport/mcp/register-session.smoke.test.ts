@@ -313,6 +313,7 @@ describe(`register_session over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () =>
 
       const outcome = await registerRaw(world, jwt, { name: 'worker-a', description: DESCRIPTION });
 
+      expect(outcome.status).toBe(200);
       expect(outcome.error).toEqual({ code: -32008, message: 'name taken' });
     });
 
