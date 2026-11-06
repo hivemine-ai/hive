@@ -70,6 +70,7 @@ export type ReverifyStreamResult =
         | 'credential_revoked'
         | 'participant_not_found'
         | 'participant_suspended'
+        | 'participant_retired'
         | 'participant_revoked';
     };
 
@@ -282,6 +283,7 @@ export function createVerifier(deps: VerifierDeps): Verifier {
       const state =
         participant.kind === 'hivekeeper' ? participant.hivekeeper.state : participant.agent.state;
       if (state === 'suspended') return { ok: false, reason: 'participant_suspended' };
+      if (state === 'retired') return { ok: false, reason: 'participant_retired' };
       if (state === 'revoked') return { ok: false, reason: 'participant_revoked' };
       return { ok: true };
     },

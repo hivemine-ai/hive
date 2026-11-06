@@ -12,6 +12,8 @@ import { HIVE_VERSION } from '@hive/shared';
 import { runAuditQuery } from './commands/audit/query.js';
 import { runCreateAgent } from './commands/agent/create.js';
 import { runListAgents } from './commands/agent/list.js';
+import type { AgentState } from './commands/agent/list.js';
+import { runReleaseAgent } from './commands/agent/release.js';
 import { runRevokeAgent } from './commands/agent/revoke.js';
 import { registerConfigGroup } from './commands/config/index.js';
 import { runIssueCredential } from './commands/credential/issue.js';
@@ -43,6 +45,7 @@ import {
   listCredentialsSchema,
   listKeepersSchema,
   migrateSchema,
+  releaseAgentSchema,
   revokeAgentSchema,
   revokeCredentialSchema,
   rotateCredentialSchema,
@@ -376,7 +379,7 @@ export function buildProgram(): BuildProgramResult {
     .description('List Agents in the Hive.')
     .option('--owner <ref>', 'restrict to one owner (email or UUIDv7)')
     .option('--type <type>', "'worker' or 'scout'")
-    .option('--state <state>', "'active' | 'suspended' | 'revoked'")
+    .option('--state <state>', "'active' | 'suspended' | 'retired' | 'revoked'")
     .option('--limit <n>', 'maximum rows per page', '50')
     .option('--cursor <cursor>', 'opaque pagination cursor from a previous page')
     .action(async (cmdOpts: Record<string, unknown>) => {
@@ -391,8 +394,7 @@ export function buildProgram(): BuildProgramResult {
             globals: s.globals,
             owner: asOptionalString(cmdOpts['owner']),
             type: typeStr === undefined ? undefined : (typeStr as 'worker' | 'scout'),
-            state:
-              stateStr === undefined ? undefined : (stateStr as 'active' | 'suspended' | 'revoked'),
+            state: stateStr === undefined ? undefined : (stateStr as AgentState),
             limit: asOptionalNumber(cmdOpts['limit']),
             cursor: asOptionalString(cmdOpts['cursor']),
           });
@@ -415,6 +417,23 @@ export function buildProgram(): BuildProgramResult {
           return runRevokeAgent(runtime, { globals: s.globals, agentRef });
         },
         (value, mode) => formatOutput(value, { mode, schema: revokeAgentSchema }),
+      );
+    });
+
+  agent
+    .command('release <agent-ref>')
+    .description(
+      'Free the name of a session agent: revoke every Worker token of its holder (owner-only: --operator-id must be the owner). Requires --yes.',
+    )
+    .action(async (agentRef: string) => {
+      const s = state();
+      await runHandler(
+        s,
+        async () => {
+          const runtime = await getRuntime(s.logger);
+          return runReleaseAgent(runtime, { globals: s.globals, agentRef });
+        },
+        (value, mode) => formatOutput(value, { mode, schema: releaseAgentSchema }),
       );
     });
 

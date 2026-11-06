@@ -93,17 +93,21 @@ export const listAgentsSchema: TableSchema<{
   id: string;
   name: string;
   type: string;
+  origin: string;
   ownerId: string;
   state: string;
   capabilities: string[];
+  lastConnectedAt: Date | null;
   createdAt: Date;
 }> = [
   { header: 'id', accessor: (r) => r.id },
   { header: 'name', accessor: (r) => r.name },
   { header: 'type', accessor: (r) => r.type },
+  { header: 'origin', accessor: (r) => r.origin },
   { header: 'ownerId', accessor: (r) => r.ownerId },
   { header: 'state', accessor: (r) => r.state },
   { header: 'capabilities', accessor: (r) => r.capabilities, maxWidth: 32 },
+  { header: 'lastConnectedAt', accessor: (r) => r.lastConnectedAt ?? '' },
   { header: 'createdAt', accessor: (r) => r.createdAt },
 ];
 
@@ -165,6 +169,16 @@ export const revokeCredentialSchema: TableSchema<{
   { header: 'revokedJti', accessor: (r) => r.revokedJti },
   { header: 'revokedTokens', accessor: (r) => String(r.revokedTokens) },
   { header: 'revokedAgents', accessor: (r) => String(r.revokedAgentIds.length) },
+];
+
+export const releaseAgentSchema: TableSchema<{
+  agentId: string;
+  revokedHolderTokens: number;
+  message: string;
+}> = [
+  { header: 'agentId', accessor: (r) => r.agentId },
+  { header: 'revokedHolderTokens', accessor: (r) => r.revokedHolderTokens },
+  { header: 'message', accessor: (r) => r.message },
 ];
 
 export const revokeAgentSchema: TableSchema<{ revokedAgentId: string }> = [

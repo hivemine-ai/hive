@@ -306,3 +306,35 @@ describe('resolveWireConfigFromEnv — register_session guards (ADR-026)', () =>
     expect(() => resolveWireConfigFromEnv({ [name]: value })).toThrow(name);
   });
 });
+
+describe('resolveWireConfigFromEnv — enrollment retention (PRY-094)', () => {
+  it('defaults to 30 days of retention, 60 of grace and an hourly run', () => {
+    expect(resolveWireConfigFromEnv({})).toMatchObject({
+      enrollmentRetentionDays: 30,
+      enrollmentGraceDays: 60,
+      enrollmentRetentionIntervalSeconds: 3600,
+    });
+  });
+
+  it('reads the env vars, accepts 0 and rejects negatives or fractions by name', () => {
+    expect(
+      resolveWireConfigFromEnv({
+        HIVE_ENROLLMENT_RETENTION_DAYS: '0',
+        HIVE_ENROLLMENT_GRACE_DAYS: '0',
+        HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS: '0',
+      }),
+    ).toMatchObject({
+      enrollmentRetentionDays: 0,
+      enrollmentGraceDays: 0,
+      enrollmentRetentionIntervalSeconds: 0,
+    });
+    for (const name of [
+      'HIVE_ENROLLMENT_RETENTION_DAYS',
+      'HIVE_ENROLLMENT_GRACE_DAYS',
+      'HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS',
+    ]) {
+      expect(() => resolveWireConfigFromEnv({ [name]: '-1' })).toThrow(name);
+      expect(() => resolveWireConfigFromEnv({ [name]: '1.5' })).toThrow(name);
+    }
+  });
+});

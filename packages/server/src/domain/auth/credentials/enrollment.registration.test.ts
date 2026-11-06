@@ -12,6 +12,9 @@ import { destroyWorld, seedWorld, type SeedWorld } from '../test-helpers.js';
 import type { IdentityContext } from '../types.js';
 import type { CellsRepoHook } from '#domain/auth/participants/cells-hook.js';
 import { createParticipantsReadRepo } from '#domain/auth/participants/repository.js';
+import { createEnrollmentRetention } from '#domain/auth/participants/retention.js';
+import { createParticipantStateSignal } from '#domain/auth/participants/state-signal.js';
+import type { ParticipantStateChange } from '#domain/auth/participants/state-signal.js';
 import { dateToIso } from '#persistence/type-mappers.js';
 import { createBlocklist } from './blocklist.js';
 import { createEnrollment } from './enrollment.js';
@@ -49,17 +52,52 @@ function fullSnapshot(identity: IdentityContext): IdentityContext['snapshot'] {
   return rest;
 }
 
+/**
+ * Postgres only: retires the Agent in a transaction that holds the row uncommitted while
+ * `during` starts, then commits. `during` reads the Agent as active and its write waits.
+ */
+async function retireWhile<T>(
+  db: SeedWorld['db'],
+  agentId: string,
+  at: Date,
+  during: () => Promise<T>,
+): Promise<PromiseSettledResult<T>> {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let locked!: () => void;
+  const rowLocked = new Promise<void>((resolve) => (locked = resolve));
+  const retire = db.transaction().execute(async (trx) => {
+    await trx
+      .updateTable('agents')
+      .set({ state: 'retired', retired_at: dateToIso(at) })
+      .where('id', '=', agentId)
+      .execute();
+    locked();
+    await gate;
+  });
+  await rowLocked;
+  const settled = Promise.allSettled([during()]);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  release();
+  await retire;
+  return (await settled)[0];
+}
+
 describe(`registration primitives (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
   let world: SeedWorld;
   let clock: Date;
   let enrollment: Enrollment;
   let verifier: Verifier;
   let createdCells: string[];
+  let stateChanges: ParticipantStateChange[];
 
   beforeEach(async () => {
     world = await seedWorld({ pgUrl: PG_URL });
     clock = T0;
     createdCells = [];
+    stateChanges = [];
+    const stateSignal = createParticipantStateSignal();
+    stateSignal.onParticipantStateChanged((change) => stateChanges.push(change));
     const cellsHook: CellsRepoHook = {
       createCell: (_executor, input) => {
         createdCells.push(input.ownerId);
@@ -80,6 +118,7 @@ describe(`registration primitives (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
       hiveMaxAgents: 3,
       workerTokenTtlMs: HOUR_MS,
       cellsHook,
+      stateSignal,
     });
     verifier = createVerifier({
       signingKeys: new Map([[world.signingKey.kid, world.signingKey]]),
@@ -310,6 +349,36 @@ describe(`registration primitives (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
       await expectAuthError(claim(agent.id), 'INVALID_STATE_TRANSITION');
     });
 
+    // PRY-094: retirement vs claim. SQLite serializes writers, so only Postgres races.
+    it.runIf(PG_URL)(
+      'loses to a retirement that commits while it waits: no token, the Agent stays retired',
+      async () => {
+        const identity = await enrollmentIdentity();
+        const { agent } = await create(identity, 'docs-bot');
+
+        const outcome = await retireWhile(world.db, agent.id, clock, () =>
+          enrollment.claimEnrolledAgent(
+            { agentId: agent.id, description: 'x', enrolledVia: identity.snapshot.credentialJti },
+            identity,
+          ),
+        );
+
+        expect(outcome.status).toBe('rejected');
+        const err = (outcome as PromiseRejectedResult).reason as AuthError;
+        expect([err.code, err.subCode]).toEqual([
+          'INVALID_STATE_TRANSITION',
+          'claim_requires_active_enrollment_agent',
+        ]);
+        const row = await world.db
+          .selectFrom('agents')
+          .select(['state', 'last_worker_jti'])
+          .where('id', '=', agent.id)
+          .executeTakeFirstOrThrow();
+        expect(row.state).toBe('retired');
+        expect(await countActive(identity.snapshot.credentialJti)).toBe(0);
+      },
+    );
+
     it('refuses an Agent of another owner', async () => {
       const mine = await enrollmentIdentity();
       const { agent } = await create(mine, 'docs-bot');
@@ -323,6 +392,186 @@ describe(`registration primitives (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
         'not_enrollment_owner',
       );
     });
+  });
+
+  describe('reviveRetiredAgent (PRY-094)', () => {
+    async function retire(agentId: string, at: Date = clock): Promise<void> {
+      await world.db
+        .updateTable('agents')
+        .set({ state: 'retired', retired_at: dateToIso(at) })
+        .where('id', '=', agentId)
+        .execute();
+    }
+
+    function revive(identity: IdentityContext, agentId: string, description = 'is back') {
+      return enrollment.reviveRetiredAgent(
+        {
+          agentId,
+          description,
+          capabilities: ['back'],
+          enrolledVia: identity.snapshot.credentialJti,
+        },
+        identity,
+      );
+    }
+
+    it('reactivates the same Agent and Cell, supersedes the old tokens and signals active', async () => {
+      const first = await enrollmentIdentity();
+      const { agent, token: oldToken } = await create(first, 'docs-bot');
+      await retire(agent.id);
+      const second = await enrollmentIdentity();
+
+      const { agent: revived, token } = await revive(second, agent.id);
+
+      expect(revived).toMatchObject({
+        id: agent.id,
+        state: 'active',
+        retiredAt: null,
+        origin: 'enrollment',
+        enrolledVia: second.snapshot.credentialJti,
+        description: 'is back',
+        capabilities: ['back'],
+        lastConnectedAt: clock,
+        lastWorkerJti: token.jti,
+      });
+      expect(createdCells).toEqual([agent.id]);
+      expect(await revocationReason(oldToken.jti)).toBe('superseded');
+      const identity = await verifier.verify(`Bearer ${token.jwt}`);
+      expect(identity.participantId).toBe(agent.id);
+      await expectAuthError(verifier.verify(`Bearer ${oldToken.jwt}`), 'CREDENTIAL_REVOKED');
+      expect(stateChanges).toEqual([{ participantId: agent.id, newState: 'active' }]);
+    });
+
+    it('checks the quota like a create: a full enrollment leaves the Agent retired', async () => {
+      const identity = await enrollmentIdentity({ maxAgents: 1 });
+      const { agent } = await create(identity, 'bot-a');
+      await retire(agent.id);
+      await create(identity, 'bot-b');
+
+      const err = await expectAuthError(revive(identity, agent.id), 'ENROLLMENT_QUOTA_EXCEEDED');
+
+      expect(err.limit).toBe(1);
+      const row = await world.db
+        .selectFrom('agents')
+        .select('state')
+        .where('id', '=', agent.id)
+        .executeTakeFirstOrThrow();
+      expect(row.state).toBe('retired');
+      expect(stateChanges).toEqual([]);
+    });
+
+    it('refuses an Agent that is not retired, or not of enrollment origin', async () => {
+      const identity = await enrollmentIdentity({}, world.adminHivekeeperId);
+      const { agent } = await create(identity, 'docs-bot');
+      await expectAuthError(
+        revive(identity, agent.id),
+        'INVALID_STATE_TRANSITION',
+        'revive_requires_retired_enrollment_agent',
+      );
+      await expectAuthError(
+        revive(identity, world.workerAgentId),
+        'INVALID_STATE_TRANSITION',
+        'revive_requires_retired_enrollment_agent',
+      );
+    });
+
+    it('refuses an Agent of another owner', async () => {
+      const mine = await enrollmentIdentity();
+      const { agent } = await create(mine, 'docs-bot');
+      await retire(agent.id);
+      const other = await enrollmentIdentity({}, world.adminHivekeeperId);
+      await expectAuthError(
+        revive(other, agent.id),
+        'INSUFFICIENT_PRIVILEGE',
+        'not_enrollment_owner',
+      );
+    });
+
+    // Revival vs end of grace on the same retired Agent: exactly one wins.
+    it('races the grace pass of the retention job: exactly one winner', async () => {
+      const identity = await enrollmentIdentity();
+      const { agent } = await create(identity, 'docs-bot');
+      await retire(agent.id, new Date(T0.getTime() - 61 * DAY_MS));
+      const retention = createEnrollmentRetention({
+        db: world.db,
+        retentionDays: 0,
+        graceDays: 60,
+      });
+
+      const [revival, run] = await Promise.allSettled([
+        revive(identity, agent.id),
+        retention.runEnrollmentRetention(clock, { kind: 'system' }, { isHolderLive: () => false }),
+      ]);
+
+      expect(run.status).toBe('fulfilled');
+      const { revokedAgentIds } = (run as PromiseFulfilledResult<{ revokedAgentIds: string[] }>)
+        .value;
+      const row = await world.db
+        .selectFrom('agents')
+        .select('state')
+        .where('id', '=', agent.id)
+        .executeTakeFirstOrThrow();
+      if (revival.status === 'fulfilled') {
+        expect(revokedAgentIds).toEqual([]);
+        expect(row.state).toBe('active');
+      } else {
+        const err = revival.reason as AuthError;
+        expect([err.code, err.subCode]).toEqual([
+          'INVALID_STATE_TRANSITION',
+          'revive_requires_retired_enrollment_agent',
+        ]);
+        expect(revokedAgentIds).toEqual([agent.id]);
+        expect(row.state).toBe('revoked');
+      }
+    });
+
+    // Postgres: the grace revocation holds the row uncommitted; the revival read it as
+    // retired and its conditional UPDATE re-evaluates after the commit.
+    it.runIf(PG_URL)(
+      'loses to a grace revocation that commits while it waits: no token issued',
+      async () => {
+        const identity = await enrollmentIdentity();
+        const { agent } = await create(identity, 'docs-bot');
+        await retire(agent.id);
+        const tokensBefore = await world.db
+          .selectFrom('credentials')
+          .select('jti')
+          .where('participant_id', '=', agent.id)
+          .execute();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        let locked!: () => void;
+        const rowLocked = new Promise<void>((resolve) => (locked = resolve));
+        const grace = world.db.transaction().execute(async (trx) => {
+          await trx
+            .updateTable('agents')
+            .set({ state: 'revoked', revoked_at: dateToIso(clock), retired_at: null })
+            .where('id', '=', agent.id)
+            .execute();
+          locked();
+          await gate;
+        });
+        await rowLocked;
+        const revival = Promise.allSettled([revive(identity, agent.id)]);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        release();
+        await grace;
+        const [outcome] = await revival;
+
+        expect(outcome?.status).toBe('rejected');
+        const err = (outcome as PromiseRejectedResult).reason as AuthError;
+        expect([err.code, err.subCode]).toEqual([
+          'INVALID_STATE_TRANSITION',
+          'revive_requires_retired_enrollment_agent',
+        ]);
+        const tokensAfter = await world.db
+          .selectFrom('credentials')
+          .select('jti')
+          .where('participant_id', '=', agent.id)
+          .execute();
+        expect(tokensAfter).toHaveLength(tokensBefore.length);
+      },
+    );
   });
 
   describe('revokeWorkerTokens', () => {
@@ -352,6 +601,77 @@ describe(`registration primitives (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
         code: 'CREDENTIAL_REVOKED',
       });
     });
+
+    // PRY-094: hivectl agent release racing a renewal of the holder. Whichever commits
+    // first, no token of the holder survives: the renewal loses its CAS, or its new token
+    // is in the blocklist.
+    it('races a renewal: the holder ends with no usable token', async () => {
+      const identity = await enrollmentIdentity();
+      const { agent, token: first } = await create(identity, 'docs-bot');
+
+      const [renewal, released] = await Promise.allSettled([
+        enrollment.renewWorkerToken({ agentId: agent.id, presentedJti: first.jti }),
+        enrollment.revokeWorkerTokens(
+          { agentId: agent.id, revokedBy: world.nonAdminHivekeeperId, reason: 'agent_release' },
+          { kind: 'system' },
+        ),
+      ]);
+
+      expect(released.status).toBe('fulfilled');
+      expect(await revocationReason(first.jti)).toBe('agent_release');
+      if (renewal.status === 'fulfilled') {
+        expect(await revocationReason(renewal.value.jti)).toBe('agent_release');
+      } else {
+        const err = renewal.reason as AuthError;
+        expect([err.code, err.subCode]).toEqual([
+          'CREDENTIAL_INAUTHENTIC',
+          'holder_proof_superseded',
+        ]);
+      }
+      const row = await world.db
+        .selectFrom('agents')
+        .select('last_worker_jti')
+        .where('id', '=', agent.id)
+        .executeTakeFirstOrThrow();
+      expect(row.last_worker_jti).toBeNull();
+    });
+
+    // Postgres: a renewal holds the Agent row with its new token uncommitted while the
+    // release starts; the release must still blocklist that token once it commits.
+    it.runIf(PG_URL)(
+      'blocklists a token whose renewal commits while the release waits',
+      async () => {
+        const identity = await enrollmentIdentity();
+        const { agent, token: first } = await create(identity, 'docs-bot');
+        let renewedJti!: string;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        let locked!: () => void;
+        const rowLocked = new Promise<void>((resolve) => (locked = resolve));
+        const renewal = world.db.transaction().execute(async (trx) => {
+          const token = await enrollment.issueWorkerToken(
+            { agentId: agent.id, mode: 'renew', presentedJti: first.jti },
+            trx,
+          );
+          renewedJti = token.jti;
+          locked();
+          await gate;
+        });
+        await rowLocked;
+
+        const releasing = enrollment.revokeWorkerTokens(
+          { agentId: agent.id, revokedBy: world.nonAdminHivekeeperId, reason: 'agent_release' },
+          { kind: 'system' },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        release();
+        await renewal;
+        const result = await releasing;
+
+        expect(result.revokedTokenJtis).toContain(renewedJti);
+        expect(await revocationReason(renewedJti)).toBe('agent_release');
+      },
+    );
 
     it('is idempotent: a second call returns no tokens', async () => {
       const identity = await enrollmentIdentity();

@@ -23,9 +23,13 @@ export interface ListedAgent {
   id: UUIDv7;
   name: string;
   type: 'worker' | 'scout';
+  // ADR-026: retired Agents are always listed, unlike list_agents over MCP.
+  origin: 'manual' | 'enrollment';
+  enrolledVia: UUIDv7 | null;
   ownerId: UUIDv7;
   state: AgentState;
   capabilities: string[];
+  lastConnectedAt: Date | null;
   createdAt: Date;
 }
 
@@ -49,9 +53,12 @@ export async function runListAgents(
       id: a.id,
       name: a.name,
       type: a.type,
+      origin: a.origin,
+      enrolledVia: a.enrolledVia,
       ownerId: a.ownerId,
       state: a.state,
       capabilities: a.capabilities,
+      lastConnectedAt: a.lastConnectedAt,
       createdAt: a.createdAt,
     })),
     nextCursor: result.nextCursor !== null ? serializeCursor(result.nextCursor) : null,

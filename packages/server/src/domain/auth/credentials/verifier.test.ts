@@ -145,18 +145,21 @@ describe('verifier', () => {
       });
     });
 
-    it.each(['suspended', 'revoked'] as const)('participant_%s by live state', async (state) => {
-      const verifier = await buildVerifier();
-      await world.db
-        .updateTable('agents')
-        .set({ state })
-        .where('id', '=', world.workerAgentId)
-        .execute();
-      await expect(verifier.reverifyStream(input())).resolves.toEqual({
-        ok: false,
-        reason: `participant_${state}`,
-      });
-    });
+    it.each(['suspended', 'retired', 'revoked'] as const)(
+      'participant_%s by live state',
+      async (state) => {
+        const verifier = await buildVerifier();
+        await world.db
+          .updateTable('agents')
+          .set({ state, retired_at: state === 'retired' ? new Date().toISOString() : null })
+          .where('id', '=', world.workerAgentId)
+          .execute();
+        await expect(verifier.reverifyStream(input())).resolves.toEqual({
+          ok: false,
+          reason: `participant_${state}`,
+        });
+      },
+    );
 
     it('expiry wins over a revocation that happens at the same time', async () => {
       const verifier = await buildVerifier();

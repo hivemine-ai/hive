@@ -23,6 +23,8 @@ export const ListAgentsInputSchema = z
         type: z.enum(['worker', 'scout']).optional(),
         owner: z.string().optional(),
         capability: z.string().optional(),
+        // ADR-026 decision 9.13: retired Agents are hidden unless asked for.
+        include_retired: z.boolean().optional(),
       })
       .optional(),
     pagination: z
@@ -99,9 +101,12 @@ export function createListAgentsHandler(deps: ListAgentsDeps) {
     // `undefined` to optional fields (per lesson PRY-002/004).
     const repoFilter: Parameters<typeof deps.participantsRepo.listAgents>[0] = {
       hiveId,
-      // Do not pass state to the repo — we want both 'active' and 'suspended'.
-      // Revoked agents are excluded post-fetch in Step 6 (defense in depth),
-      // since the repo returns all states when state filter is absent.
+      // Active and suspended Agents, plus retired ones with include_retired (ADR-026).
+      // Revoked agents are also excluded post-fetch in Step 6 (defense in depth).
+      states:
+        input.filter?.include_retired === true
+          ? ['active', 'suspended', 'retired']
+          : ['active', 'suspended'],
       pagination: { cursor, limit },
     };
     if (ownerId !== undefined) repoFilter.ownerId = ownerId;

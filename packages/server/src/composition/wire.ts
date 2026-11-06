@@ -35,6 +35,7 @@ import {
   loadAllKeypairs,
   createBlocklist,
   createEnrollment,
+  createEnrollmentRetention,
   createRevocationPurger,
   createVerifier,
 } from '#domain/auth/index.js';
@@ -68,6 +69,8 @@ import { createDb, resolveDbConfigFromEnv } from '#persistence/db.js';
 import type { Database } from '#persistence/schema.js';
 
 import { createCellsHookAdapter } from './cells-hook-adapter.js';
+import { createEnrollmentRetentionJob } from './enrollment-retention-job.js';
+import type { EnrollmentRetentionJob } from './enrollment-retention-job.js';
 import { createNotificationsForProduction } from './notifications-factory.js';
 import type { PresenceRegistry } from '#domain/notifications/index.js';
 import {
@@ -133,6 +136,12 @@ export interface WireConfig {
   enrollmentRejectAlertThreshold?: number;
   /** From HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES. Default 10. */
   enrollmentRejectAlertWindowMinutes?: number;
+  /** From HIVE_ENROLLMENT_RETENTION_DAYS. Default 30. 0 never retires. */
+  enrollmentRetentionDays?: number;
+  /** From HIVE_ENROLLMENT_GRACE_DAYS. Default 60. 0 keeps retired Agents indefinitely. */
+  enrollmentGraceDays?: number;
+  /** From HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS. Default 3600. 0 never schedules the job. */
+  enrollmentRetentionIntervalSeconds?: number;
 }
 
 export interface WireDeps {
@@ -152,6 +161,8 @@ export interface Wire {
   _cellEvents(): ReturnType<typeof createCellEvents>;
   /** Test/diagnostic — exposes the presence registry (holder liveness). */
   _presenceRegistry(): PresenceRegistry;
+  /** Test/diagnostic — the scheduled enrollment retention job (`runOnce(now)`). */
+  _enrollmentRetention(): EnrollmentRetentionJob;
 }
 
 export function resolveWireConfigFromEnv(
@@ -184,6 +195,24 @@ export function resolveWireConfigFromEnv(
       parseIntEnv(env['HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES'], 10, {
         name: 'HIVE_ENROLLMENT_REJECT_ALERT_WINDOW_MINUTES',
         min: 1,
+      }),
+    enrollmentRetentionDays:
+      overrides.enrollmentRetentionDays ??
+      parseIntEnv(env['HIVE_ENROLLMENT_RETENTION_DAYS'], 30, {
+        name: 'HIVE_ENROLLMENT_RETENTION_DAYS',
+        min: 0,
+      }),
+    enrollmentGraceDays:
+      overrides.enrollmentGraceDays ??
+      parseIntEnv(env['HIVE_ENROLLMENT_GRACE_DAYS'], 60, {
+        name: 'HIVE_ENROLLMENT_GRACE_DAYS',
+        min: 0,
+      }),
+    enrollmentRetentionIntervalSeconds:
+      overrides.enrollmentRetentionIntervalSeconds ??
+      parseIntEnv(env['HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS'], 3600, {
+        name: 'HIVE_ENROLLMENT_RETENTION_INTERVAL_SECONDS',
+        min: 0,
       }),
     httpHost: overrides.httpHost ?? env['HIVE_MCP_HTTP_HOST'] ?? '0.0.0.0',
     httpPort:
@@ -423,6 +452,11 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     cellsHook: createCellsHookAdapter(cellsRepo),
     stateSignal: participantStateSignal,
   });
+  const auditRecorder = createAuditRecorder({
+    auditRepo: createAuditRepo(db),
+    logger,
+    onAfterRecord: () => snapshotWriter.writeRefresh(),
+  });
 
   // ADR-026: the Auth primitives of register_session. New Worker tokens are signed with
   // the active key, as hivectl does.
@@ -434,6 +468,8 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     logger,
     dialect: dbConfig.dialect,
     cellsHook: createCellsHookAdapter(cellsRepo),
+    // A revival signals 'active', which replays on the holder's open streams.
+    stateSignal: participantStateSignal,
     enrollmentTtlMs: enrollmentConfig.enrollmentTtlMs,
     hiveMaxAgents: enrollmentConfig.hiveMaxAgents,
     workerTokenTtlMs: cfg.workerTokenTtlMs,
@@ -460,11 +496,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       windowMinutes: cfg.enrollmentRejectAlertWindowMinutes,
     }),
     rejectAlertWindowMinutes: cfg.enrollmentRejectAlertWindowMinutes,
-    auditRecorder: createAuditRecorder({
-      auditRepo: createAuditRepo(db),
-      logger,
-      onAfterRecord: () => snapshotWriter.writeRefresh(),
-    }),
+    auditRecorder,
   });
 
   const listenStreams = createListenStreams({
@@ -479,6 +511,29 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
     leaseMs: cfg.listenLeaseMs > 0 ? cfg.listenLeaseMs : null,
   });
   listenStreamsRef = listenStreams;
+
+  // 13c. ADR-026 enrollment retention job. After the state signal wiring, so its
+  // 'retired' and 'revoked' transitions close streams; a live holder is never retired.
+  const enrollmentRetention = createEnrollmentRetention({
+    db,
+    retentionDays: cfg.enrollmentRetentionDays,
+    graceDays: cfg.enrollmentGraceDays,
+    holderProofWindowDays,
+    cellsHook: createCellsHookAdapter(cellsRepo),
+    stateSignal: participantStateSignal,
+    auditRecorder,
+    logger,
+  });
+  const enrollmentRetentionJob = createEnrollmentRetentionJob({
+    run: (now) =>
+      enrollmentRetention.runEnrollmentRetention(
+        now,
+        { kind: 'system' },
+        { isHolderLive: (agentId) => notifications.presenceRegistry.isHolderLive(agentId) },
+      ),
+    intervalSeconds: cfg.enrollmentRetentionIntervalSeconds,
+    logger,
+  });
 
   // 8. HTTP host.
   const httpHost = createHttpHost(
@@ -510,6 +565,7 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       listenStreams.start();
       warnIfAllowedHostsEmpty(logger, cfg.allowedHosts);
       revocationPurger.start();
+      enrollmentRetentionJob.start();
       await httpHost.start();
       logger.info(
         { event: 'wire_started', host: cfg.httpHost, port: httpHost.port(), mcpPath: cfg.mcpPath },
@@ -555,6 +611,16 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
       revocationPurger.stop();
       notifications.stop();
       const drainMs = Math.max(1, cfg.shutdownDrainTimeoutSeconds) * 1000;
+      // Cancels the timer and waits for a run in progress, bounded by the drain.
+      await stopWithDrainTimeout(enrollmentRetentionJob.stop(), drainMs, (err) => {
+        logger.warn(
+          {
+            event: 'wire_retention_stop_failed',
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'enrollment retention job stop failed',
+        );
+      });
       await stopWithDrainTimeout(httpHost.stop(), drainMs, (err) => {
         logger.error(
           { event: 'wire_stop_failed', err: err instanceof Error ? err.message : String(err) },
@@ -605,6 +671,10 @@ export async function buildWire(deps: WireDeps, overrides: WireConfig = {}): Pro
 
     _presenceRegistry() {
       return notifications.presenceRegistry;
+    },
+
+    _enrollmentRetention() {
+      return enrollmentRetentionJob;
     },
   };
 }

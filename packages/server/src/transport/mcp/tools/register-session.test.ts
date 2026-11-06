@@ -107,6 +107,9 @@ function build(existing: Agent | null = null, live = false) {
       claimEnrolledAgent: vi.fn(() =>
         Promise.resolve({ agent: agent(), token: token('claim-jti') }),
       ),
+      reviveRetiredAgent: vi.fn(() =>
+        Promise.resolve({ agent: agent(), token: token('revive-jti') }),
+      ),
       renewWorkerToken: vi.fn(() => Promise.resolve(token('renew-jti'))),
     },
     participantsRepo: {
@@ -273,6 +276,105 @@ describe('register_session — registration with the enrollment credential', () 
 
     await expectAuthError(handler(INPUT, enrollCtx()), 'CREDENTIAL_REVOKED');
     expect(deps.presenceRegistry.releaseClaim).toHaveBeenCalledWith(AGENT_ID, REQUEST_ID);
+  });
+
+  // PRY-094: the retired branch replaces the provisional INVALID_STATE_TRANSITION of PRY-091.
+  const RETIRED_AT = new Date('2026-10-01T00:00:00.000Z');
+
+  it('revives a retired Agent: reserves, then reviveRetiredAgent (outcome revived)', async () => {
+    const { deps, handler } = build(agent({ state: 'retired', retiredAt: RETIRED_AT }));
+    const ctx = enrollCtx();
+
+    const result = await handler(INPUT, ctx);
+
+    expect(deps.presenceRegistry.claimHolder).toHaveBeenCalledWith(AGENT_ID, REQUEST_ID);
+    expect(deps.enrollment.reviveRetiredAgent).toHaveBeenCalledWith(
+      { agentId: AGENT_ID, description: 'Works on the API', enrolledVia: ENROLLMENT_JTI },
+      ctx.identity,
+    );
+    expect(deps.enrollment.claimEnrolledAgent).not.toHaveBeenCalled();
+    expect(result.outcome).toBe('revived');
+    expect(result.output.token).toBe('jwt-revive-jti');
+    expect(deps.auditRecorder.recordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: 'agent_revived',
+        actorId: OWNER_ID,
+        actorKind: 'hivekeeper',
+        subjectId: AGENT_ID,
+        detail: {
+          enrolledVia: ENROLLMENT_JTI,
+          retiredAt: RETIRED_AT.toISOString(),
+          viaEnrollmentJti: ENROLLMENT_JTI,
+        },
+      }),
+    );
+  });
+
+  it('answers NAME_IN_USE for a retired Agent whose holder is still live', async () => {
+    const { deps, handler } = build(agent({ state: 'retired', retiredAt: RETIRED_AT }), true);
+
+    await expectAuthError(handler(INPUT, enrollCtx()), 'NAME_IN_USE');
+    expect(deps.enrollment.reviveRetiredAgent).not.toHaveBeenCalled();
+  });
+
+  it('releases the reservation when the revival fails on the quota, and counts the rejection', async () => {
+    const { deps, handler } = build(agent({ state: 'retired', retiredAt: RETIRED_AT }));
+    deps.enrollment.reviveRetiredAgent.mockRejectedValue(
+      new AuthError('ENROLLMENT_QUOTA_EXCEEDED', { limit: 1 }),
+    );
+
+    await expectAuthError(handler(INPUT, enrollCtx()), 'ENROLLMENT_QUOTA_EXCEEDED');
+    expect(deps.presenceRegistry.releaseClaim).toHaveBeenCalledWith(AGENT_ID, REQUEST_ID);
+  });
+
+  it('retired between the read and the claim: evaluated once more, it revives', async () => {
+    const { deps, handler } = build(agent());
+    deps.participantsRepo.findAgentByName
+      .mockResolvedValueOnce(agent())
+      .mockResolvedValueOnce(agent({ state: 'retired', retiredAt: RETIRED_AT }));
+    deps.enrollment.claimEnrolledAgent.mockRejectedValue(
+      new AuthError('INVALID_STATE_TRANSITION', {
+        subCode: 'claim_requires_active_enrollment_agent',
+      }),
+    );
+
+    const result = await handler(INPUT, enrollCtx());
+
+    expect(result.outcome).toBe('revived');
+    expect(deps.presenceRegistry.releaseClaim).toHaveBeenCalledOnce();
+    expect(deps.presenceRegistry.claimHolder).toHaveBeenCalledTimes(2);
+  });
+
+  it('revoked by the end of grace before the revival: evaluated once more, it creates', async () => {
+    const { deps, handler } = build(agent({ state: 'retired', retiredAt: RETIRED_AT }));
+    deps.participantsRepo.findAgentByName
+      .mockResolvedValueOnce(agent({ state: 'retired', retiredAt: RETIRED_AT }))
+      .mockResolvedValueOnce(null);
+    deps.enrollment.reviveRetiredAgent.mockRejectedValue(
+      new AuthError('INVALID_STATE_TRANSITION', {
+        subCode: 'revive_requires_retired_enrollment_agent',
+      }),
+    );
+
+    const result = await handler(INPUT, enrollCtx());
+
+    expect(result.outcome).toBe('created');
+  });
+
+  it('retries once only: a second state move propagates', async () => {
+    const { deps, handler } = build(agent());
+    deps.enrollment.claimEnrolledAgent.mockRejectedValue(
+      new AuthError('INVALID_STATE_TRANSITION', {
+        subCode: 'claim_requires_active_enrollment_agent',
+      }),
+    );
+
+    await expectAuthError(
+      handler(INPUT, enrollCtx()),
+      'INVALID_STATE_TRANSITION',
+      'claim_requires_active_enrollment_agent',
+    );
+    expect(deps.enrollment.claimEnrolledAgent).toHaveBeenCalledTimes(2);
   });
 
   it('propagates the NAME_IN_USE of a concurrent create that lost the unique index', async () => {
