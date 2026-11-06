@@ -61,6 +61,10 @@ export interface StatePaths {
   tokensDir(projectKey: string): string;
   tokenFile(projectKey: string, name: string): string;
   tokenLock(projectKey: string, name: string): string;
+  harnessDir: string;
+  harnessFile(id: string): string;
+  pidMapDir: string;
+  proxiesDir: string;
 }
 
 export function statePaths(root: string): StatePaths {
@@ -75,6 +79,10 @@ export function statePaths(root: string): StatePaths {
     tokensDir: (key) => join(state, 'tokens', key),
     tokenFile: (key, name) => join(state, 'tokens', key, `${fileSegment(name)}.json`),
     tokenLock: (key, name) => join(state, 'tokens', key, `${fileSegment(name)}.lock`),
+    harnessDir: join(state, 'harness'),
+    harnessFile: (id) => join(state, 'harness', `${id}.json`),
+    pidMapDir: join(state, 'pid-map'),
+    proxiesDir: join(state, 'proxies'),
   };
 }
 

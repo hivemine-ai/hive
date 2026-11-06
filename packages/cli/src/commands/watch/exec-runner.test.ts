@@ -23,7 +23,7 @@ function runner(script: string, extra: Partial<Parameters<typeof createExecRunne
     program: process.execPath,
     args: ['-e', script],
     baseEnv: { PATH: process.env['PATH'] ?? '' },
-    credential: 'super-secret-credential',
+    secrets: () => ['super-secret-credential'],
     stopTimeoutMs: 2000,
     stderr: (text) => stderr.push(text),
     ...extra,
@@ -42,7 +42,7 @@ describe('buildChildEnv', () => {
         LEAK: 'super-secret-credential',
       },
       event,
-      'super-secret-credential',
+      ['super-secret-credential'],
     );
     expect(env).toMatchObject({
       PATH: '/bin',
@@ -54,6 +54,36 @@ describe('buildChildEnv', () => {
     expect(env['HIVE_WATCH_CREDENTIAL_FILE']).toBeUndefined();
     expect(env['HIVE_WATCH_SERVER_URL']).toBeUndefined();
     expect(env['LEAK']).toBeUndefined();
+  });
+
+  it('drops every value that contains any of the secrets, whatever the variable is called', () => {
+    const env = buildChildEnv(
+      {
+        PLAIN: 'keep-me',
+        ENROLL: 'prefix-enroll.jwt.value-suffix',
+        TOKEN_NOW: 'worker.jwt.now',
+        HARMLESS_NAME: 'worker.jwt.now',
+        EMPTY: '',
+      },
+      event,
+      ['enroll.jwt.value', 'worker.jwt.now', ''],
+    );
+    expect(env['PLAIN']).toBe('keep-me');
+    expect(env['EMPTY']).toBe('');
+    expect(env['ENROLL']).toBeUndefined();
+    expect(env['TOKEN_NOW']).toBeUndefined();
+    expect(env['HARMLESS_NAME']).toBeUndefined();
+  });
+
+  it('sets the extra variables over inherited ones of the same name', () => {
+    const env = buildChildEnv(
+      { HIVE_HARNESS_SESSION: '/inherited', HIVE_MCP_CONFIG_FILE: '/inherited.json' },
+      event,
+      [],
+      { HIVE_HARNESS_SESSION: '/state/harness/abc.json' },
+    );
+    expect(env['HIVE_HARNESS_SESSION']).toBe('/state/harness/abc.json');
+    expect(env['HIVE_MCP_CONFIG_FILE']).toBeUndefined();
   });
 });
 
