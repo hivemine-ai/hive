@@ -464,6 +464,31 @@ describe(`retired Agents over HTTP (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
     });
   });
 
+  describe('a release of the holder tokens from another process', () => {
+    it('drops the live stream on the next re-verification, blocks the renewal and frees the name', async () => {
+      await start({ wire: { reverifyIntervalSeconds: 1 } });
+      const { jwt } = await issueEnrollment();
+      const registered = await register(jwt);
+      const holder = await open(registered.token);
+      const registry = world.wire._presenceRegistry();
+      await expect.poll(() => registry.isHolderLive(registered.agent_id)).toBe(true);
+      expect((await registerRaw(world, jwt)).error?.code).toBe(-32007);
+
+      // What `hivectl agent release` runs, in its own process.
+      const released = await enrollment.revokeWorkerTokens(
+        { agentId: registered.agent_id, revokedBy: world.adminId, reason: 'agent_release' },
+        { kind: 'system' },
+      );
+      expect(released.revokedTokenJtis).toHaveLength(1);
+
+      await expect.poll(() => holder.closed(), { timeout: 4000 }).toBe(true);
+      await expect.poll(() => registry.isHolderLive(registered.agent_id)).toBe(false);
+      expect((await registerRaw(world, registered.token)).error?.code).toBe(-32001);
+      const claimed = await register(jwt);
+      expect(claimed.agent_id).toBe(registered.agent_id);
+    }, 10_000);
+  });
+
   describe('a retired Agent with an open stream', () => {
     it('is cut by the re-verification pass with participant_retired', async () => {
       await start({ wire: { reverifyIntervalSeconds: 1 } });

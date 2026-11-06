@@ -521,17 +521,19 @@ export function createEnrollment(deps: EnrollmentDeps): Enrollment {
           requireAdminCaller(caller);
         }
 
+        // The UPDATE first: it waits for a renewal holding the Agent row, so the
+        // blocklist statement below sees the token that renewal committed (PRY-094).
+        await trx
+          .updateTable('agents')
+          .set({ last_worker_jti: null })
+          .where('id', '=', input.agentId)
+          .execute();
         const revokedTokenJtis = await blocklistWorkerTokens(trx, {
           selector: { agentId: input.agentId },
           expiresAfter: cutoff(now()),
           reason: input.reason,
           revokedBy: input.revokedBy,
         });
-        await trx
-          .updateTable('agents')
-          .set({ last_worker_jti: null })
-          .where('id', '=', input.agentId)
-          .execute();
         return { revokedTokenJtis };
       });
     },

@@ -6,6 +6,8 @@ export type CliErrorCode =
   | 'HIVE_ALREADY_INITIALIZED'
   | 'OPERATOR_ID_INVALID'
   | 'OPERATOR_ID_NOT_ADMIN'
+  // ADR-026 `agent release`: --operator-id missing or not the owner of the Agent.
+  | 'OPERATOR_ID_NOT_OWNER'
   | 'CONFIRMATION_DECLINED'
   | 'INTERRUPTED'
   | 'CONFIG_INVALID'

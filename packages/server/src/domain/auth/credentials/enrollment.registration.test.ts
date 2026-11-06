@@ -602,6 +602,77 @@ describe(`registration primitives (${PG_URL ? 'postgres' : 'sqlite'})`, () => {
       });
     });
 
+    // PRY-094: hivectl agent release racing a renewal of the holder. Whichever commits
+    // first, no token of the holder survives: the renewal loses its CAS, or its new token
+    // is in the blocklist.
+    it('races a renewal: the holder ends with no usable token', async () => {
+      const identity = await enrollmentIdentity();
+      const { agent, token: first } = await create(identity, 'docs-bot');
+
+      const [renewal, released] = await Promise.allSettled([
+        enrollment.renewWorkerToken({ agentId: agent.id, presentedJti: first.jti }),
+        enrollment.revokeWorkerTokens(
+          { agentId: agent.id, revokedBy: world.nonAdminHivekeeperId, reason: 'agent_release' },
+          { kind: 'system' },
+        ),
+      ]);
+
+      expect(released.status).toBe('fulfilled');
+      expect(await revocationReason(first.jti)).toBe('agent_release');
+      if (renewal.status === 'fulfilled') {
+        expect(await revocationReason(renewal.value.jti)).toBe('agent_release');
+      } else {
+        const err = renewal.reason as AuthError;
+        expect([err.code, err.subCode]).toEqual([
+          'CREDENTIAL_INAUTHENTIC',
+          'holder_proof_superseded',
+        ]);
+      }
+      const row = await world.db
+        .selectFrom('agents')
+        .select('last_worker_jti')
+        .where('id', '=', agent.id)
+        .executeTakeFirstOrThrow();
+      expect(row.last_worker_jti).toBeNull();
+    });
+
+    // Postgres: a renewal holds the Agent row with its new token uncommitted while the
+    // release starts; the release must still blocklist that token once it commits.
+    it.runIf(PG_URL)(
+      'blocklists a token whose renewal commits while the release waits',
+      async () => {
+        const identity = await enrollmentIdentity();
+        const { agent, token: first } = await create(identity, 'docs-bot');
+        let renewedJti!: string;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        let locked!: () => void;
+        const rowLocked = new Promise<void>((resolve) => (locked = resolve));
+        const renewal = world.db.transaction().execute(async (trx) => {
+          const token = await enrollment.issueWorkerToken(
+            { agentId: agent.id, mode: 'renew', presentedJti: first.jti },
+            trx,
+          );
+          renewedJti = token.jti;
+          locked();
+          await gate;
+        });
+        await rowLocked;
+
+        const releasing = enrollment.revokeWorkerTokens(
+          { agentId: agent.id, revokedBy: world.nonAdminHivekeeperId, reason: 'agent_release' },
+          { kind: 'system' },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        release();
+        await renewal;
+        const result = await releasing;
+
+        expect(result.revokedTokenJtis).toContain(renewedJti);
+        expect(await revocationReason(renewedJti)).toBe('agent_release');
+      },
+    );
+
     it('is idempotent: a second call returns no tokens', async () => {
       const identity = await enrollmentIdentity();
       const { agent } = await create(identity, 'docs-bot');
