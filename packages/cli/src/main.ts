@@ -26,6 +26,13 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  // Fast path: `hivectl mcp proxy` is launched by Claude Code per session and
+  // must answer `server/discover` within 5 s, with stdout reserved for MCP.
+  if (argv.length === 4 && argv[2] === 'mcp' && argv[3] === 'proxy') {
+    const { runMcpProxy } = await import('./commands/mcp/proxy.js');
+    return runMcpProxy();
+  }
+
   const { buildProgram, closeRuntime } = await import('./program.js');
   const { program, getExitCode } = buildProgram();
   try {

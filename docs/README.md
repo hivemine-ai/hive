@@ -13,6 +13,7 @@ This directory grows incrementally as PRYs close. Each component gets one user-f
 - **[hivectl](hivectl.md)** — Operator CLI: bootstrap a Hive, manage Hivekeepers / Agents / credentials, query the audit log, run the server, install OS-supervised service. 10 admin subcommand groups across `init` / `migrate` / `serve` / `service` / `config` / `hive` / `hivekeeper` / `agent` / `credential` / `audit`, plus the network client `watch` (see below).
 
 - **[hivectl watch](hivectl-watch.md)** — Listen to one participant's mailbox over a single outbound connection: the metadata event line, `--once`, `--exec`, the worker recipe with `claude -p --resume`, error codes and `HIVE_WATCH_*` configuration.
+- **[hivectl mcp proxy](hivectl-mcp-proxy.md)** — The local MCP server of a Claude Code session: registration as a named Worker, the two local tools, renewal, restart without claiming, local state and error codes.
 
 ## Operator guides
 

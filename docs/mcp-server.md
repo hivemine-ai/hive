@@ -289,7 +289,7 @@ Clients can pass their own id via the configured header (default `x-request-id`)
 
 ## Clients via `hivectl mcp proxy`
 
-**Why a proxy.** A Claude Code session reaches Hive through a local process, `hivectl mcp proxy`, instead of a Worker credential written into its configuration. Claude Code talks to the proxy over stdio; the proxy talks to Hive over Streamable HTTP, revision `2026-07-28`. The proxy holds an **enrollment credential** of its owner (a Hivekeeper), registers the session as a Worker with `register_session`, and from then on calls every tool with the Worker token it got back.
+**Why a proxy.** A Claude Code session reaches Hive through a local process, [`hivectl mcp proxy`](./hivectl-mcp-proxy.md), instead of a Worker credential written into its configuration. Claude Code talks to the proxy over stdio; the proxy talks to Hive over Streamable HTTP, revision `2026-07-28`. The proxy holds an **enrollment credential** of its owner (a Hivekeeper), registers the session as a Worker with `register_session`, and from then on calls every tool with the Worker token it got back.
 
 **`register_session`.** Input: `name` (an agent name, `[a-z][a-z0-9-]*`), `description` (one line, 1 to 280 characters, no control characters) and optional `capabilities` (array of strings). Output: `{ agent_ref, agent_id, token, expires_at }`, where `agent_ref` is `<name>@<owner-local>.<hive>` and `token` is the Worker token (a secret: the server never logs it and marks the response `Cache-Control: no-store`). Called with the enrollment credential, it:
 
