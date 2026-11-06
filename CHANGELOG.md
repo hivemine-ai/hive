@@ -8,9 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **`hivectl serve` refuses to start on a database with pending migrations** (PRY-096, INC-2026-010). Upgrading from v0.2.x and running `serve` used to boot on the old schema without a warning: `credential issue --enrollment` failed with `internal error` and `agent list` dropped `origin`. `serve` now checks the schema before binding (read-only, nothing is applied), logs `migrations_pending` and exits with code `4`: ``database schema is out of date (MIGRATIONS_PENDING): ... back up the database and run `hivectl migrate up` ``. `serve` never migrates by itself; `init` and `migrate up` are unchanged. The deprecated `node packages/server/dist/main.js` entry point refuses the same way (exit 1, same message in `wire_boot_failed`).
-- **The systemd unit of `hivectl service install` sets `RestartPreventExitStatus=4`**, so a refusal such as pending migrations stops the restarts instead of looping every 5 seconds. Existing units pick it up with `hivectl service uninstall` and `install` again.
+- **`hivectl serve` and the admin commands refuse to run on a schema that does not match the binary** (PRY-096, INC-2026-010). Upgrading from v0.2.x and running `serve` used to boot on the old schema without a warning: `credential issue --enrollment` failed with `internal error` and `agent list` dropped `origin`. Every command that opens the database, except `init` and `migrate`, now checks the schema first (read-only, nothing is applied) and exits with code `4`:
+  - older schema: ``database schema is out of date (MIGRATIONS_PENDING): the database has N pending migration(s): <names>; back up the database and run `hivectl migrate up` ``;
+  - newer schema (migrated by a later `hivectl`): `database schema is newer than this hivectl (MIGRATIONS_UNKNOWN): the database has migrations unknown to this binary: <names>; upgrade hivectl`.
+
+  `serve` also logs `migrations_pending` or `migrations_unknown`. Nothing migrates by itself; `init` and `migrate up` are unchanged. The deprecated `node packages/server/dist/main.js` entry point refuses too: it exits 1 and logs `wire_boot_failed` with the same text after the colon (without the `database schema is ... (MIGRATIONS_*):` prefix).
+- **`hivectl migrate status` lists pending and unknown migrations** besides the applied ones (`pending` and `unknown` in JSON and YAML, two more columns in the table).
+- **The systemd unit of `hivectl service install` sets `RestartPreventExitStatus=4`**, so a refusal such as pending migrations stops the restarts instead of looping every 5 seconds. Units installed by an earlier version do not have it: run `hivectl service uninstall` and `hivectl service install` again to get it. launchd has no equivalent and retries after its throttle interval.
 - **Upgrade notes corrected**: the `[0.3.0]` and `[0.2.0]` entries below, `deployment/README.md` and `docs/hivectl.md` claimed the schema migrates on start. It never did: run `hivectl migrate up` after a backup.
+
+### Changed
+
+- **`@hive/server`: `buildWire` and `startCli` require an up-to-date schema.** They reject with `PendingMigrationsError` or `UnknownMigrationsError` instead of starting; embedders call `migrateToLatest` (the code behind `hivectl migrate up`) first. New exports: `assertSchemaUpToDate`, `getSchemaStatus`, `listPendingMigrations`, `listUnknownMigrations`, `ALL_MIGRATIONS` and both error classes with their `is*` guards.
 
 ## [0.3.0] - 2026-11-06
 

@@ -210,10 +210,10 @@ In JSON or YAML mode, `init` stays silent during bootstrap and serializes the fu
 ```
 hivectl migrate up        # apply all pending migrations
 hivectl migrate down --yes  # roll back the most recent migration (destructive)
-hivectl migrate status      # list applied migrations
+hivectl migrate status      # list applied, pending and unknown migrations
 ```
 
-Wraps `Kysely.Migrator` (portable SQLite/PG). `init` runs migrations automatically. `serve` never does: after upgrading `hivectl`, back up the database (SQLite file or Postgres dump) and run `hivectl migrate up` before `serve`, which refuses to start while migrations are pending (see [`serve`](#serve)).
+Wraps `Kysely.Migrator` (portable SQLite/PG). `init` runs migrations automatically. `serve` never does: after upgrading `hivectl`, back up the database (SQLite file or Postgres dump) and run `hivectl migrate up` before `serve`. Until then `serve` and every other command that opens the database (all but `init` and `migrate`) exit with code `4` and `MIGRATIONS_PENDING` (see [`serve`](#serve)). A database migrated by a newer `hivectl` is refused the same way with `MIGRATIONS_UNKNOWN` (`upgrade hivectl`). `migrate status` shows the pending and unknown migrations.
 
 ### `hive`
 
@@ -320,13 +320,21 @@ hivectl serve [--port N] [--host <addr>] [--log-level <level>] [--log-pretty]
 
 Runs the Hive MCP server in the foreground (PRY-031). Blocks until SIGINT/SIGTERM. Reuses the server `buildWire` directly — no daemonize, no PID file (delegate-to-OS supervision via `service install`).
 
-**Pending migrations (PRY-096).** Before binding, `serve` checks the database schema (read-only). If any migration of this `hivectl` version is not applied, it writes nothing, logs `migrations_pending` and exits with code `4`:
+**Schema check (PRY-096).** Before binding, `serve` checks the database schema (read-only). If any migration of this `hivectl` version is not applied, it writes nothing, logs `migrations_pending` and exits with code `4`:
 
 ```
 error: database schema is out of date (MIGRATIONS_PENDING): the database has 2 pending migration(s): 20261105120000_enrollment-agents-credentials, 20261105130000_audit-enrollment-categories; back up the database and run `hivectl migrate up`
 ```
 
-The systemd unit written by `service install` sets `RestartPreventExitStatus=4`, so systemd does not restart into the same refusal; launchd retries after its throttle interval until the migrations are applied.
+If the database has migrations this binary does not know (a newer `hivectl` migrated it), it logs `migrations_unknown` and exits with code `4`:
+
+```
+error: database schema is newer than this hivectl (MIGRATIONS_UNKNOWN): the database has migrations unknown to this binary: <names>; upgrade hivectl
+```
+
+The admin commands (`agent`, `credential`, `hivekeeper`, `hive`, `audit`, ...) run the same check.
+
+The systemd unit written by `service install` sets `RestartPreventExitStatus=4`, so systemd does not restart into the same refusal (units installed before v0.3.1: `service uninstall` and `service install` again); launchd retries after its throttle interval until the migrations are applied.
 
 Bind-address precedence (highest wins): `--host` flag → `HIVE_MCP_HTTP_HOST` env → `<workingDir>/config.json`'s `httpHost` (set by `config network`) → default `127.0.0.1`.
 

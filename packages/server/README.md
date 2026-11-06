@@ -21,13 +21,14 @@ It does **not** implement: the operator CLI (that is `@hive/cli`), Docker / prod
 
 The package barrel (`./src/index.ts`) exports:
 
-- **Persistence:** `createDb`, `resolveDbConfigFromEnv`, `migrateToLatest`, `migrateDown`, `listPendingMigrations`, `assertNoPendingMigrations` (`PendingMigrationsError`), `acquireLock`, `releaseLock`, `sweepExpiredLocks`, `dateToIso` and friends.
+- **Persistence:** `createDb`, `resolveDbConfigFromEnv`, `migrateToLatest`, `migrateDown`, `getSchemaStatus`, `listPendingMigrations`, `listUnknownMigrations`, `assertSchemaUpToDate` (`PendingMigrationsError`, `UnknownMigrationsError`), `ALL_MIGRATIONS`, `acquireLock`, `releaseLock`, `sweepExpiredLocks`, `dateToIso` and friends.
 - **Auth domain:** `AuthError`, `isAuthError`, `createVerifier`, `createIssuer`, `createRotator`, `createRevoker`, `createParticipantsReadRepo`, `createParticipantsWriteRepo`, `loadBlocklist`, `requireAdminCaller`, `generateKeypair`, `writeKeypairToDisk`, `loadAllKeypairs`, `assertPrivatePemPerms`, `buildJwkSet`, plus types: `SigningKey`, `IdentityContext`, `CallerContext`, `Participant`, `Hivekeeper`, `Agent`.
 - **Cells domain:** `createCellsRepo`, `createSender`, `createReader`, `createCellEvents`, `CellError`, `isCellError`, `mapKindToOwnerKind`, plus types: `Cell`, `Message`, `MessageView`, `MessageType`, `MessageState`, `CellState`, `SendMessageInput`, `SendResult`, `ReadMailboxInput`, `MarkReadInput`, `MarkReadResult`, `RetentionPolicy`, `SummarizeUnreadResult`.
 - **Visibility domain:** `createVisibilityEngine`, `createVisibilityEngineForProduction`, `stubVisibilityEngine`, plus types: `VisibilityEngine`, `CanSendInput`, `CanSeeInput`, `DenialReason`, `SenderClass`, `RecipientClass`.
 - **Audit domain:** `createAuditRepo`, `createAuditRecorder`, `getAuditRecordFailureCount`, `resetAuditRecordFailureCounters`, plus types: `AuditEvent`, `NewAuditEvent`, `AuditEventCategory`, `AuditError`.
 - **Notifications domain (Waggle + Presence):** `createPresenceRegistry`, `createConsolidator`, `createBuilder`, `createReplay`, `createPipeline`, `createNotificationsForProduction`, `WaggleError`, `isWaggleError`, plus types: `SubscriberHandle`, `SubscribeInput`, `Subscription`, `PresenceSnapshot`, `WaggleNotification`, `WaggleKind`, `Notifications`.
 - **Composition root + entry point:** `buildWire(deps, overrides?)` returns a `Wire` with `start()` / `stop()` / `port()`. `main.ts` is the binary entry point — `node dist/main.js` boots a process with SIGTERM/SIGINT handlers.
+  - **Schema contract (v0.3.1, PRY-096):** `buildWire` and `startCli` require a database whose applied migrations match `ALL_MIGRATIONS` exactly. Both run `assertSchemaUpToDate` (read-only) after loading the signing keys and reject with `PendingMigrationsError` (schema older than the package: call `migrateToLatest` first, which is what `hivectl migrate up` does) or `UnknownMigrationsError` (schema migrated by a newer version). Neither function migrates.
 - **Observability:** `createLogger`, `DEFAULT_REDACT_PATHS`.
 - **Convenience re-export:** `uuidv7` (RFC 9562).
 
